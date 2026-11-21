@@ -149,15 +149,15 @@ uint64_t n64_rc_mfc0(n64_machine *m, int r) __attribute__((weak));
     uint8_t *const ram = h->rdram;                                                                                   \
     uint32_t *const gen = h->rdram_gen;                                                                              \
     const uint64_t rsz = h->rdram_size;                                                                              \
-    const uint32_t plo = h->rc_lo, plen = h->rc_len;                                                                 \
+    uint32_t plo, plen; /* the range inline stores leave to the core: RC_OWN_RANGE */                                \
+    RC_OWN_RANGE();                                                                                                  \
     const uint64_t sr = h->cpu.cop0[12]; /* Status: constant while lifted code runs */                               \
-    uint32_t mrep = h->mi_mode & 0x80u;                                                                              \
     uint64_t hi = h->cpu.hi, lo = h->cpu.lo, dz = 0;                                                                 \
     uint64_t epc = 0, enp = 0, jt = 0;                                                                               \
     int tk = 0;                                                                                                      \
     unsigned ehint = 0;                                                                                              \
     bool edl = false;                                                                                                \
-    (void)ram; (void)gen; (void)rsz; (void)plo; (void)plen; (void)sr; (void)mrep; (void)dz
+    (void)ram; (void)gen; (void)rsz; (void)plo; (void)plen; (void)sr; (void)dz
 
 #define RC_M ((n64_machine *)(void *)h)
 
@@ -264,11 +264,16 @@ uint64_t n64_rc_mfc0(n64_machine *m, int r) __attribute__((weak));
         return;                                                                                                      \
     } while (0)
 
+/* The RDRAM range whose stores lifted code leaves to the core (RC_OWN): this function's own code (a store into it
+ * stops it), or all of RDRAM in MI repeat mode (the next store is repeated), so an inline store tests one range
+ * (XBA-295). */
+#define RC_OWN_RANGE()                                                                                               \
+    ((h->mi_mode & 0x80u) ? (plo = 0, plen = 0x80000000u) : (plo = h->rc_lo, plen = h->rc_len))
+
 /* Calls into the core: the clock and count go out; the clock, the stop (0 when an interrupt is pending or the core
- * wrote into this function's code) and the MI repeat mode come back. */
+ * wrote into this function's code) and the MI repeat mode (RC_OWN_RANGE) come back. */
 #define RC_SYNC_OUT() (h->now = now, h->instructions = ic)
-#define RC_SYNC_IN()                                                                                                 \
-    (now = h->now, stop = (h->cpu.irq || h->rc_hit) ? 0 : h->stop_at, mrep = h->mi_mode & 0x80u)
+#define RC_SYNC_IN() (now = h->now, stop = (h->cpu.irq || h->rc_hit) ? 0 : h->stop_at, RC_OWN_RANGE())
 
 /* ---- memory ---- */
 static inline uint64_t rc_be1(const uint8_t *p) { return p[0]; }
@@ -324,7 +329,7 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
 /* RC_STORE_OFF for the aligned inline stores (XBA-277): below rsz it is the same offset, and at or above it neither
  * form stores inline. One compare instead of two (no new live value: arm64's register allocation is tight here). */
 #define RC_STORE_OFF_W(A) (((A) - RC_KSEG0) & ~0x20000000ull)
-/* Does a store of SZ bytes at RDRAM offset O touch this function's own code? */
+/* Does a store of SZ bytes at RDRAM offset O touch this function's own code (or is MI repeat mode on)? */
 #define RC_OWN(O, SZ) ((uint32_t)((O) - plo + (SZ) - 1) < plen + (SZ) - 1)
 
 /* Aligned loads (LB LBU LH LHU LW LWU LD, the COP1 loads): SZ the size, OUT the destination, CONV the extension. */
@@ -350,7 +355,7 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
 #define RC_STORE(A, SZ, V, FAULT, CONT)                                                                              \
     do {                                                                                                             \
         uint64_t qa_ = (A), qo_ = RC_STORE_OFF_W(qa_);                                                               \
-        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !mrep && !RC_OWN((uint32_t)qo_, SZ), 1)) {            \
+        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !RC_OWN((uint32_t)qo_, SZ), 1)) {                     \
             rc_wbe##SZ(ram + qo_, (V));                                                                              \
             gen[qo_ >> 12]++;                                                                                        \
         } else {                                                                                                     \
@@ -420,7 +425,7 @@ static inline void rc_wbe8(uint8_t *p, uint64_t v)
 #define RC_STORE_RAM(A, SZ, V, HAND)                                                                                 \
     do {                                                                                                             \
         uint64_t qa_ = (A), qo_ = RC_STORE_OFF_W(qa_);                                                               \
-        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !mrep && !RC_OWN((uint32_t)qo_, SZ), 1)) {            \
+        if (__builtin_expect(qo_ < rsz && !(qa_ & (SZ - 1)) && !RC_OWN((uint32_t)qo_, SZ), 1)) {                     \
             rc_wbe##SZ(ram + qo_, (V));                                                                              \
             gen[qo_ >> 12]++;                                                                                        \
         } else {                                                                                                     \
