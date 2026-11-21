@@ -2,7 +2,7 @@
  * swap mode) gives the floats its generic way (gpu_read through read32) gives, bit for bit: every vertex format it
  * takes, each swap mode, signed / unsigned, normalised / integer, with and without an exponent adjustment, strides
  * and offsets that are not multiples of the format's size, words of noise (every 16-bit pattern, half floats among
- * them). Prints the time of both ways for 8_8_8_8. */
+ * them). read_bytes (texture rows) likewise, at any address and length. Prints the time of both ways for 8_8_8_8. */
 #include "../runtime/xenos_gl.c"
 
 #include <time.h>
@@ -75,6 +75,24 @@ int main(void)
                                 fails++;
                             }
                         }
+    /* read_bytes (texture rows) with memory at hand reads whole dwords at a time (WP-36): the same bytes, any start,
+     * length and swap mode */
+    {
+        uint8_t ra[300], rb[300];
+        uint32_t r = 1;
+        for (int k = 0; k < 20000; k++, cases++) {
+            r ^= r << 13, r ^= r >> 17, r ^= r << 5;
+            uint32_t addr = r % (PHYS - 512), n = (r >> 20) % 290, e = (r >> 11) & 3;
+            memset(ra, 0x5A, sizeof ra), memset(rb, 0x5A, sizeof rb);
+            read_bytes(&gen, addr, n, e, ra);
+            read_bytes(&mem, addr, n, e, rb);
+            if (memcmp(ra, rb, sizeof ra)) {
+                fprintf(stderr, "read_bytes at %08X, %u bytes, endian %u: memory and read32 differ\n", addr, n, e);
+                fails++;
+                break;
+            }
+        }
+    }
     attr at = {0, 0, 6, 1, 0, 0, 0};
     double t0 = now_ms();
     for (int r = 0; r < 20; r++)

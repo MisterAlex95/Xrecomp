@@ -3328,11 +3328,39 @@ static int64_t tiled3d(int32_t x, int32_t y, int32_t z, uint32_t pitch_blocks, u
            ((oi >> 5) & 7) << 8 | (oi >> 8) << 12;
 }
 
+/* WP-36: `words` aligned dwords from physical memory with the swap mode known at compile time: each one's bytes as
+ * the little-endian host stores the word gpu_read gives */
+static inline __attribute__((always_inline)) void read_words(const uint8_t *src, uint32_t words, uint32_t endian,
+                                                             uint8_t *out)
+{
+    for (uint32_t k = 0; k < words; k++) {
+        uint32_t w;
+        memcpy(&w, src + 4 * (size_t)k, 4);
+        w = gpu_swap(w, endian);
+        memcpy(out + 4 * (size_t)k, &w, 4);
+    }
+}
+
 /* `n` bytes at a guest physical address as the GPU reads them (after its swap), a dword at a time */
 static void read_bytes(const xenos_cp *cp, uint32_t addr, uint32_t n, uint32_t endian, uint8_t *out)
 {
     uint32_t i = 0;
     while (i < n) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        uint32_t at = (addr + i) & 0x1FFFFFFFu;
+        if (cp->mem && !(at & 3) && n - i >= 4) { /* the whole dwords, up to the end of physical memory */
+            uint32_t words = (n - i) / 4, room = (0x20000000u - at) / 4;
+            words = words < room ? words : room;
+            switch (endian & 3) {
+            case 0: read_words(cp->mem + at, words, 0, out + i); break;
+            case 1: read_words(cp->mem + at, words, 1, out + i); break;
+            case 2: read_words(cp->mem + at, words, 2, out + i); break;
+            default: read_words(cp->mem + at, words, 3, out + i); break;
+            }
+            i += 4 * words;
+            continue;
+        }
+#endif
         uint32_t a = addr + i, word = gpu_read(cp, a & ~3u, endian);
         for (uint32_t b = a & 3; b < 4 && i < n; b++, i++)
             out[i] = (uint8_t)(word >> (8 * b));
