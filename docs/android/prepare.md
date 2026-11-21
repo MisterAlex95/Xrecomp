@@ -222,7 +222,8 @@ The same driver runs on the device and on hosts/CI (with the NDK's clang): no CM
      -c <file.c> -o <work>/obj/<key>.o
 ```
 
-Plus `-mno-outline-atomics` (XBA-277) and, on a device with the ARMv8.1 atomics, `-march=armv8-a+lse` ([CPU
+Plus `-mno-outline-atomics` (XBA-277), `-fno-math-errno` (Android clang's default, written out: see [lifter speed
+6](#measurements)) and, on a device with the ARMv8.1 atomics, `-march=armv8-a+lse` ([CPU
 features](#cpu-features-xba-313)).
 `WIN32_LEAN_AND_MEAN`, `NOMINMAX` and `NDEBUG` are what the CMake build gives the same files (the template's
 definitions, a Release-type build). Sources: `src/main.c`, `src/recomp_manual.c`, `src/title/*.c` (the profile;
@@ -746,6 +747,43 @@ x86-64 is clang 19, exe layout. arm64 is gcc 14 cross (Debian aarch64-linux-gnu)
 The float workloads keep their data in guest globals, not on the stack, so nothing changes there. A title's x87 code
 spills to the stack, and that is where its share of the gain shows. The generated C changes: **every pack is stale**
 and has to be prepared again.
+
+**fistp without a libm call; math functions without errno (lifter speed 6).** `recomp_fist` took its limit from
+`ldexp(1.0, bits - 1)`, which no compiler folds: every `fistp` (MSVC's `_ftol`, so every float-to-int cast of a title)
+called into libm, about 50 instructions, and the guest registers were reloaded after the call. The limit is the exact
+constant 2^(bits-1) now, and the rounding is the one `recomp_frndint` uses (`recomp_round_rc`) without its zero-sign
+and finite checks, which an integer store does not need. The non-arm64 rounding to nearest tests a tie's parity on the
+integer instead of `fmod`. `tools/recomp/test_fp_round24.py` compares `fist` (16/32/64, the four RCs) and `frndint`
+with the code before, bit for bit, now also at `-O2 -fno-math-errno` and on fist's limits 2^15, 2^31, 2^63; 0
+differences on x86-64 clang and gcc, and on arm64 gcc 14 and NDK clang 19 under qemu.
+
+Prepare also passes `-fno-math-errno`. An Android target has it by default (the objects are byte-identical with and
+without), so on the device the gain is the `fistp` change alone. The flag is for the other targets: the desktop driver
+and the game template now pass it too, and `tools.bench` builds for an aarch64 glibc root, where errno was on and
+made the x87 numbers worse than the device's. With errno, `sqrt` keeps a libm call on its NaN path and the precision-24
+helper's `frexp` / `ldexp` may write memory, so the guest registers were reloaded after each x87 operation. Bench
+variant `matherrno` puts errno back.
+
+Executed instructions, `tools.bench icount`, scale 0.1. arm64: NDK clang 19 against an aarch64 glibc root under qemu,
+shared layout with the TLS_SLOT_APP read (`cpuslot`), errno off before and after, which is the device's code. x86-64:
+clang 19, exe layout, main -> branch (errno on before, as a Linux build had it). Checksums identical everywhere.
+
+| Workload | arm64 pack (device) | x86-64 |
+|---|---|---|
+| w_stack (one fistp per iteration) | 24.80M -> 17.40M (-29.8 %) | 25.10M -> 18.10M (-27.9 %) |
+| w_stkmix (one fistp per iteration) | 5.97M -> 3.63M (-39.2 %) | 6.08M -> 3.89M (-36.0 %) |
+| w_x87 | unchanged | 4.96M -> 4.03M (-18.6 %, the flag) |
+| w_stack, x87 precision 24 | 27.10M -> 19.70M (-27.3 %) | 26.80M -> 20.10M (-25.0 %) |
+| w_x87, x87 precision 24 | unchanged | 8.52M -> 7.72M (-9.4 %) |
+| others | unchanged | unchanged |
+
+The android30 object of the bench lift has no `ldexp` call left, and its `.text` is 388 bytes smaller (13,196 ->
+12,808). On the glibc proxy the flag alone took arm64 `w_x87` from 5.12M to 3.55M (-31 %); the device never had that
+cost. Measured and not taken: reading `g_xbox_mem_offset` through an asm with no memory operand, so that it survives
+calls and fences in a register (arm64 pack: `w_icall` -2.2 %, `w_vcall` -1.1 %, `w_stack` -3.4 %, `w_lock` -6.9 %).
+The asm has no ordering against the store that sets the base, which test harnesses make in the same file as lifted
+code, and it is ELF-only; a function-local base declared by the lifter would be the portable way. The headers
+changed: **every pack is stale** and has to be prepared again.
 
 **Where a Prepare spends its time (XBA-209).** A title-size synthetic title of our own: `tools.bench lift --copies
 3000` (the bench corpus 3000 times: 39,013 functions, 2.3 MB of code, 96 MB of C), `tools.prepare --android` with
