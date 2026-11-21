@@ -1179,6 +1179,19 @@ buffer on and random ROM wait states. The NDS lifter keeps it off (byte-identica
 output). Every pack of every console is stale (the toolkit digest); `GBA_RECOMP_ABI` and the save state format are
 unchanged.
 
+**GBA: speed 6.** The instructions lifted code in the cartridge hands to the interpreter (the rest of a segment an
+event falls inside) run from the interpreter's predecoded blocks instead of a step() each: the block at the handed
+address is decoded with at most the instructions the dispatcher may run in sequence, cut there, and does not go on
+after a taken branch (the earlier attempt, « Not taken » above, decoded whole blocks at every new address and ran
+past them). IWRAM code keeps step() (its blocks would be checked against IWRAM after every lifted call: slower).
+`rc_pf_fetch_n`'s two frequent cases (at the buffer's head with it empty and no read completed since; a refill's new
+start) take a front that saves no registers, 72 % of the bench's calls; the rest goes to the former function. The GBA
+bench goes from 7.36M to 7.09M x86-64 instructions per frame (-3.8 %; the prefetch functions 2.14M -> 1.95M, the
+handed instructions 0.93M -> about 0.85M), arm64 (gcc) 6.23M -> 6.11M (-1.9 %), with the same hashes over 600 frames,
+lockstep with the interpreter (gcc and clang packs), `GBA_RC_VERIFY` and the fuzzers. Every pack of every console is
+stale (the toolkit digest); old packs stay correct and get the handed part at once. `GBA_RECOMP_ABI`, the save state
+format and the NDS lifter's output are unchanged.
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes

@@ -94,7 +94,9 @@ cycles per instruction). A literal folded from the function's own cartridge regi
 instruction): its stop of the buffer is computed there, its body keeps the load's wait states. `rc_pf_fetch_n` works
 in closed form: fetches back to back take an opcode a cycle from the buffer while it has some (it gains one per
 sequential read), then each waits for the opcode being read. A run never crosses a label, and its result is exactly N
-calls of `rc_pf_fetch` (`consoles/gba/tests/test_prefetch.c`, random states). A segment that is one run checks the next
+calls of `rc_pf_fetch` (`consoles/gba/tests/test_prefetch.c`, random states). Its two frequent cases (at the buffer's head with it
+empty and no read completed since; a new start at a refill's target) take a front without a stack frame, the rest
+`rc_pf_fetch_n_mid`. A segment that is one run checks the next
 event with the run's exact cycles once the bound (the most a fetch can cost, for each) fails (`RC_STOP_IN` /
 `RC_CHECK_IN`); a segment of plain instructions, literals and conditional jumps does the same on a copy of the buffer's
 state (`RC_STOP_X` / `RC_CHECK_X`), as if no jump were taken (a jump taken leaves earlier). Fewer segments go to the
