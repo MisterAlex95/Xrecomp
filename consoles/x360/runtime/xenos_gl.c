@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <pthread.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3153,7 +3154,7 @@ static uint8_t unorm8(uint32_t v, unsigned bits)
 
 /* `s` holds one texel of tex_format(format)->bytes bytes and no more: the last texel of an 8 or 16 bpp level ends its
  * buffer, which can end its page (a 1024 x 768 k_8 one in Warhammer - Battle March, XBA-318) */
-static void texel(uint32_t format, const uint8_t *s, uint8_t out[4])
+static inline __attribute__((always_inline)) void texel(uint32_t format, const uint8_t *s, uint8_t out[4])
 {
     unsigned bytes = format == 2 || format == 8 || format == 9 ? 1 : (format == 10 || format == 3 || format == 4 || format == 5 || format == 15) ? 2 : 4;
     uint32_t v = s[0] | (bytes > 1 ? (uint32_t)s[1] << 8 : 0),
@@ -3201,8 +3202,19 @@ static float half_bits(uint32_t h)
     return s ? -v : v;
 }
 
+/* WP-36: half_bits of every 16-bit pattern, made once by half_bits itself (a half-float texel took up to 8 divisions);
+ * texel_f reads it, decode_texture makes it before a float format's first texel */
+static float half_lut[65536];
+static pthread_once_t half_once = PTHREAD_ONCE_INIT;
+static void half_lut_init(void)
+{
+    for (uint32_t i = 0; i < 65536; i++)
+        half_lut[i] = half_bits(i);
+}
+
 /* a float-decoded texel: 16-bit normalised (signed per the fetch constant's sign of X), halves, floats, depth */
-static void texel_f(uint32_t format, const uint8_t *s, uint32_t sign, float out[4])
+static inline __attribute__((always_inline)) void texel_f(uint32_t format, const uint8_t *s, uint32_t sign,
+                                                          float out[4])
 {
     out[0] = out[1] = out[2] = 0.0f;
     out[3] = 1.0f;
@@ -3229,7 +3241,7 @@ static void texel_f(uint32_t format, const uint8_t *s, uint32_t sign, float out[
     case 32: {
         int n = format == 30 ? 1 : format == 31 ? 2 : 4;
         for (int i = 0; i < n; i++)
-            out[i] = half_bits(s[2 * i] | (uint32_t)s[2 * i + 1] << 8);
+            out[i] = half_lut[s[2 * i] | (uint32_t)s[2 * i + 1] << 8];
         if (n == 1)
             out[1] = out[2] = out[3] = out[0];
         break;
@@ -3259,6 +3271,42 @@ static void texel_f(uint32_t format, const uint8_t *s, uint32_t sign, float out[
     default: break;
     }
 }
+
+/* WP-36: a row of n texels of a 1-texel-block format, `bytes` apart: the format chosen once, then a loop with texel /
+ * texel_f folded for it (the usual formats; any other through the same functions with the format at run time) */
+#define TEXEL_ROW(F)                                                                                                   \
+    case F:                                                                                                            \
+        for (uint32_t i = 0; i < n; i++)                                                                               \
+            texel(F, s + (size_t)i * bytes, o + 4 * (size_t)i);                                                        \
+        return;
+static void texel_row(uint32_t format, const uint8_t *s, unsigned bytes, uint8_t *o, uint32_t n)
+{
+    switch (format) {
+    TEXEL_ROW(2) TEXEL_ROW(3) TEXEL_ROW(4) TEXEL_ROW(5) TEXEL_ROW(6) TEXEL_ROW(7) TEXEL_ROW(10) TEXEL_ROW(14)
+    TEXEL_ROW(15)
+    default:
+        for (uint32_t i = 0; i < n; i++)
+            texel(format, s + (size_t)i * bytes, o + 4 * (size_t)i);
+    }
+}
+#undef TEXEL_ROW
+
+#define TEXEL_ROW_F(F)                                                                                                 \
+    case F:                                                                                                            \
+        for (uint32_t i = 0; i < n; i++)                                                                               \
+            texel_f(F, s + (size_t)i * bytes, sign, o + 4 * (size_t)i);                                                \
+        return;
+static void texel_row_f(uint32_t format, const uint8_t *s, unsigned bytes, uint32_t sign, float *o, uint32_t n)
+{
+    switch (format) {
+    TEXEL_ROW_F(22) TEXEL_ROW_F(24) TEXEL_ROW_F(25) TEXEL_ROW_F(26) TEXEL_ROW_F(30) TEXEL_ROW_F(31) TEXEL_ROW_F(32)
+    TEXEL_ROW_F(36)
+    default:
+        for (uint32_t i = 0; i < n; i++)
+            texel_f(format, s + (size_t)i * bytes, sign, o + 4 * (size_t)i);
+    }
+}
+#undef TEXEL_ROW_F
 
 static uint64_t fnv(const uint8_t *p, size_t n)
 {
@@ -3533,26 +3581,32 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
             return 0;
         }
         uint32_t sign = (fc[0] >> 2) & 3;
+        if (tf->is_float)
+            pthread_once(&half_once, half_lut_init);
         for (uint32_t z = 0; z < ld; z++) {
             size_t at = (size_t)z * lw * lh;
-            for (uint32_t by = 0; by < bh; by++)
+            for (uint32_t by = 0; by < bh; by++) {
+                if (tf->block != 4) { /* one texel a block: bw is lw */
+                    const uint8_t *s = src + z * slice_n + (size_t)by * bw * tf->bytes;
+                    if (tf->is_float)
+                        texel_row_f(tf->format, s, tf->bytes, sign, (float *)out->level[l] + (at + (size_t)by * lw) * 4,
+                                    bw);
+                    else
+                        texel_row(tf->format, s, tf->bytes, (uint8_t *)out->level[l] + (at + (size_t)by * lw) * 4, bw);
+                    continue;
+                }
                 for (uint32_t bx = 0; bx < bw; bx++) {
                     const uint8_t *s = src + z * slice_n + ((size_t)by * bw + bx) * tf->bytes;
-                    if (tf->block == 4) {
-                        uint8_t q[16][4];
-                        dxt_block(s, tf->format, q);
-                        uint8_t *o = out->level[l];
-                        for (uint32_t i = 0; i < 16; i++) {
-                            uint32_t tx = bx * 4 + i % 4, ty = by * 4 + i / 4;
-                            if (tx < lw && ty < lh)
-                                memcpy(o + (at + (size_t)ty * lw + tx) * 4, q[i], 4);
-                        }
-                    } else if (tf->is_float) {
-                        texel_f(tf->format, s, sign, (float *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
-                    } else {
-                        texel(tf->format, s, (uint8_t *)out->level[l] + (at + (size_t)by * lw + bx) * 4);
+                    uint8_t q[16][4];
+                    dxt_block(s, tf->format, q);
+                    uint8_t *o = out->level[l];
+                    for (uint32_t i = 0; i < 16; i++) {
+                        uint32_t tx = bx * 4 + i % 4, ty = by * 4 + i / 4;
+                        if (tx < lw && ty < lh)
+                            memcpy(o + (at + (size_t)ty * lw + tx) * 4, q[i], 4);
                     }
                 }
+            }
         }
         free(src);
     }
