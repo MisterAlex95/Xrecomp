@@ -920,6 +920,87 @@ static void test_imem_rewrite(void)
     CHECK(vec_eq(0x020, elem0), "VADD element 0 after the rewrite");
 }
 
+/* Loops that only wait (n64_rsp.c rsp_idle, RK_CDOWN: whole iterations counted at once when the RSP cannot leave them
+ * within its cycle budget): a run of any budget must leave the state and count of the same budget run one
+ * instruction per n64_rsp_run call (where nothing is ever skipped), from every phase of the loop. */
+static n64_rsp *loop_rsp(const uint32_t *prog, size_t n, uint32_t status_set)
+{
+    n64_rcp_bus bus = {rdram, RDRAM_SIZE, NULL, NULL, NULL, NULL, NULL};
+    n64_rsp *s = n64_rsp_create(bus);
+    uint8_t *m = n64_rsp_mem(s);
+    memset(m, 0, 0x2000);
+    n64_wbe32(m + 0x40, 0x12345678);
+    for (size_t i = 0; i < n; i++)
+        n64_wbe32(m + 0x1000 + 4 * i, prog[i]);
+    n64_rsp_write_reg(s, 8, 0);
+    n64_rsp_write_reg(s, 4, 0x5 | status_set);
+    return s;
+}
+
+static void loop_check(const char *what, const uint32_t *prog, size_t n, uint32_t status_set)
+{
+    static const uint32_t budgets[] = {1000, 1001, 4093, 12345, 65536, 1000000};
+    for (uint32_t k = 0; k < 64 + sizeof budgets / sizeof budgets[0]; k++) {
+        uint32_t b = k < 64 ? k : budgets[k - 64];
+        for (uint32_t pre = 0; pre < 6; pre++) { /* a first run of pre instructions: the loop entered at any phase */
+            n64_rsp *a = loop_rsp(prog, n, status_set), *r = loop_rsp(prog, n, status_set);
+            n64_rsp_run(a, pre);
+            for (uint32_t i = 0; i < pre; i++)
+                n64_rsp_run(r, 1);
+            uint32_t na = n64_rsp_run(a, b), nr = 0;
+            for (uint32_t i = 0; i < b && !n64_rsp_halted(r); i++)
+                nr += n64_rsp_run(r, 1);
+            size_t sz = n64_rsp_state_size(a);
+            uint8_t *sa = malloc(sz), *sr = malloc(sz);
+            if (sa && sr) {
+                n64_rsp_state_save(a, sa);
+                n64_rsp_state_save(r, sr);
+                CHECK(na == nr && memcmp(sa, sr, sz) == 0, "%s: budget %u after %u: %u vs %u instructions%s", what,
+                      b, pre, na, nr, memcmp(sa, sr, sz) ? ", states differ" : "");
+            }
+            free(sa);
+            free(sr);
+            n64_rsp_destroy(a);
+            n64_rsp_destroy(r);
+        }
+    }
+}
+#define LOOP_CHECK(what, status_set, ...)                                                                              \
+    do {                                                                                                               \
+        const uint32_t prog_[] = {__VA_ARGS__};                                                                        \
+        loop_check(what, prog_, sizeof prog_ / sizeof prog_[0], status_set);                                           \
+    } while (0)
+
+static void test_idle_loops(void)
+{
+    /* SP_STATUS polled until signal 0 clears (it never does here): the MFC0 in the delay slot, and before the AND */
+    LOOP_CHECK("poll, MFC0 in the delay slot", 1u << 10, R_ORI(10, 0, 0x80), R_MFC0(1, 4), R_AND(1, 1, 10),
+               R_BNE(1, 0, -2), R_MFC0(1, 4), R_BREAK);
+    LOOP_CHECK("poll, NOP in the delay slot", 1u << 10, R_ORI(10, 0, 0x80), R_MFC0(1, 4), R_ANDI(1, 1, 0x80),
+               R_BNE(1, 0, -3), R_NOP, R_BREAK);
+    LOOP_CHECK("poll that ends", 0, R_ORI(10, 0, 0x80), R_MFC0(1, 4), R_AND(1, 1, 10), R_BNE(1, 0, -2),
+               R_MFC0(1, 4), R_ORI(2, 0, 7), R_BREAK);
+    /* A DMEM word, the RDP's status (no RDP: 0), J back */
+    LOOP_CHECK("DMEM poll", 0, R_ORI(3, 0, 1), R_LW(2, 0x40, 0), R_SRL(2, 2, 3), R_BNE(2, 3, -3), R_ADDI(4, 0, 9),
+               R_BREAK);
+    LOOP_CHECK("DPC poll", 0, R_MFC0(1, 11), R_BEQ(1, 0, -2), R_NOP, R_BREAK);
+    LOOP_CHECK("J back", 0, R_ORI(1, 0, 5), R_LUI(2, 0x8000), R_J(4), R_ADD(3, 1, 2), R_BREAK);
+    /* Delay loops: BGTZ / BNEZ to themselves with ADDI(U) -1 in the delay slot */
+    for (int v = -2; v < 70; v += (v < 8 ? 1 : 13)) {
+        LOOP_CHECK("BGTZ delay", 0, R_ADDI(5, 0, v), R_BGTZ(5, -1), R_ADDI(5, 5, -1), R_ORI(6, 0, 1), R_BREAK);
+        LOOP_CHECK("BNEZ delay", 0, R_ADDI(5, 0, v), R_BNE(5, 0, -1), R_ADDIU(5, 5, -1), R_ORI(6, 0, 1), R_BREAK);
+    }
+    LOOP_CHECK("BNEZ delay from 0", 0, R_BNE(5, 0, -1), R_ADDIU(5, 5, -1), R_BREAK); /* 2^32 - 1 turns */
+    LOOP_CHECK("BGTZ delay, another register", 0, R_ADDI(5, 0, 40), R_BGTZ(5, -1), R_ADDI(6, 6, -1), R_BREAK);
+    /* Not idle: a store, a register that changes, the semaphore, a load of what the loop stores */
+    LOOP_CHECK("counter", 0, R_ADDI(4, 4, 1), R_BNE(4, 5, -2), R_NOP, R_BREAK);
+    LOOP_CHECK("store", 1u << 10, R_MFC0(1, 4), R_SW(1, 0x80, 0), R_ANDI(1, 1, 0x80), R_BNE(1, 0, -4), R_NOP,
+               R_BREAK);
+    LOOP_CHECK("semaphore", 0, R_MFC0(1, 7), R_BEQ(1, 0, -2), R_NOP, R_BREAK);
+    LOOP_CHECK("load of a store", 0, R_LW(2, 0x80, 0), R_ADDI(2, 2, 1), R_SW(2, 0x80, 0), R_BNE(2, 0, -4), R_NOP,
+               R_BREAK);
+}
+
 int main(int argc, char **argv)
 {
     int print = argc > 1 && strcmp(argv[1], "--print") == 0;
@@ -936,6 +1017,7 @@ int main(int argc, char **argv)
         test_cop2_moves();
         test_loads_stores();
         test_imem_rewrite();
+        test_idle_loops();
     }
     test_oracle(print);
     n64_rsp_destroy(S);

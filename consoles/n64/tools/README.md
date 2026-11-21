@@ -162,6 +162,25 @@ test ROM spends 60 % in the RSP interpreter (`n64_rsp_run`) in its rspq tests an
 dispatcher against about 10 % in the software RDP and 2 % in the RSP. Moving the dispatcher's search and hash out of line saved 6 % of the dispatcher on x86-64
 but cost 2.4 % on arm64: not taken.
 
+**The RSP (n64_rsp.c).** Counted per opcode, libdragon's rspq tests spent 18 % of their RSP instructions in a delay
+loop (BGTZ to itself, ADDI -1 in the delay slot) and its rdpqdemo example 78 % in a 3-word SP_STATUS poll; the rest is
+mostly scalar (the rspq dispatcher), and only an audio mixer (libdragon's mixertest) is vector-heavy (VU ops 41 %,
+LQV / SQV 20 %). Three changes, all bit-exact (RDRAM, picture, audio and save state equal over 900 frames on the
+homebrew, libdragon's test ROM, n64-systemtest, mixertest and rdpqdemo, on x86-64 and arm64; krom's frames equal):
+loops that only read (scalar ALU ops, DMEM loads, MFC0 but the semaphore) and come back to the same registers count
+their remaining whole iterations at once, delay loops count down at once (`rsp_idle`, `RK_CDOWN`); threaded dispatch
+with no per-instruction `r[0]` or single-step checks (results for `$0` decode as NOPs); the vector unit in SSE2 on
+x86-64 as on NEON (the RSP bench twice as fast on x86-64). qprof, instructions per frame (30 frames less 10):
+| | x86-64 frame | x86-64 RSP | arm64 frame | arm64 RSP |
+|---|---|---|---|---|
+| test ROM, rspq (state at frame 220) | 70.1M → 52.5M | -41 % | 68.7M → 51.5M | -41 % |
+| rdpqdemo | 57.1M → 52.7M | -77 % | 52.8M → 48.4M | -78 % |
+| mixertest (VU-heavy) | 40.0M → 38.9M | -41 % | 38.7M → 38.5M | -13 % |
+
+On arm64 the vector unit already ran on NEON, so mixertest gains only the dispatch there. Under GCC the handlers' jumps
+merge into a few shared ones (clang keeps one per handler); `-fno-gcse` on the loop gained about 3 % on x86-64: not
+taken.
+
 ## Limits
 
 - The RDP's rendering into RDRAM is write-tracked per command list (XBA-174: `n64_rdp.c` reports the rows of its

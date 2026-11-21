@@ -16,10 +16,14 @@
  * reciprocal and inverse square root ROMs computed at create time from their defining formulas. Computational ops are
  * branchless 8-lane loops over 16 / 32-bit values the compiler vectorises; on arm64 the hot ones (multiply-accumulate
  * family, add / sub, compares, clips, merge, logic, divide moves), the element selectors and the aligned quad / double
- * loads and stores are NEON intrinsics instead (vu_op_neon), bit-identical to the loops.
+ * loads and stores are NEON intrinsics instead (vu_op_neon), on x86-64 the same set in SSE2 (vu_op_sse2), both
+ * bit-identical to the loops.
  *
- * Dispatch: every IMEM word runs from a predecoded entry (rsp_dec, n64_rsp_run) that checks itself against IMEM at
- * each fetch, so IMEM writers never invalidate anything; the vector ops are one function per opcode and selector class.
+ * Dispatch: every IMEM word runs from a predecoded entry (rsp_dec, rsp_loop) that checks itself against IMEM at each
+ * fetch, so IMEM writers never invalidate anything; each handler ends in its own fetch and indirect jump (GCC and
+ * clang); the vector ops are one function per opcode and selector class. Loops that only wait (a status poll, a
+ * delay countdown) have their whole iterations counted at once, the state left exactly as running them leaves it
+ * (rsp_idle, RK_CDOWN).
  *
  * Timing: one RSP cycle per instruction (no dual issue, no pipeline stalls); SP DMA completes instantly (DMA_BUSY and
  * DMA_FULL always read 0). */
@@ -36,6 +40,14 @@
 #include <arm_neon.h>
 #else
 #define RSP_NEON 0
+#endif
+/* x86-64: the same ops and loads / stores in SSE2 (every x86-64 CPU has it). -DN64_RSP_NO_SSE2 forces the portable
+ * code. */
+#if !RSP_NEON && (defined(__SSE2__) || defined(_M_X64)) && !defined(N64_RSP_NO_SSE2)
+#define RSP_SSE2 1
+#include <emmintrin.h>
+#else
+#define RSP_SSE2 0
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -108,6 +120,7 @@ struct n64_rsp {
     uint16_t rcp_rom[512];
     uint16_t rsq_rom[512];
     rsp_dec dec[1024]; /* one per IMEM word; host only, not in save states (it checks itself against IMEM) */
+    uint32_t idle_b, idle_n, idle_r[32]; /* rsp_idle's note: the branch, the instruction count, the registers */
 };
 
 /* ---- ROMs --------------------------------------------------------------------------------------------------------- */
@@ -784,6 +797,327 @@ static RSP_INLINE int vu_op_neon(n64_rsp *s, uint32_t op, int whole, unsigned e,
 }
 #endif /* RSP_NEON */
 
+#if RSP_SSE2
+/* ---- Vector unit on SSE2 (x86-64) --------------------------------------------------------------------------------- */
+
+/* The ops vu_op_neon runs, the same results as the portable loops of vu_exec bit for bit (test_rsp.c's ares-checked
+ * groups), in SSE2 only (every x86-64 CPU): 32-bit products from the low and high 16-bit halves, unsigned compares as
+ * signed ones on values with bit 15 flipped, signed x unsigned products as signed ones corrected by the multiplicand
+ * where the unsigned operand has bit 15 set. Flags are 0 / 1 per lane in memory, masks here. */
+#define SV_LD(p) _mm_loadu_si128((const __m128i *)(const void *)(p))
+#define SV_ST(p, v) _mm_storeu_si128((__m128i *)(void *)(p), (v))
+
+static inline __m128i sv_sel(const int16_t *tv, unsigned e, int whole)
+{
+    __m128i v = SV_LD(tv);
+    if (whole) /* selectors 0 and 1, known when the op was decoded */
+        return v;
+    switch (e) {
+    case 0:
+    case 1: return v;
+    case 2: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xA0), 0xA0); /* 0 0 2 2 4 4 6 6 */
+    case 3: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xF5), 0xF5); /* 1 1 3 3 5 5 7 7 */
+    case 4: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0x00), 0x00); /* 0 x 4, 4 x 4 */
+    case 5: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0x55), 0x55);
+    case 6: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xAA), 0xAA);
+    case 7: return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v, 0xFF), 0xFF);
+    default: return _mm_set1_epi16(tv[e & 7]); /* 8..15: one element everywhere */
+    }
+}
+
+static inline __m128i sv_bsl(__m128i m, __m128i x, __m128i y) /* m ? x : y, bit by bit */
+{
+    return _mm_or_si128(_mm_and_si128(m, x), _mm_andnot_si128(m, y));
+}
+
+static inline __m128i sv_not(__m128i x)
+{
+    return _mm_xor_si128(x, _mm_set1_epi32(-1));
+}
+
+static inline __m128i sv_mask(const uint16_t *f) /* 0 / 1 flags -> 0 / all-ones */
+{
+    return _mm_sub_epi16(_mm_setzero_si128(), SV_LD(f));
+}
+
+static inline void sv_flag(uint16_t *f, __m128i m) /* mask -> 0 / 1 flags */
+{
+    SV_ST(f, _mm_srli_epi16(m, 15));
+}
+
+static inline __m128i sv_ltu(__m128i x, __m128i y) /* unsigned x < y */
+{
+    const __m128i k = _mm_set1_epi16((short)0x8000);
+    return _mm_cmplt_epi16(_mm_xor_si128(x, k), _mm_xor_si128(y, k));
+}
+
+static inline __m128i sv_lo32(__m128i x) /* lanes 0..3 sign-extended to 32 bits */
+{
+    return _mm_srai_epi32(_mm_unpacklo_epi16(x, x), 16);
+}
+
+static inline __m128i sv_hi32(__m128i x) /* lanes 4..7 */
+{
+    return _mm_srai_epi32(_mm_unpackhi_epi16(x, x), 16);
+}
+
+/* clamp_u: 0 below 0, 0xFFFF above 0x7FFF. */
+static inline __m128i sv_clamp_u(__m128i h0, __m128i h1)
+{
+    __m128i x = _mm_packs_epi32(h0, h1);
+    __m128i k = _mm_set1_epi32(32767);
+    __m128i gt = _mm_packs_epi32(_mm_cmpgt_epi32(h0, k), _mm_cmpgt_epi32(h1, k));
+    return _mm_or_si128(_mm_andnot_si128(_mm_srai_epi16(x, 15), x), gt);
+}
+
+/* clamp_lo: acc[15:0], 0 when acc[47:16] < -32768, 0xFFFF when it is > 32767. */
+static inline __m128i sv_clamp_lo(__m128i h0, __m128i h1, __m128i lo)
+{
+    __m128i kl = _mm_set1_epi32(-32768), kh = _mm_set1_epi32(32767);
+    __m128i lt = _mm_packs_epi32(_mm_cmplt_epi32(h0, kl), _mm_cmplt_epi32(h1, kl));
+    __m128i gt = _mm_packs_epi32(_mm_cmpgt_epi32(h0, kh), _mm_cmpgt_epi32(h1, kh));
+    return _mm_andnot_si128(lt, _mm_or_si128(lo, gt));
+}
+
+/* sx * ux, sx signed and ux unsigned 16-bit: the 32-bit products' high halves (the low ones are _mm_mullo_epi16). */
+static inline __m128i sv_mulhi_su(__m128i sx, __m128i ux)
+{
+    return _mm_add_epi16(_mm_mulhi_epi16(sx, ux), _mm_and_si128(sx, _mm_srai_epi16(ux, 15)));
+}
+
+/* acc += addend, given as its low 16 bits l16 and its bits 47..16 (h0, h1): ACC_ADD on 8 lanes. */
+#define SV_ACC_ADD(l16, h0, h1)                                                                                        \
+    do {                                                                                                               \
+        __m128i nl_ = _mm_add_epi16(accl, (l16));                                                                      \
+        __m128i c_ = sv_ltu(nl_, accl); /* the carry out of bit 15, as a mask */                                       \
+        acch0 = _mm_sub_epi32(_mm_add_epi32(acch0, (h0)), _mm_unpacklo_epi16(c_, c_));                                 \
+        acch1 = _mm_sub_epi32(_mm_add_epi32(acch1, (h1)), _mm_unpackhi_epi16(c_, c_));                                 \
+        accl = nl_;                                                                                                    \
+    } while (0)
+
+#define SV_ACC_LOAD()                                                                                                  \
+    do {                                                                                                               \
+        acch0 = SV_LD(s->acch);                                                                                        \
+        acch1 = SV_LD(s->acch + 4);                                                                                    \
+        accl = SV_LD(s->accl);                                                                                         \
+    } while (0)
+
+/* The hot computational ops; returns 0 for the others, which the portable code runs. */
+static RSP_INLINE int vu_op_sse2(n64_rsp *s, uint32_t op, int whole, unsigned e, const int16_t *pt,
+                                 const int16_t *ps, int16_t *pd, unsigned vs)
+{
+    __m128i a = SV_LD(ps), t = sv_sel(pt, e, whole), r;
+    __m128i acch0, acch1, accl, z = _mm_setzero_si128();
+    switch (op & 63) {
+    case 0x00: /* VMULF */
+    case 0x01: /* VMULU */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t), rnd = _mm_set1_epi32(0x4000);
+        acch0 = _mm_srai_epi32(_mm_add_epi32(_mm_unpacklo_epi16(lo, hi), rnd), 15); /* (p + 0x4000) >> 15 */
+        acch1 = _mm_srai_epi32(_mm_add_epi32(_mm_unpackhi_epi16(lo, hi), rnd), 15);
+        accl = _mm_add_epi16(_mm_slli_epi16(lo, 1), _mm_set1_epi16((short)0x8000));
+        r = (op & 1) ? sv_clamp_u(acch0, acch1) : _mm_packs_epi32(acch0, acch1);
+        break;
+    }
+    case 0x04: /* VMUDL */
+        accl = _mm_mulhi_epu16(a, t);
+        acch0 = acch1 = z;
+        r = accl;
+        break;
+    case 0x05: /* VMUDM: a * ub */
+    case 0x06: /* VMUDN: ua * b */
+    {
+        __m128i hi = (op & 1) ? sv_mulhi_su(a, t) : sv_mulhi_su(t, a);
+        accl = _mm_mullo_epi16(a, t);
+        acch0 = sv_lo32(hi);
+        acch1 = sv_hi32(hi);
+        r = (op & 1) ? hi : accl;
+        break;
+    }
+    case 0x07: /* VMUDH */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t);
+        acch0 = _mm_unpacklo_epi16(lo, hi);
+        acch1 = _mm_unpackhi_epi16(lo, hi);
+        accl = z;
+        r = _mm_packs_epi32(acch0, acch1);
+        break;
+    }
+    case 0x08: /* VMACF */
+    case 0x09: /* VMACU */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t);
+        __m128i h0 = _mm_srai_epi32(_mm_unpacklo_epi16(lo, hi), 15), h1 = _mm_srai_epi32(_mm_unpackhi_epi16(lo, hi), 15);
+        SV_ACC_LOAD();
+        SV_ACC_ADD(_mm_slli_epi16(lo, 1), h0, h1);
+        r = (op & 1) ? sv_clamp_u(acch0, acch1) : _mm_packs_epi32(acch0, acch1);
+        break;
+    }
+    case 0x0C: /* VMADL */
+        SV_ACC_LOAD();
+        SV_ACC_ADD(_mm_mulhi_epu16(a, t), z, z);
+        r = sv_clamp_lo(acch0, acch1, accl);
+        break;
+    case 0x0D: /* VMADM: a * ub */
+    case 0x0E: /* VMADN: ua * b */
+    {
+        __m128i hi = (op & 1) ? sv_mulhi_su(a, t) : sv_mulhi_su(t, a);
+        SV_ACC_LOAD();
+        SV_ACC_ADD(_mm_mullo_epi16(a, t), sv_lo32(hi), sv_hi32(hi));
+        r = (op & 1) ? _mm_packs_epi32(acch0, acch1) : sv_clamp_lo(acch0, acch1, accl);
+        break;
+    }
+    case 0x0F: /* VMADH: ACCL unchanged */
+    {
+        __m128i lo = _mm_mullo_epi16(a, t), hi = _mm_mulhi_epi16(a, t);
+        acch0 = _mm_add_epi32(SV_LD(s->acch), _mm_unpacklo_epi16(lo, hi));
+        acch1 = _mm_add_epi32(SV_LD(s->acch + 4), _mm_unpackhi_epi16(lo, hi));
+        SV_ST(s->acch, acch0);
+        SV_ST(s->acch + 4, acch1);
+        SV_ST(pd, _mm_packs_epi32(acch0, acch1));
+        return 1;
+    }
+    case 0x10: /* VADD */
+    case 0x11: /* VSUB */
+    {
+        __m128i c = SV_LD(s->vcol), v0, v1;
+        if (op & 1) {
+            v0 = _mm_sub_epi32(_mm_sub_epi32(sv_lo32(a), sv_lo32(t)), sv_lo32(c));
+            v1 = _mm_sub_epi32(_mm_sub_epi32(sv_hi32(a), sv_hi32(t)), sv_hi32(c));
+            SV_ST(s->accl, _mm_sub_epi16(_mm_sub_epi16(a, t), c));
+        } else {
+            v0 = _mm_add_epi32(_mm_add_epi32(sv_lo32(a), sv_lo32(t)), sv_lo32(c));
+            v1 = _mm_add_epi32(_mm_add_epi32(sv_hi32(a), sv_hi32(t)), sv_hi32(c));
+            SV_ST(s->accl, _mm_add_epi16(_mm_add_epi16(a, t), c));
+        }
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        SV_ST(pd, _mm_packs_epi32(v0, v1));
+        return 1;
+    }
+    case 0x14: /* VADDC */
+    {
+        __m128i sum = _mm_add_epi16(a, t);
+        SV_ST(s->accl, sum);
+        sv_flag(s->vcol, sv_ltu(sum, a));
+        SV_ST(s->vcoh, z);
+        SV_ST(pd, sum);
+        return 1;
+    }
+    case 0x15: /* VSUBC */
+    {
+        __m128i d = _mm_sub_epi16(a, t);
+        SV_ST(s->accl, d);
+        sv_flag(s->vcol, sv_ltu(a, t));
+        sv_flag(s->vcoh, sv_not(_mm_cmpeq_epi16(a, t)));
+        SV_ST(pd, d);
+        return 1;
+    }
+    case 0x20: /* VLT */
+    case 0x21: /* VEQ */
+    case 0x22: /* VNE */
+    case 0x23: /* VGE */
+    {
+        __m128i eq = _mm_cmpeq_epi16(a, t), coh = sv_mask(s->vcoh), col = sv_mask(s->vcol), c;
+        switch (op & 3) {
+        case 0: c = _mm_or_si128(_mm_cmplt_epi16(a, t), _mm_and_si128(eq, _mm_and_si128(coh, col))); break;
+        case 1: c = _mm_andnot_si128(coh, eq); break;
+        case 2: c = _mm_or_si128(sv_not(eq), coh); break;
+        default: c = _mm_or_si128(_mm_cmpgt_epi16(a, t), _mm_andnot_si128(_mm_and_si128(coh, col), eq)); break;
+        }
+        r = sv_bsl(c, a, t);
+        SV_ST(s->accl, r);
+        sv_flag(s->vccl, c);
+        SV_ST(s->vcch, z);
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        SV_ST(pd, r);
+        return 1;
+    }
+    case 0x24: /* VCL */
+    {
+        __m128i sum = _mm_add_epi16(a, t);
+        __m128i zero = _mm_cmpeq_epi16(sum, z), nocy = sv_not(sv_ltu(sum, a));
+        __m128i carry = sv_mask(s->vcol), ne = sv_mask(s->vcoh), ce = sv_mask(s->vce);
+        __m128i lo_new = sv_bsl(ce, _mm_or_si128(zero, nocy), _mm_and_si128(zero, nocy));
+        __m128i hi_new = sv_not(sv_ltu(a, t));
+        __m128i ccl = sv_bsl(_mm_andnot_si128(ne, carry), lo_new, sv_mask(s->vccl));
+        __m128i cch = sv_bsl(_mm_or_si128(carry, ne), sv_mask(s->vcch), hi_new);
+        __m128i sel = sv_bsl(carry, ccl, cch);
+        __m128i other = sv_bsl(carry, _mm_sub_epi16(z, t), t);
+        __m128i lo = sv_bsl(sel, other, a);
+        sv_flag(s->vccl, ccl);
+        sv_flag(s->vcch, cch);
+        SV_ST(s->accl, lo);
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        SV_ST(s->vce, z);
+        SV_ST(pd, lo);
+        return 1;
+    }
+    case 0x25: /* VCH: a + b (signs differ) or a - b (same signs) never overflows 16 bits */
+    {
+        __m128i dm = _mm_srai_epi16(_mm_xor_si128(a, t), 15), tnm = _mm_srai_epi16(t, 15);
+        __m128i v = sv_bsl(dm, _mm_add_epi16(a, t), _mm_sub_epi16(a, t));
+        __m128i lem = sv_not(_mm_cmpgt_epi16(v, z)), gem = sv_not(_mm_srai_epi16(v, 15));
+        __m128i lo = sv_bsl(sv_bsl(dm, lem, gem), sv_bsl(dm, _mm_sub_epi16(z, t), t), a);
+        __m128i ne = _mm_andnot_si128(_mm_cmpeq_epi16(a, sv_not(t)), sv_not(_mm_cmpeq_epi16(v, z)));
+        sv_flag(s->vccl, sv_bsl(dm, lem, tnm));
+        sv_flag(s->vcch, sv_bsl(dm, tnm, gem));
+        sv_flag(s->vcol, dm);
+        sv_flag(s->vcoh, ne);
+        sv_flag(s->vce, _mm_and_si128(dm, _mm_cmpeq_epi16(v, _mm_set1_epi32(-1))));
+        SV_ST(s->accl, lo);
+        SV_ST(pd, lo);
+        return 1;
+    }
+    case 0x27: /* VMRG */
+        r = sv_bsl(sv_mask(s->vccl), a, t);
+        SV_ST(s->vcol, z);
+        SV_ST(s->vcoh, z);
+        goto logic;
+    case 0x28: r = _mm_and_si128(a, t); goto logic;         /* VAND */
+    case 0x29: r = sv_not(_mm_and_si128(a, t)); goto logic; /* VNAND */
+    case 0x2A: r = _mm_or_si128(a, t); goto logic;          /* VOR */
+    case 0x2B: r = sv_not(_mm_or_si128(a, t)); goto logic;  /* VNOR */
+    case 0x2C: r = _mm_xor_si128(a, t); goto logic;         /* VXOR */
+    case 0x2D: r = sv_not(_mm_xor_si128(a, t)); goto logic; /* VNXOR */
+    logic:
+        SV_ST(s->accl, r);
+        SV_ST(pd, r);
+        return 1;
+    case 0x30: /* VRCP */
+    case 0x31: /* VRCPL */
+    case 0x34: /* VRSQ */
+    case 0x35: /* VRSQL */
+    {
+        int32_t input = (op & 1) && s->divdp ? (int32_t)((uint32_t)(uint16_t)s->divin << 16 | (uint16_t)pt[e & 7])
+                                             : (int32_t)pt[e & 7];
+        SV_ST(s->accl, t);
+        vu_divide(s, (op & 4) != 0, input, &pd[vs & 7]);
+        return 1;
+    }
+    case 0x32: /* VRCPH */
+    case 0x36: /* VRSQH */
+        SV_ST(s->accl, t);
+        s->divdp = 1;
+        s->divin = pt[e & 7];
+        pd[vs & 7] = s->divout;
+        return 1;
+    case 0x37: /* VNOP */
+    case 0x3F: /* VNULL */
+        return 1;
+    default:
+        return 0;
+    }
+    SV_ST(s->acch, acch0);
+    SV_ST(s->acch + 4, acch1);
+    SV_ST(s->accl, accl);
+    SV_ST(pd, r);
+    return 1;
+}
+#endif /* RSP_SSE2 */
+
 /* One computational op, op being its 6-bit opcode (and only that: the rest of the word is in e, the registers vt,
  * vs and vd as pt, ps and pd, and vs again for the ops that use it as an element number), whole
  * set when the element selector is 0 or 1 (b is vt as it is). Always inlined into the vu_fn_* below, each with
@@ -793,6 +1127,9 @@ static RSP_INLINE void vu_exec(n64_rsp *s, uint32_t op, int whole, unsigned e, c
 {
 #if RSP_NEON
     if (vu_op_neon(s, op, whole, e, pt, ps, pd, vs))
+        return;
+#elif RSP_SSE2
+    if (vu_op_sse2(s, op, whole, e, pt, ps, pd, vs))
         return;
 #endif
     const int16_t *tv = pt;
@@ -1202,6 +1539,9 @@ static inline void ld_be16x8(int16_t *v, const uint8_t *p)
 {
 #if RSP_NEON
     vst1q_s16(v, vreinterpretq_s16_u8(vrev16q_u8(vld1q_u8(p))));
+#elif RSP_SSE2
+    __m128i x = SV_LD(p);
+    SV_ST(v, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 8; k++)
         v[k] = (int16_t)n64_be16(p + 2 * k);
@@ -1212,6 +1552,9 @@ static inline void ld_be16x4(int16_t *v, const uint8_t *p)
 {
 #if RSP_NEON
     vst1_s16(v, vreinterpret_s16_u8(vrev16_u8(vld1_u8(p))));
+#elif RSP_SSE2
+    __m128i x = _mm_loadl_epi64((const __m128i *)(const void *)p);
+    _mm_storel_epi64((__m128i *)(void *)v, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 4; k++)
         v[k] = (int16_t)n64_be16(p + 2 * k);
@@ -1222,6 +1565,9 @@ static inline void st_be16x8(uint8_t *p, const int16_t *v)
 {
 #if RSP_NEON
     vst1q_u8(p, vrev16q_u8(vreinterpretq_u8_s16(vld1q_s16(v))));
+#elif RSP_SSE2
+    __m128i x = SV_LD(v);
+    SV_ST(p, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 8; k++)
         n64_wbe16(p + 2 * k, (uint16_t)v[k]);
@@ -1232,6 +1578,9 @@ static inline void st_be16x4(uint8_t *p, const int16_t *v)
 {
 #if RSP_NEON
     vst1_u8(p, vrev16_u8(vreinterpret_u8_s16(vld1_s16(v))));
+#elif RSP_SSE2
+    __m128i x = _mm_loadl_epi64((const __m128i *)(const void *)v);
+    _mm_storel_epi64((__m128i *)(void *)p, _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8)));
 #else
     for (int k = 0; k < 4; k++)
         n64_wbe16(p + 2 * k, (uint16_t)v[k]);
@@ -1583,13 +1932,15 @@ enum {
     RK_LB, RK_LH, RK_LW, RK_LBU, RK_LHU, RK_SB, RK_SH, RK_SW, RK_LWC2, RK_SWC2,
     RK_LDV, RK_LQV, RK_SDV, RK_SQV, /* their common aligned case inline, the rest through vu_load / vu_store */
     RK_VU, /* COP2 computational: vu_fns[vop] */
+    RK_IDLE,  /* a backward branch closing a loop that only reads (rsp_idle); e = the branch's own RK_* */
+    RK_CDOWN, /* BGTZ / BNEZ rs to itself with ADDI rs, rs, -1 in its delay slot (a delay loop); e = RK_BGTZ / RK_BNE */
+    RK_COUNT
 };
 
-/* Decodes the IMEM word raw (as loaded, see rsp_dec) at offset ia into its slot. Same semantics as the hardware notes
- * in the run loop below; unknown opcodes are no-ops. */
-static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t raw)
+/* Decodes the IMEM word raw (as loaded, see rsp_dec) at offset ia into x. Same semantics as the hardware notes in the
+ * run loop below; unknown opcodes are no-ops. */
+static void rsp_decode_word(uint32_t ia, uint32_t raw, rsp_dec *out)
 {
-    rsp_dec *d = &s->dec[ia >> 2];
     uint32_t op = n64_be32((const uint8_t *)&raw);
     uint32_t imm = (uint32_t)(int32_t)(int16_t)op;
     rsp_dec x;
@@ -1669,9 +2020,9 @@ static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t 
             x.a = (uint8_t)((op >> 11) & 31);
             x.c = (uint8_t)((op >> 6) & 31);
             x.vop = (uint8_t)((op & 63) | (x.e < 2 ? 64 : 0));
-            x.imm = (uint32_t)(offsetof(n64_rsp, vr) + sizeof s->vr[0] * x.b) << 16 |
-                    (uint32_t)(offsetof(n64_rsp, vr) + sizeof s->vr[0] * x.a);
-            x.link = (uint16_t)(offsetof(n64_rsp, vr) + sizeof s->vr[0] * x.c);
+            x.imm = (uint32_t)(offsetof(n64_rsp, vr) + sizeof(int16_t[8]) * x.b) << 16 |
+                    (uint32_t)(offsetof(n64_rsp, vr) + sizeof(int16_t[8]) * x.a);
+            x.link = (uint16_t)(offsetof(n64_rsp, vr) + sizeof(int16_t[8]) * x.c);
         } else {
             k = RK_COP2M;
             x.imm = op;
@@ -1707,177 +2058,385 @@ static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t 
     }
     default: break;
     }
+    switch (k) { /* results that go to $0: nothing (n64_rsp_run never writes r[0]) */
+    case RK_SLL: case RK_SRL: case RK_SRA: case RK_SLLV: case RK_SRLV: case RK_SRAV: case RK_SRLV_RS:
+    case RK_ADD: case RK_SUB: case RK_AND: case RK_OR: case RK_XOR: case RK_NOR: case RK_SLT: case RK_SLTU:
+        if (x.c == 0)
+            k = RK_NOP;
+        break;
+    case RK_JALR:
+        if (x.c == 0)
+            k = RK_JR;
+        break;
+    case RK_ADDI: case RK_SLTI: case RK_SLTIU: case RK_ANDI: case RK_ORI: case RK_XORI:
+    case RK_LB: case RK_LH: case RK_LW: case RK_LBU: case RK_LHU:
+        if (x.b == 0)
+            k = RK_NOP;
+        break;
+    default:
+        break;
+    }
     x.kind = (uint8_t)k;
-    *d = x;
+    *out = x;
+}
+
+/* An instruction an idle loop may hold (rsp_idle): it writes no memory, no vector state and no COP0 register, does
+ * not branch, and reads nothing that changes while the RSP runs alone: scalar ALU ops, DMEM loads, MFC0 of any
+ * register but SP_SEMAPHORE (whose read sets it). The RDP's registers are plain fields its front end changes only
+ * when n64_rdp_run runs, which an idle loop (no MTC0) never calls. */
+static int rsp_pure(const rsp_dec *x)
+{
+    switch (x->kind) {
+    case RK_NOP: case RK_SLL: case RK_SRL: case RK_SRA: case RK_SLLV: case RK_SRLV: case RK_SRAV: case RK_SRLV_RS:
+    case RK_ADD: case RK_SUB: case RK_AND: case RK_OR: case RK_XOR: case RK_NOR: case RK_SLT: case RK_SLTU:
+    case RK_ADDI: case RK_SLTI: case RK_SLTIU: case RK_ANDI: case RK_ORI: case RK_XORI:
+    case RK_LB: case RK_LH: case RK_LW: case RK_LBU: case RK_LHU:
+        return 1;
+    case RK_MFC0:
+        return x->c != 7;
+    default:
+        return 0;
+    }
+}
+
+/* The body of the loop the branch at b closes, from its target to its delay slot, holds only rsp_pure instructions
+ * (the branch itself aside), as IMEM holds them now. */
+static int rsp_idle_body(const n64_rsp *s, uint32_t b, uint32_t target)
+{
+    for (uint32_t a = target; a <= b + 4; a += 4) {
+        if (a == b)
+            continue;
+        uint32_t raw;
+        rsp_dec x;
+        memcpy(&raw, s->mem + 0x1000 + a, 4);
+        rsp_decode_word(a, raw, &x);
+        if (!rsp_pure(&x))
+            return 0;
+    }
+    return 1;
+}
+
+#define RSP_IDLE_MAX 16 /* instructions in an idle loop's body, the branch and its delay slot included */
+
+/* Decodes the IMEM word raw at offset ia into its slot. A conditional branch or J back to at most RSP_IDLE_MAX - 2
+ * words before it becomes RK_IDLE when its loop body is pure now (rsp_idle checks again before it skips anything), or
+ * RK_CDOWN for the delay loop "BGTZ / BNEZ rs, ." with "ADDI rs, rs, -1" in the delay slot (checked again when it
+ * runs). */
+static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t raw)
+{
+    rsp_dec *d = &s->dec[ia >> 2];
+    rsp_decode_word(ia, raw, d);
+    switch (d->kind) {
+    case RK_BEQ: case RK_BNE: case RK_BLEZ: case RK_BGTZ: case RK_BLTZ: case RK_BGEZ: case RK_J:
+        if (d->imm <= ia && ia - d->imm <= 4 * (RSP_IDLE_MAX - 2) && ia < 0xFFC) {
+            uint32_t slot = n64_be32(s->mem + 0x1000 + ia + 4);
+            if (d->imm == ia && (d->kind == RK_BGTZ || (d->kind == RK_BNE && d->b == 0)) && d->a != 0 &&
+                (slot & ~(1u << 26)) == (0x20000000u | (uint32_t)d->a << 21 | (uint32_t)d->a << 16 | 0xFFFFu)) {
+                d->e = d->kind;
+                d->kind = RK_CDOWN;
+            } else if (rsp_idle_body(s, ia, d->imm)) {
+                d->e = d->kind;
+                d->kind = RK_IDLE;
+            }
+        }
+        break;
+    default:
+        break;
+    }
     return d;
+}
+
+/* An idle loop (RK_IDLE) was just taken at b: pc / npc are its delay slot / its target. The first time, the scalar
+ * registers are noted; the next time this branch is taken in the same n64_rsp_run with the same registers, the RSP
+ * is in a cycle: the body reads only what it cannot change itself (rsp_pure) and writes only registers, so every
+ * later iteration runs the same instructions with the same values. Whole iterations up to the cycle budget are then
+ * counted as run (n), the state being exactly what running them would leave; the interpreter runs the rest. */
+static RSP_NOINLINE uint32_t rsp_idle(n64_rsp *s, uint32_t b, uint32_t target, uint32_t n, uint32_t cycles)
+{
+    if (s->idle_b == b && memcmp(s->idle_r, s->r, sizeof s->r) == 0) {
+        s->idle_b = ~0u;
+        if (rsp_idle_body(s, b, target)) {
+            uint32_t p = n - s->idle_n;
+            n += (cycles - n) / p * p;
+        }
+        return n;
+    }
+    s->idle_b = b;
+    s->idle_n = n;
+    memcpy(s->idle_r, s->r, sizeof s->r);
+    return n;
+}
+
+/* GCC and clang: each handler ends in its own fetch and indirect jump (labels as values), so the host predicts each
+ * jump from the instruction before it; elsewhere one switch in a loop. */
+#if defined(__GNUC__) || defined(__clang__)
+#define RSP_THREADED 1
+#else
+#define RSP_THREADED 0
+#endif
+
+/* Runs up to cycles instructions; stops early once an instruction may have halted the RSP (BREAK, an SP_STATUS write),
+ * halting it then when single-step is on. pc / npc live in locals: nothing the loop calls reads them (COP0 cannot
+ * reach SP_PC). Each instruction runs from its predecoded entry (rsp_dec), decoded again first when IMEM no longer
+ * holds the word it was made from. No instruction writes r[0] here: the decoder makes the ones that would NOPs
+ * (their other effects are none), MFC0 and the COP2 moves clear it again. */
+static uint32_t rsp_loop(n64_rsp *s, uint32_t cycles)
+{
+    uint32_t n = 0, pc = s->pc, npc = s->npc;
+    uint32_t *r = s->r;
+    const uint8_t *imem = s->mem + 0x1000;
+    const rsp_dec *dec = s->dec;
+    const rsp_dec *d;
+    s->idle_b = ~0u;
+#define FETCH()                                                                                                        \
+    do {                                                                                                               \
+        if (RSP_UNLIKELY(n >= cycles))                                                                                 \
+            goto out;                                                                                                  \
+        uint32_t raw_;                                                                                                 \
+        memcpy(&raw_, imem + pc, 4);                                                                                   \
+        d = (const rsp_dec *)((const uint8_t *)dec + pc * (sizeof *dec / 4)); /* dec[pc / 4] */                        \
+        if (RSP_UNLIKELY(d->word != raw_))                                                                             \
+            d = rsp_decode(s, pc, raw_);                                                                               \
+        pc = npc;                                                                                                      \
+        npc = (npc + 4) & 0xFFC;                                                                                       \
+        n++;                                                                                                           \
+    } while (0)
+#define RS r[d->a]
+#define RT r[d->b]
+#define IMM (d->imm)
+#if RSP_THREADED
+#define K(k) [RK_##k] = &&L_##k
+    static const void *const labels[] = {
+        K(NOP), K(SLL), K(SRL), K(SRA), K(SLLV), K(SRLV), K(SRAV), K(SRLV_RS), K(JR), K(JALR), K(BREAK),
+        K(ADD), K(SUB), K(AND), K(OR), K(XOR), K(NOR), K(SLT), K(SLTU),
+        K(BLTZ), K(BGEZ), K(BLTZAL), K(BGEZAL), K(J), K(JAL), K(BEQ), K(BNE), K(BLEZ), K(BGTZ),
+        K(ADDI), K(SLTI), K(SLTIU), K(ANDI), K(ORI), K(XORI),
+        K(MFC0), K(MTC0), K(COP2M),
+        K(LB), K(LH), K(LW), K(LBU), K(LHU), K(SB), K(SH), K(SW), K(LWC2), K(SWC2),
+        K(LDV), K(LQV), K(SDV), K(SQV),
+        K(VU), K(IDLE), K(CDOWN),
+    };
+#undef K
+    _Static_assert(sizeof labels / sizeof labels[0] == RK_COUNT, "a handler per RK_*");
+#define CASE(k) L_##k:
+#define NEXT                                                                                                           \
+    do {                                                                                                               \
+        FETCH();                                                                                                       \
+        goto *labels[d->kind];                                                                                         \
+    } while (0)
+    NEXT;
+#else
+#define CASE(k) case RK_##k:
+#define NEXT continue
+    for (;;) {
+        FETCH();
+        switch (d->kind) {
+#endif
+    CASE(VU) vu_fns[d->vop](s, d); NEXT; /* most of a microcode */
+    CASE(NOP) NEXT;
+    CASE(SLL) r[d->c] = RT << IMM; NEXT;
+    CASE(SRL) r[d->c] = RT >> IMM; NEXT;
+    CASE(SRA) r[d->c] = (uint32_t)((int32_t)RT >> IMM); NEXT;
+    CASE(SLLV) r[d->c] = RT << (RS & 31); NEXT;
+    CASE(SRLV) r[d->c] = RT >> (RS & 31); NEXT;
+    CASE(SRAV) r[d->c] = (uint32_t)((int32_t)RT >> (RS & 31)); NEXT;
+    CASE(SRLV_RS) r[d->c] = RS >> (RS & 31); NEXT;
+    CASE(JR) npc = RS & 0xFFC; NEXT;
+    CASE(JALR) /* the target before the link (rd may be rs) */
+    {
+        uint32_t tgt = RS & 0xFFC;
+        r[d->c] = d->link;
+        npc = tgt;
+        NEXT;
+    }
+    CASE(BREAK)
+        s->status |= ST_HALT | ST_BROKE;
+        if (s->status & ST_INTR_BREAK)
+            raise_sp(s);
+        goto stop;
+    CASE(ADD) r[d->c] = RS + RT; NEXT;
+    CASE(SUB) r[d->c] = RS - RT; NEXT;
+    CASE(AND) r[d->c] = RS & RT; NEXT;
+    CASE(OR) r[d->c] = RS | RT; NEXT;
+    CASE(XOR) r[d->c] = RS ^ RT; NEXT;
+    CASE(NOR) r[d->c] = ~(RS | RT); NEXT;
+    CASE(SLT) r[d->c] = (int32_t)RS < (int32_t)RT; NEXT;
+    CASE(SLTU) r[d->c] = RS < RT; NEXT;
+    /* REGIMM: the condition before the link (rs may be $31) */
+    CASE(BLTZ) if ((int32_t)RS < 0) npc = IMM; NEXT;
+    CASE(BGEZ) if ((int32_t)RS >= 0) npc = IMM; NEXT;
+    CASE(BLTZAL)
+    {
+        int taken = (int32_t)RS < 0;
+        r[31] = d->link;
+        if (taken)
+            npc = IMM;
+        NEXT;
+    }
+    CASE(BGEZAL)
+    {
+        int taken = (int32_t)RS >= 0;
+        r[31] = d->link;
+        if (taken)
+            npc = IMM;
+        NEXT;
+    }
+    CASE(J) npc = IMM; NEXT;
+    CASE(JAL)
+        r[31] = d->link;
+        npc = IMM;
+        NEXT;
+    CASE(BEQ) if (RS == RT) npc = IMM; NEXT;
+    CASE(BNE) if (RS != RT) npc = IMM; NEXT;
+    CASE(BLEZ) if ((int32_t)RS <= 0) npc = IMM; NEXT;
+    CASE(BGTZ) if ((int32_t)RS > 0) npc = IMM; NEXT;
+    CASE(IDLE)
+    {
+        int taken;
+        switch (d->e) {
+        case RK_BEQ: taken = RS == RT; break;
+        case RK_BNE: taken = RS != RT; break;
+        case RK_BLEZ: taken = (int32_t)RS <= 0; break;
+        case RK_BGTZ: taken = (int32_t)RS > 0; break;
+        case RK_BLTZ: taken = (int32_t)RS < 0; break;
+        case RK_BGEZ: taken = (int32_t)RS >= 0; break;
+        default: taken = 1; break; /* J */
+        }
+        if (taken) {
+            uint32_t b = (uint32_t)(d - dec) << 2;
+            npc = IMM;
+            if (pc == b + 4) /* not in another branch's delay slot */
+                n = rsp_idle(s, b, IMM, n, cycles);
+        }
+        NEXT;
+    }
+    CASE(CDOWN) /* each turn: the branch, then rs - 1 in the delay slot; j turns at once while all are taken */
+    {
+        uint32_t v = RS, rs = d->a;
+        if (d->e == RK_BGTZ ? (int32_t)v > 0 : v != 0) {
+            npc = IMM;
+            uint32_t slot = n64_be32(imem + pc);
+            if (pc == IMM + 4 && (slot & ~(1u << 26)) == (0x20000000u | rs << 21 | rs << 16 | 0xFFFFu)) {
+                uint32_t j = v - 1, m = (cycles - n) / 2;
+                if (j > m)
+                    j = m;
+                r[rs] = v - j;
+                n += 2 * j;
+            }
+        }
+        NEXT;
+    }
+    CASE(ADDI) RT = RS + IMM; NEXT;
+    CASE(SLTI) RT = (int32_t)RS < (int32_t)IMM; NEXT;
+    CASE(SLTIU) RT = RS < IMM; NEXT;
+    CASE(ANDI) RT = RS & IMM; NEXT;
+    CASE(ORI) RT = RS | IMM; NEXT; /* and LUI */
+    CASE(XORI) RT = RS ^ IMM; NEXT;
+    CASE(MFC0) /* also into $0: reading SP_SEMAPHORE sets it */
+        RT = cop0_read(s, d->c);
+        r[0] = 0;
+        NEXT;
+    CASE(MTC0)
+        cop0_write(s, d->c, RT);
+        goto stop; /* SP_STATUS may have halted the RSP or turned single-step on */
+    CASE(COP2M) /* COP2 moves (the computational ops are RK_VU) */
+        cop2_move(s, IMM);
+        r[0] = 0;
+        NEXT;
+    CASE(LB) RT = (uint32_t)(int32_t)(int8_t)DM(RS + IMM); NEXT;
+    CASE(LH) RT = (uint32_t)(int32_t)(int16_t)ld16(s, RS + IMM); NEXT;
+    CASE(LW) RT = ld32(s, RS + IMM); NEXT; /* and LWU */
+    CASE(LBU) RT = DM(RS + IMM); NEXT;
+    CASE(LHU) RT = ld16(s, RS + IMM); NEXT;
+    CASE(SB) DM(RS + IMM) = (uint8_t)RT; NEXT;
+    CASE(SH)
+    {
+        uint32_t a = RS + IMM, v = RT;
+        DM(a) = (uint8_t)(v >> 8);
+        DM(a + 1) = (uint8_t)v;
+        NEXT;
+    }
+    CASE(SW) st32(s, RS + IMM, RT); NEXT;
+    CASE(LWC2) vu_load(s, IMM); NEXT;
+    CASE(SWC2) vu_store(s, IMM); NEXT;
+    /* LDV / SDV inside DMEM, LQV / SQV of a whole register at a 16-byte boundary: as ld_bytes / st_bytes do them, the
+     * other cases through vu_load / vu_store (the instruction is the entry's word). */
+    CASE(LDV)
+    {
+        uint32_t addr = (RS + IMM) & 0xFFF;
+        if (addr <= 0xFF8)
+            ld_be16x4(s->vr[d->b] + d->e / 2, s->mem + addr);
+        else
+            vu_load(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+    CASE(SDV)
+    {
+        uint32_t addr = (RS + IMM) & 0xFFF;
+        if (addr <= 0xFF8)
+            st_be16x4(s->mem + addr, s->vr[d->b] + d->e / 2);
+        else
+            vu_store(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+    CASE(LQV)
+    {
+        uint32_t addr = RS + IMM;
+        if (!((addr & 15) | d->e))
+            ld_be16x8(s->vr[d->b], s->mem + (addr & 0xFF0));
+        else
+            vu_load(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+    CASE(SQV)
+    {
+        uint32_t addr = RS + IMM;
+        if (!((addr & 15) | d->e))
+            st_be16x8(s->mem + (addr & 0xFF0), s->vr[d->b]);
+        else
+            vu_store(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+#if !RSP_THREADED
+    default: NEXT;
+        }
+#endif
+    stop:
+        if (s->status & ST_SSTEP)
+            s->status |= ST_HALT;
+        if (s->status & ST_HALT)
+            goto out;
+        NEXT;
+#if !RSP_THREADED
+    }
+#endif
+out:
+    s->pc = pc;
+    s->npc = npc;
+    return n;
+#undef FETCH
+#undef RS
+#undef RT
+#undef IMM
+#undef CASE
+#undef NEXT
 }
 
 uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
 {
     if (s->status & ST_HALT)
         return 0;
-    /* pc / npc live in locals: nothing the loop calls reads them (COP0 cannot reach SP_PC). The loop stops when an
-     * instruction may have halted the RSP (BREAK, an SP_STATUS write) or single-stepping is on. Each instruction runs
-     * from its predecoded entry (rsp_dec), decoded again first when IMEM no longer holds the word it was made from. */
-    uint32_t n = 0, pc = s->pc, npc = s->npc;
-    uint32_t *r = s->r;
-    const uint8_t *imem = s->mem + 0x1000;
-    const rsp_dec *dec = s->dec;
-    int sstep = (s->status & ST_SSTEP) != 0;
+    if (!(s->status & ST_SSTEP))
+        return rsp_loop(s, cycles);
+    /* Single-step: one instruction, then the RSP halts (unless that instruction turned single-step off). A budget of
+     * one never skips anything (rsp_idle, RK_CDOWN). */
+    uint32_t n = 0;
     while (n < cycles) {
-        uint32_t raw;
-        memcpy(&raw, imem + pc, 4);
-        const rsp_dec *d = (const rsp_dec *)((const uint8_t *)dec + pc * (sizeof *dec / 4)); /* dec[pc / 4] */
-        if (RSP_UNLIKELY(d->word != raw))
-            d = rsp_decode(s, pc, raw);
-        pc = npc;
-        npc = (npc + 4) & 0xFFC;
-        n++;
-        if (d->kind == RK_VU) { /* most of a microcode: before the scalar switch */
-            vu_fns[d->vop](s, d);
-            if (sstep) {
-                if (s->status & ST_SSTEP)
-                    s->status |= ST_HALT;
-                if (s->status & ST_HALT)
-                    break;
-            }
-            continue;
-        }
-        int stop = 0;
-        uint32_t rs = d->a, rt = d->b, rd = d->c, imm = d->imm;
-        switch (d->kind) {
-        case RK_NOP: break;
-        case RK_SLL: r[rd] = r[rt] << imm; break;
-        case RK_SRL: r[rd] = r[rt] >> imm; break;
-        case RK_SRA: r[rd] = (uint32_t)((int32_t)r[rt] >> imm); break;
-        case RK_SLLV: r[rd] = r[rt] << (r[rs] & 31); break;
-        case RK_SRLV: r[rd] = r[rt] >> (r[rs] & 31); break;
-        case RK_SRAV: r[rd] = (uint32_t)((int32_t)r[rt] >> (r[rs] & 31)); break;
-        case RK_SRLV_RS: r[rd] = r[rs] >> (r[rs] & 31); break;
-        case RK_JR: npc = r[rs] & 0xFFC; break;
-        case RK_JALR: /* the target before the link (rd may be rs) */
-        {
-            uint32_t tgt = r[rs] & 0xFFC;
-            r[rd] = d->link;
-            npc = tgt;
+        n += rsp_loop(s, 1);
+        if (s->status & ST_SSTEP)
+            s->status |= ST_HALT;
+        if (s->status & ST_HALT)
             break;
-        }
-        case RK_BREAK:
-            s->status |= ST_HALT | ST_BROKE;
-            if (s->status & ST_INTR_BREAK)
-                raise_sp(s);
-            stop = 1;
-            break;
-        case RK_ADD: r[rd] = r[rs] + r[rt]; break;
-        case RK_SUB: r[rd] = r[rs] - r[rt]; break;
-        case RK_AND: r[rd] = r[rs] & r[rt]; break;
-        case RK_OR: r[rd] = r[rs] | r[rt]; break;
-        case RK_XOR: r[rd] = r[rs] ^ r[rt]; break;
-        case RK_NOR: r[rd] = ~(r[rs] | r[rt]); break;
-        case RK_SLT: r[rd] = (int32_t)r[rs] < (int32_t)r[rt]; break;
-        case RK_SLTU: r[rd] = r[rs] < r[rt]; break;
-        /* REGIMM: the condition before the link (rs may be $31) */
-        case RK_BLTZ: if ((int32_t)r[rs] < 0) npc = imm; break;
-        case RK_BGEZ: if ((int32_t)r[rs] >= 0) npc = imm; break;
-        case RK_BLTZAL:
-        {
-            int taken = (int32_t)r[rs] < 0;
-            r[31] = d->link;
-            if (taken)
-                npc = imm;
-            break;
-        }
-        case RK_BGEZAL:
-        {
-            int taken = (int32_t)r[rs] >= 0;
-            r[31] = d->link;
-            if (taken)
-                npc = imm;
-            break;
-        }
-        case RK_J: npc = imm; break;
-        case RK_JAL:
-            r[31] = d->link;
-            npc = imm;
-            break;
-        case RK_BEQ: if (r[rs] == r[rt]) npc = imm; break;
-        case RK_BNE: if (r[rs] != r[rt]) npc = imm; break;
-        case RK_BLEZ: if ((int32_t)r[rs] <= 0) npc = imm; break;
-        case RK_BGTZ: if ((int32_t)r[rs] > 0) npc = imm; break;
-        case RK_ADDI: r[rt] = r[rs] + imm; break;
-        case RK_SLTI: r[rt] = (int32_t)r[rs] < (int32_t)imm; break;
-        case RK_SLTIU: r[rt] = r[rs] < imm; break;
-        case RK_ANDI: r[rt] = r[rs] & imm; break;
-        case RK_ORI: r[rt] = r[rs] | imm; break; /* and LUI */
-        case RK_XORI: r[rt] = r[rs] ^ imm; break;
-        case RK_MFC0: r[rt] = cop0_read(s, rd); break;
-        case RK_MTC0:
-            cop0_write(s, rd, r[rt]);
-            stop = 1; /* SP_STATUS may have halted the RSP or turned single-step on */
-            break;
-        case RK_COP2M: cop2_move(s, imm); break; /* COP2 moves (the computational ops are RK_VU) */
-        case RK_LB: r[rt] = (uint32_t)(int32_t)(int8_t)DM(r[rs] + imm); break;
-        case RK_LH: r[rt] = (uint32_t)(int32_t)(int16_t)ld16(s, r[rs] + imm); break;
-        case RK_LW: r[rt] = ld32(s, r[rs] + imm); break; /* and LWU */
-        case RK_LBU: r[rt] = DM(r[rs] + imm); break;
-        case RK_LHU: r[rt] = ld16(s, r[rs] + imm); break;
-        case RK_SB: DM(r[rs] + imm) = (uint8_t)r[rt]; break;
-        case RK_SH:
-            DM(r[rs] + imm) = (uint8_t)(r[rt] >> 8);
-            DM(r[rs] + imm + 1) = (uint8_t)r[rt];
-            break;
-        case RK_SW: st32(s, r[rs] + imm, r[rt]); break;
-        case RK_LWC2: vu_load(s, imm); break;
-        case RK_SWC2: vu_store(s, imm); break;
-        /* LDV / SDV inside DMEM, LQV / SQV of a whole register at a 16-byte boundary: as ld_bytes / st_bytes do them,
-         * the other cases through vu_load / vu_store (the instruction is the entry's word). */
-        case RK_LDV:
-        {
-            uint32_t addr = (r[rs] + imm) & 0xFFF;
-            if (addr <= 0xFF8)
-                ld_be16x4(s->vr[rt] + d->e / 2, s->mem + addr);
-            else
-                vu_load(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        case RK_SDV:
-        {
-            uint32_t addr = (r[rs] + imm) & 0xFFF;
-            if (addr <= 0xFF8)
-                st_be16x4(s->mem + addr, s->vr[rt] + d->e / 2);
-            else
-                vu_store(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        case RK_LQV:
-        {
-            uint32_t addr = r[rs] + imm;
-            if (!((addr & 15) | d->e))
-                ld_be16x8(s->vr[rt], s->mem + (addr & 0xFF0));
-            else
-                vu_load(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        case RK_SQV:
-        {
-            uint32_t addr = r[rs] + imm;
-            if (!((addr & 15) | d->e))
-                st_be16x8(s->mem + (addr & 0xFF0), s->vr[rt]);
-            else
-                vu_store(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        default: break;
-        }
-        r[0] = 0;
-        if (stop | sstep) {
-            if (s->status & ST_SSTEP)
-                s->status |= ST_HALT;
-            if (s->status & ST_HALT)
-                break;
-        }
     }
-    s->pc = pc;
-    s->npc = npc;
     return n;
 }
