@@ -409,6 +409,7 @@ struct xenos_gl {
     int rects_gpu;            /* WP-10: rectangle lists' fourth corner made on the GPU (RECOMP_X360_RECTS=cpu: not) */
     int copy_hash_full;       /* WP-12: RECOMP_X360_COPY_HASH=full, every check of a copy's memory hashes all of it */
     int tiler;                /* WP-17: TILER_OFF (RECOMP_X360_TILER=0), TILER_ON (default), TILER_MAGENTA (=magenta) */
+    int depth_untouched;      /* WP-17: RECOMP_X360_UNUSED_DEPTH=untouched, see bind_targets */
     int npending;             /* copies with pending set */
     int in_resolve;           /* resolve() is timing itself (resolve_ns) */
     unsigned swaps;           /* xenos_gl_swap calls (the age of a pending copy) */
@@ -832,6 +833,11 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     if (g->tiler != TILER_ON)
         fprintf(stderr, "xenos: tiler passes %s (RECOMP_X360_TILER=%s)\n",
                 g->tiler == TILER_OFF ? "as before" : "magenta where invalidated", tiler_env);
+    const char *ud_env = getenv("RECOMP_X360_UNUSED_DEPTH"); /* stamped (default) | untouched (WP-17) */
+    g->depth_untouched = g->tiler != TILER_OFF && ud_env && !strcmp(ud_env, "untouched");
+    if (g->depth_untouched)
+        fprintf(stderr, "xenos: draws that do not use depth leave the depth surface untouched "
+                        "(RECOMP_X360_UNUSED_DEPTH=untouched)\n");
     const char *hash_env = getenv("RECOMP_X360_COPY_HASH"); /* sparse (default) | full (WP-12) */
     g->copy_hash_full = hash_env && !strcmp(hash_env, "full");
     if (g->copy_hash_full)
@@ -2084,6 +2090,19 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
          * colour target (Adventure Time: depth base tile 0x3FC at pitch 1920, 672 of 1080 rows) */
         if (ds >= 0 && want[0] >= 0 && !(cp->regs[0x2200] & 7) && g->surf[ds].h < g->surf[want[0]].h)
             ds = -1;
+        /* WP-17: nor, on a tiler, any depth attachment it would start a pass with (dsa, what is attached): the depth
+         * buffer would be loaded and stored for nothing. Kept when the framebuffer already has these colour targets
+         * and this depth buffer: no new pass for one draw. The surface is still synced and stamped written as if
+         * attached (frames as before); RECOMP_X360_UNUSED_DEPTH=untouched leaves it alone as the GPU would, which
+         * changes what overlapping depth surfaces carry over (Adventure Time: the top of the left tile is drawn). */
+        int dsa = ds;
+        if (ds >= 0 && g->tiler != TILER_OFF && !(cp->regs[0x2200] & 7)) {
+            int same = g->cur_ds == ds;
+            for (int i = 0; i < 4; i++)
+                same &= want[i] == g->cur[i];
+            if (want[0] >= 0 && !same) /* (colour target 0: a framebuffer with an attachment, the viewport's) */
+                dsa = -1, ds = g->depth_untouched ? -1 : ds;
+        }
         /* what another format or position left in these tiles since (not what is bound together with them) */
         int together[5] = {want[0], want[1], want[2], want[3], ds};
         g->ndclear = 0;
@@ -2115,7 +2134,7 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
         int reattach = use_ms != g->cur_ms;
         g->cur_ms = use_ms;
-        int changed = reattach || g->cur_ds != ds;
+        int changed = reattach || g->cur_ds != dsa;
         GLenum bufs[4];
         for (int i = 0; i < 4; i++) {
             if (g->cur[i] != want[i] || reattach) {
@@ -2130,15 +2149,15 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
             g->cur[i] = want[i];
             bufs[i] = want[i] >= 0 ? GL_COLOR_ATTACHMENT0 + (GLenum)i : 0 /* GL_NONE */;
         }
-        if (g->cur_ds != ds || reattach) {
-            if (ds < 0)
+        if (g->cur_ds != dsa || reattach) {
+            if (dsa < 0)
                 g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
             else if (use_ms)
-                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g->surf[ds].rb);
+                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g->surf[dsa].rb);
             else
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[ds].tex, 0);
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g->surf[dsa].tex, 0);
         }
-        g->cur_ds = ds;
+        g->cur_ds = dsa;
         g->glDrawBuffers(4, bufs);
         /* completeness depends on the attachments only (GLES 3.0: not on the draw buffers): asked again only when one
          * changed here or elsewhere (a surface deleted or grown, a state loaded) since it was last found complete */
@@ -2148,8 +2167,8 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
             for (int i = 0; i < 4; i++)
                 if (want[i] >= 0)
                     pclear_bound(g, want[i], i);
-            if (ds >= 0)
-                pclear_bound(g, ds, -1);
+            if (dsa >= 0)
+                pclear_bound(g, dsa, -1);
         }
         if (g->fbo_checked && g->ndclear) { /* the stale rows, on the attachment each surface is bound at */
             int k = g->scale;
@@ -2159,7 +2178,7 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
                 int slot = -1;
                 for (int i = 0; i < 4; i++)
                     slot = want[i] == g->dclear[c].si ? i : slot;
-                if (d->kind == 2 ? ds != g->dclear[c].si : slot < 0) { /* not attached (not expected): as before */
+                if (d->kind == 2 ? dsa != g->dclear[c].si : slot < 0) { /* not attached: through rfbo */
                     alias_clear_to(g, d, g->dclear[c].y0, g->dclear[c].y1, use_ms ? d->rb : 0);
                     g->glEnable(GL_SCISSOR_TEST);
                     continue;
