@@ -146,6 +146,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glBindBuffer, (GLenum, GLuint))                                                                            \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void *, GLenum))                                                  \
     X(void, glBindBufferBase, (GLenum, GLuint, GLuint))                                                                \
+    X(void, glBindBufferRange, (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr))                                         \
     X(GLint, glGetAttribLocation, (GLuint, const GLchar *))                                                            \
     X(void, glEnableVertexAttribArray, (GLuint))                                                                       \
     X(void, glDisableVertexAttribArray, (GLuint))                                                                      \
@@ -330,6 +331,11 @@ typedef struct rt_copy {
     unsigned frame;
 } rt_copy;
 
+/* WP-10: rectangles per second pass of a rectangle list on the GPU: their 3 captured vertices of 16 vec4 each are one
+ * uniform block of 768 vec4 (12,288 bytes, under GLES 3.0's minimum GL_MAX_UNIFORM_BLOCK_SIZE of 16,384) */
+#define RECT_CHUNK 16
+#define RECT_CHUNK_BYTES (RECT_CHUNK * 3 * 16 * 16)
+
 struct xenos_gl {
 #define DECL(ret, name, args) ret(*name) args;
     GLFUNCS(DECL)
@@ -390,6 +396,7 @@ struct xenos_gl {
     unsigned copy_clock;
     uint32_t copy_gen;        /* the last rt_copy.gen given */
     int lazy;                 /* WP-2: RECOMP_X360_RESOLVE=lazy, resolves write guest memory only when needed */
+    int rects_gpu;            /* WP-10: rectangle lists' fourth corner made on the GPU (RECOMP_X360_RECTS=cpu: not) */
     int copy_hash_full;       /* WP-12: RECOMP_X360_COPY_HASH=full, every check of a copy's memory hashes all of it */
     int npending;             /* copies with pending set */
     int in_resolve;           /* resolve() is timing itself (resolve_ns) */
@@ -753,6 +760,17 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     const char *resolve_env = getenv("RECOMP_X360_RESOLVE"); /* eager (default) | lazy (WP-2) */
     g->lazy = resolve_env && !strcmp(resolve_env, "lazy");
     fprintf(stderr, "xenos: resolves %s\n", g->lazy ? "lazy (RECOMP_X360_RESOLVE=lazy)" : "eager");
+    /* WP-10: a rectangle list's captured vertices are read by the second pass as a uniform block of RECT_CHUNK
+     * rectangles, bound at a multiple of its size in the capture buffer */
+    const char *rects_env = getenv("RECOMP_X360_RECTS"); /* gpu (default) | cpu (read back, the corner on the CPU) */
+    GLint ublock = 0, ualign = 0;
+    g->glGetIntegerv(0x8A30 /* GL_MAX_UNIFORM_BLOCK_SIZE */, &ublock);
+    g->glGetIntegerv(0x8A34 /* GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT */, &ualign);
+    g->rects_gpu = !(rects_env && !strcmp(rects_env, "cpu")) && ublock >= RECT_CHUNK_BYTES && ualign > 0 &&
+                   RECT_CHUNK_BYTES % ualign == 0;
+    if (!g->rects_gpu && !(rects_env && !strcmp(rects_env, "cpu")))
+        fprintf(g->log, "xenos_gl: rectangle lists read back (uniform block size %d, offset alignment %d)\n", ublock,
+                ualign);
     const char *hash_env = getenv("RECOMP_X360_COPY_HASH"); /* sparse (default) | full (WP-12) */
     g->copy_hash_full = hash_env && !strcmp(hash_env, "full");
     if (g->copy_hash_full)
@@ -1169,6 +1187,40 @@ static const char RECT_VS[] =
     "void main() { xe_i0 = xe_r0; xe_i1 = xe_r1; xe_i2 = xe_r2; xe_i3 = xe_r3; xe_i4 = xe_r4; xe_i5 = xe_r5; "
     "xe_i6 = xe_r6; xe_i7 = xe_r7; xe_i8 = xe_r8; xe_i9 = xe_r9; xe_i10 = xe_r10; xe_i11 = xe_r11; xe_i12 = xe_r12; "
     "xe_i13 = xe_r13; xe_i14 = xe_r14; xe_i15 = vec4(0.0); gl_Position = xe_rp; }\n";
+/* WP-10: the same pass-through without the read-back: the captured buffer of RECT_CHUNK rectangles is bound as the
+ * uniform block XeRect (binding 2) and vertex gl_VertexID makes corner k of rectangle gl_VertexID / 6 as draw_rects'
+ * CPU path does: c, a, b, a, b, a + b - c with c the vertex opposite the longest edge after the divide by w (the first
+ * of equal edges: the same strictly-greater test from -1) */
+static const char RECT_VS_GPU[] =
+    "#version 300 es\n"
+    "layout(std140) uniform XeRect { highp vec4 xe_rv[768]; };\n"
+    "out vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, xe_i10, xe_i11, xe_i12, xe_i13, "
+    "xe_i14, xe_i15;\n"
+    "void main() {\n"
+    "    int r = gl_VertexID / 6, k = gl_VertexID - 6 * r, b0 = 48 * r;\n"
+    "    vec2 s[3];\n"
+    "    for (int j = 0; j < 3; j++) {\n"
+    "        vec4 q = xe_rv[b0 + 16 * j];\n"
+    "        float w = q.w != 0.0 ? q.w : 1.0;\n"
+    "        s[j] = vec2(q.x / w, q.y / w);\n"
+    "    }\n"
+    "    int corner = 0;\n"
+    "    float best = -1.0;\n"
+    "    for (int j = 0; j < 3; j++) {\n"
+    "        vec2 e = s[(j + 1) % 3] - s[(j + 2) % 3];\n"
+    "        float len = e.x * e.x + e.y * e.y;\n"
+    "        if (len > best) { best = len; corner = j; }\n"
+    "    }\n"
+    "    int c = b0 + 16 * corner, a = b0 + 16 * ((corner + 1) % 3), b = b0 + 16 * ((corner + 2) % 3);\n"
+    "    int o = k == 0 ? c : (k == 1 || k == 3) ? a : b;\n"
+    "    bool d = k == 5;\n"
+    "#define XE_RC(i) (d ? (xe_rv[a + i] + xe_rv[b + i]) - xe_rv[c + i] : xe_rv[o + i])\n"
+    "    gl_Position = XE_RC(0); xe_i0 = XE_RC(1); xe_i1 = XE_RC(2); xe_i2 = XE_RC(3); xe_i3 = XE_RC(4);\n"
+    "    xe_i4 = XE_RC(5); xe_i5 = XE_RC(6); xe_i6 = XE_RC(7); xe_i7 = XE_RC(8); xe_i8 = XE_RC(9);\n"
+    "    xe_i9 = XE_RC(10); xe_i10 = XE_RC(11); xe_i11 = XE_RC(12); xe_i12 = XE_RC(13); xe_i13 = XE_RC(14);\n"
+    "    xe_i14 = XE_RC(15); xe_i15 = vec4(0.0);\n"
+    "}\n";
+_Static_assert(RECT_CHUNK_BYTES == 768 * 16 && RECT_VARYINGS == 16, "RECT_VS_GPU's block is RECT_CHUNK rectangles");
 static const char CAPTURE_FS[] =
     "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(0.0); }\n";
 
@@ -1216,7 +1268,8 @@ static program *add_program(xenos_gl *g, uint32_t vc, uint32_t pc, int kind)
 }
 
 /* kind 0: the title's two shaders; 1: its vertex shader with transform feedback; 2: the pass-through vertex shader
- * with its pixel shader (rectangle lists) */
+ * with its pixel shader (rectangle lists); 3: the same with the pass-through that reads the capture as a uniform block
+ * (WP-10, RECT_VS_GPU) */
 static uint32_t stage_crc(xenos_gl *g, const xenos_cp *cp, int k)
 {
     const xenos_shader *sh = &cp->shader[k];
@@ -1234,7 +1287,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
     const xenos_shader *vs = &cp->shader[0], *ps = &cp->shader[1];
     if (!vs->words || !ps->words)
         return NULL;
-    uint32_t vc = kind == 2 ? 0 : stage_crc(g, cp, 0);
+    uint32_t vc = kind >= 2 ? 0 : stage_crc(g, cp, 0);
     uint32_t pc = kind == 1 ? 0 : stage_crc(g, cp, 1);
     if (g->prog_buckets)
         for (program *q = g->prog_hash[prog_bucket(vc, pc, kind, g->prog_buckets)]; q; q = q->next)
@@ -1245,7 +1298,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
         return NULL;
     char path[600], name[40];
     char *vsrc = NULL, *psrc = NULL;
-    if (kind != 2) {
+    if (kind < 2) {
         snprintf(path, sizeof path, "%s/vs_%08X.vert", g->cache, vc);
         if ((vsrc = slurp(path)) && !strstr(vsrc, XENOS_GLSL_STAMP)) { /* an older translator's: stale */
             fprintf(g->log, "xenos_gl: %s was translated by an older xenos_glsl: translate it again\n", path);
@@ -1268,8 +1321,12 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
     /* XBA-282, XBA-296: a shader that exports to memory is GLSL ES 3.10: it needs the capability of its stage, and the
      * other stage is linked as 3.10 too (GLES links one version only; 3.00 source is 3.10 source) */
     int vs310 = vsrc && !strncmp(vsrc, "#version 310 es", 15), ps310 = psrc && !strncmp(psrc, "#version 310 es", 15);
-    char rect_vs[sizeof RECT_VS], capture_fs[sizeof CAPTURE_FS];
-    memcpy(rect_vs, RECT_VS, sizeof RECT_VS);
+    char rect_vs[sizeof RECT_VS_GPU > sizeof RECT_VS ? sizeof RECT_VS_GPU : sizeof RECT_VS];
+    char capture_fs[sizeof CAPTURE_FS];
+    if (kind == 3)
+        memcpy(rect_vs, RECT_VS_GPU, sizeof RECT_VS_GPU);
+    else
+        memcpy(rect_vs, RECT_VS, sizeof RECT_VS);
     memcpy(capture_fs, CAPTURE_FS, sizeof CAPTURE_FS);
     if (vs310 || ps310) {
         if ((vs310 && !g->memexport) || (ps310 && !g->memexport_ps)) {
@@ -1288,9 +1345,10 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
             psrc[10] = '1';
         rect_vs[10] = capture_fs[10] = '1';
     }
-    const char *vtext = kind == 2 ? rect_vs : vsrc, *ftext = kind == 1 ? capture_fs : psrc;
+    const char *vtext = kind >= 2 ? rect_vs : vsrc, *ftext = kind == 1 ? capture_fs : psrc;
     if (vtext && ftext) {
-        snprintf(name, sizeof name, kind == 2 ? "rect pass-through" : "vs_%08X", vc);
+        snprintf(name, sizeof name, kind == 3 ? "rect pass-through (gpu)" : kind == 2 ? "rect pass-through" : "vs_%08X",
+                 vc);
         GLuint v = compile(g, GL_VERTEX_SHADER, vtext, name);
         snprintf(name, sizeof name, kind == 1 ? "capture" : "ps_%08X", pc);
         GLuint f = compile(g, GL_FRAGMENT_SHADER, ftext, name);
@@ -1319,7 +1377,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
                             snprintf(an, sizeof an, "xe_r%d", i - 1);
                         p->loc[i] = g->glGetAttribLocation(p->prog, an);
                     }
-                } else {
+                } else if (kind == 0 || kind == 1) { /* kind 3 has no attributes: gl_VertexID */
                     p->nattr = parse_attrs(vsrc, p->attrs);
                     p->nvb = parse_attrs_of(vsrc, p->vbufs, "uniform highp sampler2D xe_vb");
                     for (int i = 0; i < p->nattr; i++) {
@@ -1363,6 +1421,9 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
                 b = g->glGetUniformBlockIndex(p->prog, "XePixelConstants");
                 if (b != GL_INVALID_INDEX)
                     g->glUniformBlockBinding(p->prog, b, 1);
+                b = g->glGetUniformBlockIndex(p->prog, "XeRect");
+                if (b != GL_INVALID_INDEX)
+                    g->glUniformBlockBinding(p->prog, b, 2); /* draw_rects binds the capture there */
             } else {
                 char log[2048] = "";
                 g->glGetProgramInfoLog(p->prog, sizeof log, NULL, log);
@@ -4745,14 +4806,22 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
     return 1;
 }
 
-static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const uint32_t *idx, uint32_t n)
+/* rp kind 3 (WP-10): the capture stays on the GPU and the second pass reads it as uniform blocks of RECT_CHUNK
+ * rectangles; kind 2: it is read back and the triangles are made here. p's vertex attributes (the capture's) are
+ * turned off before a kind 3 pass: it has none. */
+static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *p, uint32_t na, const program *rp,
+                       const uint32_t *idx, uint32_t n)
 {
     enum { F = RECT_VARYINGS * 4 };
     uint32_t nr = n / 3;
     if (!nr)
         return;
+    int gpu = rp->kind == 3;
+    uint32_t chunks = (nr + RECT_CHUNK - 1) / RECT_CHUNK;
     g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, g->tfbo);
-    g->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, (GLsizeiptr)nr * 3 * F * 4, NULL, GL_STREAM_DRAW);
+    /* gpu: whole blocks, so that the last chunk's uniform block lies inside the buffer */
+    g->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                    gpu ? (GLsizeiptr)chunks * RECT_CHUNK_BYTES : (GLsizeiptr)nr * 3 * F * 4, NULL, GL_STREAM_DRAW);
     g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, g->tfbo);
     g->glEnable(GL_RASTERIZER_DISCARD);
     g->glBeginTransformFeedback(0 /* GL_POINTS */);
@@ -4765,6 +4834,25 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const
     }
     g->glEndTransformFeedback();
     g->glDisable(GL_RASTERIZER_DISCARD);
+    if (gpu) {
+        /* the capture ended before it is read (GL orders the two in the command stream: no read-back, no barrier);
+         * off the feedback bindings so that it is never bound for feedback and as a uniform buffer at once */
+        g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
+        g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        for (uint32_t a = 0; a < na; a++)
+            if (p->loc[a] >= 0)
+                g->glDisableVertexAttribArray((GLuint)p->loc[a]);
+        g->glUseProgram(rp->prog);
+        bind_textures(g, cp, rp);
+        for (uint32_t k = 0; k < chunks; k++) {
+            uint32_t m = nr - k * RECT_CHUNK < RECT_CHUNK ? nr - k * RECT_CHUNK : RECT_CHUNK;
+            g->glBindBufferRange(GL_UNIFORM_BUFFER, 2, g->tfbo, (GLintptr)k * RECT_CHUNK_BYTES, RECT_CHUNK_BYTES);
+            g->glDrawArrays(4 /* GL_TRIANGLES */, 0, (GLsizei)(m * 6));
+        }
+        g->glBindBufferBase(GL_UNIFORM_BUFFER, 2, 0);
+        return;
+    }
+    g->st.rect_lists_read_back++;
     const float *cap =
         g->glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, (GLsizeiptr)nr * 3 * F * 4, GL_MAP_READ_BIT);
     float *tri = cap ? malloc((size_t)nr * 6 * F * 4) : NULL;
@@ -4919,7 +5007,13 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         return;
     }
     program *p = get_program(g, cp, d->prim_type == 8 ? 1 : 0);
-    program *rp = d->prim_type == 8 ? get_program(g, cp, 2) : NULL;
+    program *rp = NULL;
+    if (d->prim_type == 8) { /* WP-10: the GPU pass-through; the read-back one if that does not compile here */
+        if (g->rects_gpu)
+            rp = get_program(g, cp, 3);
+        if (!rp)
+            rp = get_program(g, cp, 2);
+    }
     if (!p || (d->prim_type == 8 && !rp)) {
         g->st.no_shader++;
         return;
@@ -5041,7 +5135,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     if (exports)
         memexport_begin(g);
     if (d->prim_type == 8) {
-        draw_rects(g, cp, rp, idx, n);
+        draw_rects(g, cp, p, na, rp, idx, n);
     } else if (idx) {
         g->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ibo);
         g->glBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (GLsizeiptr)n, idx, GL_STREAM_DRAW);

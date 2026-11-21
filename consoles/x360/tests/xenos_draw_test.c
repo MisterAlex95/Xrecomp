@@ -37,6 +37,8 @@
  *   frames 21-23: a linear 4x4 cube texture (one colour per face, faces 4 KB apart) sampled through tfetchCube's
  *            (S, T, face) coordinates at the centres of faces 4 (+Z: cyan) and 1 (-X: green), and a linear 4x4x4
  *            3D texture (one colour per slice) at depth 0.625 (slice 2: blue).
+ * At the end (renderers of their own): WP-2's lazy resolves; WP-10's rectangle lists, 20 in one list (two passes of
+ * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2176,6 +2178,90 @@ int main(int argc, char **argv)
         #undef LAZY_SAMPLE
         #undef LAZY_AT
         xenos_gl_destroy(g);
+    }
+    /* WP-10, rectangle lists on the GPU (the capture read as a uniform block, 16 rectangles a pass) and with
+     * RECOMP_X360_RECTS=cpu (read back), each on a renderer of its own: 20 rectangles in one list (two passes) in a 4x5
+     * grid, one colour each, every other one given with its corners in another order (the vertex opposite the longest
+     * edge second, then third); each rectangle's centre is its colour, and the two pictures are the same bytes. The
+     * read-back path first: where it draws wrong (a driver's transform feedback: ANGLE on Metal captures one vertex,
+     * frame 14 fails the same way) the GPU path, which reads the same capture, is not checked. */
+    {
+        enum { RV = 0xEE000, NR = 20 };
+        uint8_t *rect_frame[2] = {NULL, NULL};
+        int cpu_ok = 1;
+        for (int mode = 1; mode >= 0; mode--) { /* 1: cpu, 0: gpu */
+            const char *env = getenv("RECOMP_X360_RECTS");
+            char saved[16] = "";
+            if (env)
+                snprintf(saved, sizeof saved, "%s", env);
+            setenv("RECOMP_X360_RECTS", mode ? "cpu" : "gpu", 1);
+            g = xenos_gl_create_scaled(cache, W, H, scale, why, sizeof why);
+            if (env)
+                setenv("RECOMP_X360_RECTS", saved, 1);
+            else
+                unsetenv("RECOMP_X360_RECTS");
+            CHECK(g != NULL, "rectangle lists (%s): no renderer: %s", mode ? "cpu" : "gpu", why);
+            if (!g)
+                continue;
+            cp.render_ctx = g;
+            reg(0x2104, 0xFFFFu), reg(0x2200, 0), reg(0x2201, 0x00010001u), reg(0x2205, 0), reg(0x2202, 0);
+            full_viewport();
+            for (int i = 0; i < 4; i++)
+                reg(0x4400 + i, fbits(1.0f));
+            for (int r = 0; r < NR; r++) {
+                float x0 = -1.0f + 0.5f * (float)(r % 4), x1 = x0 + 0.5f, y0 = 1.0f - 0.4f * (float)(r / 4),
+                      y1 = y0 - 0.4f;
+                float cr = (float)(r % 4) / 3.0f, cg = (float)(r / 4) / 4.0f, cb = (r & 1) ? 1.0f : 0.25f;
+                /* top-left (the corner: opposite the diagonal), top-right, bottom-left, rotated by r % 3 */
+                const float cx[3] = {x0, x1, x0}, cy[3] = {y0, y0, y1};
+                for (int k = 0; k < 3; k++) {
+                    int j = (k + r % 3) % 3;
+                    vertex(RV + 32u * (uint32_t)(3 * r + k), cx[j], cy[j], cr, cg, cb);
+                }
+            }
+            im[0] = 1, im[1] = nps;
+            memcpy(im + 2, ps, 4 * nps);
+            type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+            reg(0x4800, (uint32_t)RV | 3u);
+            reg(0x4801, 2u | ((uint32_t)NR * 3 * 8) << 2);
+            uint32_t rects = 8u | 2u << 6 | (uint32_t)(NR * 3) << 16;
+            type3(PM4_DRAW_INDX_2, &rects, 1);
+            type3(PM4_XE_SWAP, swap, 4);
+            run(&cp);
+            xenos_gl_stats rs;
+            xenos_gl_get_stats(g, &rs);
+            CHECK(rs.rect_draws == 1 && rs.rect_lists_read_back == (uint64_t)mode,
+                  "rectangle lists (%s): %llu drawn, %llu read back", mode ? "cpu" : "gpu",
+                  (unsigned long long)rs.rect_draws, (unsigned long long)rs.rect_lists_read_back);
+            int bad = 0;
+            for (int r = 0; r < NR && !bad && cpu_ok; r++) {
+                int x = (r % 4) * W / 4 + W / 8, y = (int)((float)(r / 4) * H / 5.0f + H / 10.0f);
+                const uint8_t *q = px(g, x, y);
+                int want[3] = {(int)((float)(r % 4) / 3.0f * 255.0f + 0.5f),
+                               (int)((float)(r / 4) / 4.0f * 255.0f + 0.5f), (r & 1) ? 255 : 64};
+                for (int k = 0; k < 3; k++)
+                    if (q[k] - want[k] > 2 || want[k] - q[k] > 2)
+                        bad = 1;
+                if (bad && mode) {
+                    printf("rectangle lists: the read-back path draws rectangle %d as %u,%u,%u here (transform "
+                           "feedback, as frame 14): the GPU path is not checked\n", r, q[0], q[1], q[2]);
+                    cpu_ok = 0;
+                    break;
+                }
+                CHECK(!bad, "rectangle lists (%s): rectangle %d at %d,%d is %u,%u,%u, want %d,%d,%d",
+                      mode ? "cpu" : "gpu", r, x, y, q[0], q[1], q[2], want[0], want[1], want[2]);
+            }
+            int fw, fh;
+            const uint8_t *f = xenos_gl_frame(g, &fw, &fh);
+            if (f && (rect_frame[mode] = malloc((size_t)fw * fh * 4)))
+                memcpy(rect_frame[mode], f, (size_t)fw * fh * 4);
+            xenos_gl_destroy(g);
+        }
+        if (cpu_ok && rect_frame[0] && rect_frame[1])
+            CHECK(!memcmp(rect_frame[0], rect_frame[1], (size_t)W * H * 4),
+                  "rectangle lists: the GPU's picture differs from the read-back one");
+        free(rect_frame[0]);
+        free(rect_frame[1]);
     }
     free(pst);
     free(vs);
