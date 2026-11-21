@@ -1223,80 +1223,26 @@ static int read_fb_make(void)
     return s_read_fb != 0;
 }
 
-#if defined(XBOXRECOMP_LSFG)
-/* The raw pixels of a texture of the window's context as they are now (RGBA, packed, row 0 at the top), through a
- * framebuffer of our own: frame generation's read-back. Its sampler state (an X360 frame's swizzle) is not applied
- * and a float texture may not be readable as bytes: screenshots use texture_grab. NULL when it cannot be read (no
- * framebuffer objects, an incomplete attachment). The buffer stays valid until the next read. */
-static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
-{
-    read_context_check();
-    if (s_read_failed || !tex || w <= 0 || h <= 0)
-        return NULL;
-    if (!s_read_fb) {
-        if (!read_fb_make()) {
-            s_read_failed = 1;
-            fprintf(stderr, "  [HOST] window: no framebuffer objects: frame generation skips GPU pictures\n");
-            return NULL;
-        }
-    }
-    if (!read_room((size_t)w * (size_t)h * 4))
-        return NULL;
-    int ok = read_attach(tex);
-    if (ok) {
-        PackState pack;
-        pack_enter(&pack);
-        s_gl.ReadPixels(0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, s_read_px);
-        pack_leave(&pack);
-    }
-    read_detach();
-    if (!ok) {
-        s_read_failed = 1;
-        fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation skips them\n");
-        return NULL;
-    }
-    /* The texture's row 0 comes first: the top when top_down, else the bottom (flipped here). */
-    if (!top_down) {
-        size_t row = (size_t)w * 4;
-        uint8_t tmp[4096];
-        for (int y = 0; y < h / 2; y++) {
-            uint8_t *a = s_read_px + (size_t)y * row, *b = s_read_px + (size_t)(h - 1 - y) * row;
-            for (size_t off = 0; off < row; off += sizeof tmp) {
-                size_t n = row - off < sizeof tmp ? row - off : sizeof tmp;
-                memcpy(tmp, a + off, n);
-                memcpy(a + off, b + off, n);
-                memcpy(b + off, tmp, n);
-            }
-        }
-    }
-    return s_read_px;
-}
-#endif
-
 /* The longest side of a grab: a 4x internal resolution is read at 1920 (drawn smaller, sampled). */
 #define GRAB_MAX_SIDE 1920
 
 /* Texture tex as the window samples it (its swizzle, any format the present program reads), drawn with the plain
- * present program into an RGBA8 target of gw x gh and read back: RGBA, packed, row 0 the picture's top, in s_read_px.
- * Touches only what draw() sets anyway (framebuffer, viewport, program, unit 0, vertex array, the tests it turns
- * off) and the pack state (put back); ends with framebuffer 0 and the viewport it found. NULL when it cannot; nothing
- * is latched (the next request tries again). */
-static const uint8_t *texture_grab(unsigned tex, int top_down, int gw, int gh)
+ * present program into s_grab_tex, an RGBA8 target of gw x gh: the picture's top in its row 0, the first row a read
+ * returns. 1 with s_read_fb bound and s_grab_tex attached, ready to read; 0 when it cannot be drawn. Either way the
+ * caller ends with read_detach and the viewport put back (vp, what this found). Touches only what draw() sets anyway
+ * (framebuffer, viewport, program, unit 0, vertex array, the tests it turns off). */
+static int grab_draw(unsigned tex, int top_down, int gw, int gh, int vp[4])
 {
-    int vp[4] = {0, 0, 0, 0};
-
-    read_context_check();
-    if (!tex || gw <= 0 || gh <= 0 || !s_prog || !s_vao || !read_fb_make())
-        return NULL;
-    if (!read_room((size_t)gw * (size_t)gh * 4))
-        return NULL;
+    s_gl.GetIntegerv(XGL_VIEWPORT, vp);
     s_gl.ActiveTexture(XGL_TEXTURE0);
     if (!s_grab_tex || s_grab_w != gw || s_grab_h != gh) {
         int unpack = 0;
         if (!s_grab_tex)
             s_gl.GenTextures(1, &s_grab_tex);
-        if (!s_grab_tex)
-            return NULL;
+        if (!s_grab_tex) {
+            s_gl.BindFramebuffer(XGL_FRAMEBUFFER, s_read_fb);
+            return 0;
+        }
         s_gl.BindTexture(XGL_TEXTURE_2D, s_grab_tex);
         s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MIN_FILTER, XGL_NEAREST);
         s_gl.TexParameteri(XGL_TEXTURE_2D, XGL_TEXTURE_MAG_FILTER, XGL_NEAREST);
@@ -1312,25 +1258,40 @@ static const uint8_t *texture_grab(unsigned tex, int top_down, int gw, int gh)
         s_grab_w = gw;
         s_grab_h = gh;
     }
-    s_gl.GetIntegerv(XGL_VIEWPORT, vp);
-    int ok = read_attach(s_grab_tex);
+    if (!read_attach(s_grab_tex))
+        return 0;
+    s_gl.ColorMask(1, 1, 1, 1);
+    s_gl.Disable(XGL_CULL_FACE);
+    s_gl.Disable(XGL_STENCIL_TEST);
+    s_gl.Disable(XGL_SCISSOR_TEST);
+    s_gl.Disable(XGL_BLEND);
+    s_gl.Disable(XGL_DEPTH_TEST);
+    s_gl.Viewport(0, 0, gw, gh);
+    s_gl.UseProgram(s_prog);
+    s_gl.BindTexture(XGL_TEXTURE_2D, tex);
+    s_gl.Uniform1i(s_u_tex, 0);
+    /* Read-back row 0 is the target's bottom: the picture's top goes there (draw() flips the other way). */
+    s_gl.Uniform1f(s_u_flip, top_down ? 0.0f : 1.0f);
+    s_gl.BindVertexArray(s_vao);
+    s_gl.DrawArrays(XGL_TRIANGLES, 0, 3);
+    s_gl.BindVertexArray(0);
+    return 1;
+}
+
+/* grab_draw, then read into s_read_px: RGBA, packed, row 0 the picture's top. The pack state is put back; ends with
+ * framebuffer 0 and the viewport it found. NULL when it cannot; nothing is latched (the next request tries again). */
+static const uint8_t *texture_grab(unsigned tex, int top_down, int gw, int gh)
+{
+    int vp[4] = {0, 0, 0, 0};
+
+    read_context_check();
+    if (!tex || gw <= 0 || gh <= 0 || !s_prog || !s_vao || !read_fb_make())
+        return NULL;
+    if (!read_room((size_t)gw * (size_t)gh * 4))
+        return NULL;
+    int ok = grab_draw(tex, top_down, gw, gh, vp);
     if (ok) {
         PackState pack;
-        s_gl.ColorMask(1, 1, 1, 1);
-        s_gl.Disable(XGL_CULL_FACE);
-        s_gl.Disable(XGL_STENCIL_TEST);
-        s_gl.Disable(XGL_SCISSOR_TEST);
-        s_gl.Disable(XGL_BLEND);
-        s_gl.Disable(XGL_DEPTH_TEST);
-        s_gl.Viewport(0, 0, gw, gh);
-        s_gl.UseProgram(s_prog);
-        s_gl.BindTexture(XGL_TEXTURE_2D, tex);
-        s_gl.Uniform1i(s_u_tex, 0);
-        /* Read-back row 0 is the target's bottom: the picture's top goes there (draw() flips the other way). */
-        s_gl.Uniform1f(s_u_flip, top_down ? 0.0f : 1.0f);
-        s_gl.BindVertexArray(s_vao);
-        s_gl.DrawArrays(XGL_TRIANGLES, 0, 3);
-        s_gl.BindVertexArray(0);
         pack_enter(&pack);
         s_gl.ReadPixels(0, 0, gw, gh, XGL_RGBA, XGL_UNSIGNED_BYTE, s_read_px);
         pack_leave(&pack);
@@ -1339,6 +1300,44 @@ static const uint8_t *texture_grab(unsigned tex, int top_down, int gw, int gh)
     s_gl.Viewport(vp[0], vp[1], vp[2], vp[3]);
     return ok ? s_read_px : NULL;
 }
+
+#if defined(XBOXRECOMP_LSFG)
+/* The pixels of a texture of the window's context as it shows them now (RGBA, packed, row 0 at the top), drawn into
+ * texture_grab's target and read (its sampler swizzle applied, a float texture too, as the window shows it): frame
+ * generation when no earlier read-back can serve. NULL when it cannot be read (no framebuffer objects, an incomplete
+ * attachment: latched, frame generation then skips GPU pictures). The buffer stays valid until the next read. */
+static const uint8_t *texture_pixels(unsigned tex, int w, int h, int top_down)
+{
+    read_context_check();
+    if (s_read_failed || !tex || w <= 0 || h <= 0)
+        return NULL;
+    if (!s_read_fb) {
+        if (!read_fb_make()) {
+            s_read_failed = 1;
+            fprintf(stderr, "  [HOST] window: no framebuffer objects: frame generation skips GPU pictures\n");
+            return NULL;
+        }
+    }
+    if (!read_room((size_t)w * (size_t)h * 4))
+        return NULL;
+    int vp[4] = {0, 0, 0, 0};
+    int ok = grab_draw(tex, top_down, w, h, vp);
+    if (ok) {
+        PackState pack;
+        pack_enter(&pack);
+        s_gl.ReadPixels(0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, s_read_px);
+        pack_leave(&pack);
+    }
+    read_detach();
+    s_gl.Viewport(vp[0], vp[1], vp[2], vp[3]);
+    if (!ok) {
+        s_read_failed = 1;
+        fprintf(stderr, "  [HOST] window: a GPU picture cannot be read back: frame generation skips them\n");
+        return NULL;
+    }
+    return s_read_px;   /* drawn the right way up: row 0 is the top whatever top_down */
+}
+#endif
 
 /* The picture present_texture showed last, grabbed into s_last (presenting thread). 0, with the reason on stderr,
  * when it cannot be had now: no window, another context current (the app in the background), the texture gone. */
@@ -1431,7 +1430,9 @@ static void read_release(void)
  * between that makes it old (a state load, the app paused or resumed, fast-forward, a picture from another path).
  * Otherwise this present primes: it reads its own picture synchronously, so the pacer never gets an empty buffer, and
  * starts the next read; the next present then gives the same picture again, which fgc_frame drops as a repeat.
- * Screenshots never come here (texture_pixels). */
+ * Every read is of the picture drawn into texture_grab's target first (grab_draw: one more full-picture draw per
+ * present), not of the texture itself: the pacer gets what the window shows (an X360 frame's sampler swizzle, an
+ * RGBA16F frame), row 0 at the top. Screenshots never come here (texture_grab). */
 static void (APIENTRY *s_gen_buffers)(int, unsigned *);
 static void (APIENTRY *s_del_buffers)(int, const unsigned *);
 static void (APIENTRY *s_buffer_data)(unsigned, intptr_t, const void *, unsigned);
@@ -1513,8 +1514,10 @@ static int rb_issue(unsigned tex, int w, int h, int top_down)
         if (!s_rb.pbo[0] || !s_rb.pbo[1])
             return 0;
     }
-    if (!read_attach(tex)) {
+    int vp[4] = {0, 0, 0, 0};
+    if (!grab_draw(tex, top_down, w, h, vp)) {   /* as the window shows it: swizzle, float (texture_pixels) */
         read_detach();
+        s_gl.Viewport(vp[0], vp[1], vp[2], vp[3]);
         return 0;
     }
     pack_enter(&pack);
@@ -1530,6 +1533,7 @@ static int rb_issue(unsigned tex, int w, int h, int top_down)
         s_gl.ReadPixels(0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, NULL);
     pack_leave(&pack);
     read_detach();
+    s_gl.Viewport(vp[0], vp[1], vp[2], vp[3]);
     if (!ok)
         return 0;
     s_flush();   /* a tiler starts on it now, not at the next swap */
@@ -1542,11 +1546,11 @@ static int rb_issue(unsigned tex, int w, int h, int top_down)
     return 1;
 }
 
-/* The finished read in pbo[slot] into s_read_px, row 0 at the top; unmapped and unbound when it returns, as the
- * caller may draw next. NULL when it cannot be had. */
-static const uint8_t *rb_take(int slot, int w, int h, int top_down)
+/* The finished read in pbo[slot] into s_read_px, row 0 at the top (grab_draw drew it so); unmapped and unbound when
+ * it returns, as the caller may draw next. NULL when it cannot be had. */
+static const uint8_t *rb_take(int slot, int w, int h)
 {
-    size_t row = (size_t)w * 4, need = row * (size_t)h;
+    size_t need = (size_t)w * 4 * (size_t)h;
     PackState pack;
     int ok = 0;
 
@@ -1556,12 +1560,7 @@ static const uint8_t *rb_take(int slot, int w, int h, int top_down)
     s_bind_buffer(XGL_PIXEL_PACK_BUFFER, s_rb.pbo[slot]);
     const uint8_t *p = s_map_range(XGL_PIXEL_PACK_BUFFER, 0, (intptr_t)need, XGL_MAP_READ_BIT);
     if (p) {
-        if (top_down) {
-            memcpy(s_read_px, p, need);
-        } else {   /* the texture's row 0 is the picture's bottom */
-            for (int y = 0; y < h; y++)
-                memcpy(s_read_px + (size_t)y * row, p + (size_t)(h - 1 - y) * row, row);
-        }
+        memcpy(s_read_px, p, need);
         ok = s_unmap(XGL_PIXEL_PACK_BUFFER) != 0;   /* 0: the store was corrupted while mapped */
     }
     pack_leave(&pack);
@@ -1589,7 +1588,7 @@ static const uint8_t *rb_picture(unsigned tex, int w, int h, int top_down)
         rb_issue(tex, w, h, top_down);
     if (!have)
         return px;
-    px = rb_take(slot, w, h, top_down);   /* have: the read in flight is of this very shape */
+    px = rb_take(slot, w, h);   /* have: the read in flight is of this very shape */
     if (px) {
         s_rb_mapped++;
         return px;

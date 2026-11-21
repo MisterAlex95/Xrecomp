@@ -86,8 +86,8 @@ int host_window_present_again(void);
  * the real and generated frames of its timed FIFO at their due times, during the next presents and during
  * host_window_sleep_until. Fast-forward (recomp_ff_active) draws directly; a state load (recomp_states_loads), the
  * app pausing or resuming and the in-game menu start a fresh history; host_window_screenshot_bmp keeps the last
- * real picture, host_window_capture never captures a generated one. host_window_present_texture reads its texture
- * back for the pacer (GC-003). */
+ * real picture, host_window_capture never captures a generated one. host_window_present_texture gives the pacer its
+ * texture as the window shows it (drawn into a picture of its own first, then read back: GC-003). */
 
 /* Sleeps until CLOCK_MONOTONIC deadline_ns (xbox_HostNowNs), drawing the frame generation FIFO's entries at their
  * due times meanwhile; a plain sleep without frame generation. The runtimes' frame pacing sleeps through it. */
