@@ -800,3 +800,15 @@ jobs:
         run: |
           docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
           sh tools/ci/heavy_lock.sh release || true
+
+      # XBA-343: the weekly run reports to the maintainers' Rustrak (monitor ci-weekly, project Infra): a missed or
+      # failed Monday run opens an issue there. No-op without the XBA_INFRA_DSN secret.
+      - name: Rustrak check-in
+        if: always() && github.event_name == 'schedule'
+        env:
+          XBA_INFRA_DSN: ${{ secrets.XBA_INFRA_DSN }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          apk add --no-cache curl >/dev/null 2>&1 || true
+          [ "$JOB_STATUS" = success ] && st=ok || st=error
+          sh tools/ci/rustrak_checkin.sh ci-weekly "$st" '30 2 * * 1' 180

@@ -335,3 +335,18 @@ To check the expected-failure files by hand:
 python3 tools/ci/check_expected.py ctest --expected tools/ci/arm64-expected.txt --report c-tests.md --junit junit/
 python3 tools/ci/check_expected.py android --expected tools/ci/android-unbuilt.txt --report build-report.md
 ```
+
+### Watched from Rustrak
+
+XBA-343. The maintainers' Rustrak has a project « Infra », apart from the players' reports (its DSN is the CI secret
+`XBA_INFRA_DSN` and the host's `/usr/local/lib/xba/infra.env`, never committed: the app's DSN is public, and anyone
+holding this one could post check-ins). `tools/ci/rustrak_checkin.sh <slug> <ok|error> [crontab] [margin]` sends one
+Sentry cron check-in and does nothing without the DSN. Monitors (Rustrak › Crons):
+
+| Monitor | Sent by | Issue when |
+|---|---|---|
+| `ci-host-disk` | the host's `/etc/cron.d/xba-disk-checkin`, every 30 min (`tools/ci/disk_checkin.sh /`) | `/` at 85 % or more, or a missed check-in (host or cron down) |
+| `ci-weekly` | the last step of `device-tests` on the Monday schedule | the run failed, or no check-in by 05:30 UTC (also when `linux` failed and skipped it) |
+
+The disk check sends an error before the disk is full on purpose: Rustrak lives on that disk and could not record a
+missed check-in once it is.
