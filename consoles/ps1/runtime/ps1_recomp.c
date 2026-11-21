@@ -608,8 +608,8 @@ void ps1_recomp_run(ps1_machine *m)
         }
         if (pc == s->interp_pc || m->next_delay || (m->cop0[C0_SR] & (SR_KUC | SR_ISC))) {
             /* the instruction lifted code left to the interpreter (after the loop's checks), a delay slot, user mode
-             * or an isolated cache. Then the rest of its block, while execution stays in sequence: inside a block
-             * nothing is a resume point. */
+             * or an isolated cache. Then the instructions up to the next resume point (rc_hint), while execution
+             * stays in sequence. */
             bool handed = pc == s->interp_pc;
             if (handed)
                 s->stats.fallbacks++;

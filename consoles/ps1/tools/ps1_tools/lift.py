@@ -2,7 +2,7 @@
 
 The function is cut into blocks, each entered from the entry switch at its first instruction (a resume point), with
 one event check per segment (« blocks and event checks » below): lifted code stops where the interpreter would
-(scheduler event, interrupt) and the interpreter runs the rest of that block. Delay slots run inline after their
+(scheduler event, interrupt) and the interpreter runs up to the next resume point. Delay slots run inline after their
 branch (and are emitted on their own too only when a branch of the function targets them). Semantics are the
 interpreter's (ps1_cpu.c), instruction for instruction:
 - the fetch cost of every instruction (RC_I), LW-class loads' cycles, GTE commands' cycles, at the same point;
@@ -67,8 +67,8 @@ class FnLifter:
 
     def body(self, i, fault, hand=None):
         """C for instruction i (not a transfer). fault: the statement that hands it to the interpreter; hand: the same
-        with the rest of its block (« memory accesses » below). Returns (code, delayed, memory) where delayed is the
-        register of a delayed load (value in ldv) or None, and memory says whether it accesses memory."""
+        with the rest up to the next resume point (« memory accesses » below). Returns (code, delayed, memory) where
+        delayed is the register of a delayed load (value in ldv) or None, and memory says whether it accesses memory."""
         n, rs, rt, rd = i.name, R(i.rs), R(i.rt), R(i.rd)
         simm = i.simm & 0xFFFFFFFF
         hand = hand or fault
@@ -281,11 +281,14 @@ class FnLifter:
             if i.is_transfer() and self.inside(a + 4) and not img.ins(a + 4).is_transfer():
                 units[a].append(self.unit(img.ins(a + 4), cpi))
         leaders = self.block_leaders(emitted, units)
-        self.labels = len(leaders)
-        ends, end = {}, f.end  # instruction -> the address after its block
+        # the segment starts inside blocks (after a dynamic instruction) are resume points too (XBA-295)
+        segs = {emitted[k + 1] for k, a in enumerate(emitted[:-1]) if units[a][-1][1]} - leaders
+        resume = leaders | segs
+        self.labels = len(resume)
+        ends, end = {}, f.end  # instruction -> the address of the next resume point
         for a in reversed(emitted):
             ends[a] = end
-            if a in leaders:
+            if a in resume:
                 end = a
         # each instruction's C
         codes = {}
@@ -308,11 +311,11 @@ class FnLifter:
                "    RC_ENTER(%d, 0x%06Xu, %du);\n" % (cpi, f.start & 0x1FFFFF, f.end - f.start)]
         out += [d for d, s in zip(decl, (written, read)) if s]
         out.append("    switch (h->pc) {\n")
-        out += ["    case %s: goto L_%08X;\n" % (hx(a), a) for a in emitted if a in leaders]
-        # the other instructions (inside blocks): how many to their block's end, from a table
+        out += ["    case %s: goto L_%08X;\n" % (hx(a), a) for a in emitted if a in resume]
+        # the other instructions: how many to the next resume point, from a table
         tab = [0] * len(f.addrs)
         for a in emitted:
-            if a not in leaders:
+            if a not in resume:
                 tab[(a - f.start) // 4] = (ends[a] - a) // 4
         while tab and not tab[-1]:
             tab.pop()
@@ -327,7 +330,7 @@ class FnLifter:
         seg_start = True
         for k, a in enumerate(emitted):
             i = img.ins(a)
-            if a in leaders:
+            if a in resume:
                 out.append("L_%08X:%s\n" % (a, " /* %s */" % i.text() if comments else ""))
                 seg_start = True
             elif comments:
@@ -382,21 +385,22 @@ class FnLifter:
 # with one check per segment, rather than a label, a test and an exit per instruction (what made the C slow to
 # compile). A block starts at a resume point (block_leaders) and runs to the next one. A segment starts at the block's
 # start or after a dynamic instruction (an access to a known IO register, SWL / SWR, a GTE command: they go through
-# the core, which may move the clock and the next event) and runs up to the next dynamic one or the block's end. Its
-# instructions before the last cost static cycles at most (their fetch, cpi each, and 3 for an LW-class load from
-# RAM), so `now + those < ne` at its start means no check inside would stop; a dynamic instruction's own cycles, and
-# whatever the core did, are seen by the check after it. RC_SEG is also the exact check of its first instruction: due
-# now, leave for the dispatcher; due inside the segment, the interpreter runs the rest of the block
-# (PS1_RC_EXIT_INTERP, rc_hint = how many instructions). Entered inside a block (an interrupt returns there), the
-# function answers the same from its mid_ table. An IO access that left an interrupt pending sets the local next
-# event to 0, so the check after it leaves.
+# the core, which may move the clock and the next event) and runs up to the next dynamic one or the block's end; a
+# segment start is a resume point too (XBA-295, as the GBA's since XBA-281). Its instructions before the last cost
+# static cycles at most (their fetch, cpi each, and 3 for an LW-class load from RAM), so `now + those < ne` at its
+# start means no check inside would stop; a dynamic instruction's own cycles, and whatever the core did, are seen by
+# the check after it. RC_SEG is also the exact check of its first instruction: due now, leave for the dispatcher; due
+# inside the segment, the interpreter runs up to the next resume point (PS1_RC_EXIT_INTERP, rc_hint = how many
+# instructions) and lifted code takes over there. Entered elsewhere (an interrupt returns there), the function answers
+# the same from its mid_ table. An IO access that left an interrupt pending sets the local next event to 0, so the
+# check after it leaves.
 #
 # ---- memory accesses ----
 #
 # A load or store whose address is not a known IO register (io_accesses: a base built by LUI / ADDIU / ORI in the
 # function, plus the offset, in the IO area) is a RAM access: main RAM and the scratchpad inline, with static cycles,
 # and anything else (an IO register after all, an address or bus error, a store into this function's own code) is
-# handed to the interpreter with the rest of its block (RC_HAND: one exit per access, no call into the core). The
+# handed to the interpreter up to the next resume point (RC_HAND: one exit per access, no call into the core). The
 # interpreter does it exactly; the dispatcher's content check sees a store into code. Accesses to known IO registers
 # go through the core inline (ps1_rc_lw / read / write): the hardware registers of a game's drivers stay native.
 

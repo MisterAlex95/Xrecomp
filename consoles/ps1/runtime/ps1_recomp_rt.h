@@ -11,9 +11,9 @@
  * Lifted code is cycle-exact with the interpreter (ps1_cpu.c): every instruction costs the same fetch cycles, LW-class
  * loads the same load cycles, at the same point; it stops where the run loop would (`cycles < next_event` before each
  * instruction): exactly at the start of a block, and once per segment inside it (ps1_tools lift.py « blocks and event
- * checks »: when the next event falls inside a segment, the interpreter runs the rest of the block). An access that
- * left main RAM (IO: it may raise an interrupt) and left the IRQ line up, or a store into the function's own code,
- * stops it after that instruction. When it must stop (scheduler event, pending IRQ, a call, a return, an indirect
+ * checks »: when the next event falls inside a segment, the interpreter runs up to the next resume point). An access
+ * that left main RAM (IO: it may raise an interrupt) and left the IRQ line up, or a store into the function's own
+ * code, stops it after that instruction. When it must stop (scheduler event, pending IRQ, a call, a return, an indirect
  * jump, a jump out of the function: the dispatcher picks the next function), it writes the registers back with pc /
  * next_pc / the delay-slot flags exactly as the interpreter would hold them between two instructions, and returns.
  *
@@ -27,12 +27,13 @@
  *
  * Entry: the dispatcher calls a table function with pc at any instruction of its range, never in a delay slot, never
  * with a load in flight, in kernel mode with the cache not isolated (it interprets otherwise). The function resumes
- * there when it is the start of one of its blocks (the resume points: its entry, jump targets, return points, every
- * few instructions). At another of its instructions it returns at once with PS1_RC_EXIT_INTERP and rc_hint = the
- * number of instructions to its block's end, nothing changed: the interpreter runs them (as when an event stopped
- * lifted code there, or an interrupt handler returns there). If pc is not one of its own it returns at once with
- * rc_exit = PS1_RC_EXIT_NOT_COVERED. (Packs from before rc_hint resumed at every instruction; both kinds run on every
- * core of PS1_RECOMP_ABI 1: an older core ignores rc_hint and calls the function back for each instruction.) */
+ * there when it is one of its resume points (its entry, jump targets, return points, every few instructions, the
+ * start of a segment inside a block). At another of its instructions it returns at once with PS1_RC_EXIT_INTERP and
+ * rc_hint = the number of instructions to the next resume point, nothing changed: the interpreter runs them (as when
+ * an event stopped lifted code there, or an interrupt handler returns there). If pc is not one of its own it returns
+ * at once with rc_exit = PS1_RC_EXIT_NOT_COVERED. (Packs from before rc_hint resumed at every instruction; both kinds
+ * run on every core of PS1_RECOMP_ABI 1: an older core ignores rc_hint and calls the function back for each
+ * instruction.) */
 #ifndef PS1_RECOMP_RT_H
 #define PS1_RECOMP_RT_H
 
@@ -180,7 +181,7 @@ void ps1_rc_gte_write(ps1_machine *m, int r, uint32_t v);                /* MTC2
     } while (0)
 
 /* The event check of a segment starting at A (ps1_tools lift.py « blocks and event checks »): CYC static cycles before
- * its last instruction, N instructions from A to the end of its block. Due now: leave for the dispatcher (the run
+ * its last instruction, N instructions from A to the next resume point. Due now: leave for the dispatcher (the run
  * loop's own check, in front of A); due inside the segment: the interpreter runs from A (N instructions: rc_hint). */
 #define RC_SEG(A, CYC, N)                                                                                            \
     do {                                                                                                             \
@@ -191,7 +192,7 @@ void ps1_rc_gte_write(ps1_machine *m, int r, uint32_t v);                /* MTC2
         }                                                                                                            \
     } while (0)
 
-/* Entered at pc, not a resume point: TAB[(pc - LO) / 4] is the number of instructions to the end of pc's block (0:
+/* Entered at pc, not a resume point: TAB[(pc - LO) / 4] is the number of instructions to the next resume point (0:
  * not one of this function's instructions): the interpreter runs them, nothing done here. */
 #define RC_MID_TABLE(LO, TAB)                                                                                        \
     do {                                                                                                             \
@@ -209,7 +210,7 @@ void ps1_rc_gte_write(ps1_machine *m, int r, uint32_t v);                /* MTC2
         epc = (A);                                                                                                   \
         goto x_interp;                                                                                               \
     } while (0)
-/* ... and the N - 1 instructions after it, the rest of its block (rc_hint). */
+/* ... and the N - 1 instructions after it, up to the next resume point (rc_hint). */
 #define RC_HAND(A, N)                                                                                                \
     do {                                                                                                             \
         epc = (A);                                                                                                   \

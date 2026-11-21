@@ -334,17 +334,18 @@ def test_blocks_segments_and_registers():
          + [ADDIU(3, 3, 1)] * 13 + [JR_RA, NOP])
     img = Image(BASE, words(w), "exe")
     c = FnLifter(Function(img, BASE, BASE + 4 * len(w)), "ps1_rc_t").function(comments=False)
-    # blocks of 12 instructions: three resume points; the rest answer from the mid_ table
+    # blocks of 12 instructions and the segment start after the IO access (XBA-295): four resume points; the rest
+    # answer from the mid_ table (the instructions to the next resume point)
     assert [x for x in c.split("\n") if x.strip().startswith("case ")] == [
-        "    case 0x80010000u: goto L_80010000;", "    case 0x80010030u: goto L_80010030;",
-        "    case 0x80010060u: goto L_80010060;"]
-    assert "mid_[27] = {0, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 11," in c
+        "    case 0x80010000u: goto L_80010000;", "    case 0x80010018u: goto L_80010018;",
+        "    case 0x80010030u: goto L_80010030;", "    case 0x80010060u: goto L_80010060;"]
+    assert "mid_[27] = {0, 5, 4, 3, 2, 1, 0, 5, 4, 3, 2, 1, 0, 11," in c
     # the GPU status register (a LUI base) goes through the core; the stack is a RAM access, handed over otherwise
     assert "RC_LW(r8 + 0x00001814u, 3u, ldv, RC_INTERP(0x80010014u););" in c
     assert "RC_LW_RAM(r29, 3u, ldv, RC_HAND(0x80010030u, 12););" in c
     # one check per segment: up to the IO access (5 cycles before it), after it, then each block (the slot included;
     # the RAM load counts its 3 cycles)
-    assert "RC_SEG(0x80010000u, 5, 12);" in c and "RC_SEG(0x80010018u, 5, 6);" in c
+    assert "RC_SEG(0x80010000u, 5, 6);" in c and "RC_SEG(0x80010018u, 5, 6);" in c
     assert "RC_SEG(0x80010030u, 14, 12);" in c and "RC_SEG(0x80010060u, 3, 4);" in c
     assert c.count("RC_SEG(") == 4 and c.count("RC_I();") == len(w)
     # registers: written ones in locals written back, read-only ones const

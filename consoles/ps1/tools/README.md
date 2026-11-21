@@ -61,18 +61,19 @@ is tested where the interpreter's loop would stop, with one check per segment (b
   the function, plus the offset, outside RAM and the scratchpad: `lift.io_accesses`, a heuristic for speed only) goes
   through the core (`ps1_rc_lw`, `ps1_rc_read`, `ps1_rc_write`; SWL / SWR always: `ps1_rc_swlr`), the IRQ line
   checked after it. Any other access is a RAM access: main RAM and the scratchpad inline, anything else (IO after
-  all, an address or bus error, a store into the running function's own code) handed to the interpreter with the
-  rest of its block (`RC_HAND`, nothing of the instruction done): one exit per access and no call into the core, so
+  all, an address or bus error, a store into the running function's own code) handed to the interpreter up to the
+  next resume point (`RC_HAND`, nothing of the instruction done): one exit per access and no call into the core, so
   its cycles are static.
 - **Blocks and event checks.** A function is cut into blocks: its entry, branch and jump targets, the instruction
   after a transfer's delay slot (return points), after an instruction always handed to the interpreter, and every 12
-  instructions. Only block starts are resume points (a case of the entry switch). A segment runs from a block's start,
-  or from after a dynamic instruction (an access through the core, a GTE command), to the next dynamic one or the
-  block's end; its check, `RC_SEG`, compares `now` plus the static cycles of its instructions before the last (fetch,
-  and 3 per RAM load: an upper bound) with the next event: due now, the function stops there (the interpreter's own
-  stop); due inside the segment, the interpreter runs the rest of the block (`PS1_RC_EXIT_INTERP` with `rc_hint` =
-  how many instructions), so events land on the same instruction as in the interpreter. Entered inside a block (an
-  interrupt returns there), the function answers the same from a table (`mid_`). An IO access that left an interrupt
+  instructions. A segment runs from a block's start, or from after a dynamic instruction (an access through the
+  core, SWL / SWR, a GTE command), to the next dynamic one or the block's end. Block and segment starts are the
+  resume points (a case of the entry switch; segment starts since XBA-295, as the GBA's). A segment's check,
+  `RC_SEG`, compares `now` plus the static cycles of its instructions before the last (fetch, and 3 per RAM load: an
+  upper bound) with the next event: due now, the function stops there (the interpreter's own stop); due inside the
+  segment, the interpreter runs up to the next resume point (`PS1_RC_EXIT_INTERP` with `rc_hint` = how many
+  instructions) and lifted code takes over there, so events land on the same instruction as in the interpreter.
+  Entered elsewhere (an interrupt returns there), the function answers the same from a table (`mid_`). An IO access that left an interrupt
   pending sets the local next event to 0: the check after it stops. This replaced a label, a scheduler test and an
   exit per instruction, which made the C 3-5 times slower to compile (docs/android/prepare.md « PS1 packs »).
 - **Registers.** Guest registers live in locals: the ones the function writes are loaded at entry and written back
