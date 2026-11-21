@@ -136,7 +136,7 @@ def test_linux_compile_and_link():
     tc = _tc()
     man = _man()
     flags = db.compile_flags(tc, man, TK, "/p", "2", ['XBA_DISCOVERY_FILE="/w/d.jsonl"'])
-    assert flags[:4] == ["-O2", "-g0", "-std=gnu11", "-w"]
+    assert flags[:5] == ["-O2", "-g0", "-std=gnu11", "-w", "-fno-math-errno"]
     assert "-DNDEBUG" in flags and "-DNOMINMAX" in flags and '-DXBA_DISCOVERY_FILE="/w/d.jsonl"' in flags
     incs = [f[2:] for f in flags if f.startswith("-I")]
     assert incs == ["/p/src", "/p/src/recomp", "/p/src/recomp/gen", "/tk/include", "/tk/src/kernel",

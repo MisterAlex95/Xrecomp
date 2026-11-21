@@ -340,6 +340,12 @@ def compile_flags(opt, toolkit, proj, sysroot, profile=False, include_dirs=(), c
     # which every ARMv8.0 core runs, instead of a call per atomic into libgcc's outline helpers (a feature test,
     # then the ARMv8.1 atomic or the same loop). tools.bench w_lock: -17 % instructions.
     flags.append("-mno-outline-atomics")
+    # Math functions never set errno: what clang already does for an Android target, written out so that the same
+    # flags compiled for another target (tools/bench's aarch64 glibc proxy, a desktop build) give the same code.
+    # With errno, sqrt keeps a libm call on its NaN path and every libm call (frexp / ldexp in the x87 precision-24
+    # rounding) may write memory, so the guest registers are reloaded after each x87 operation. Nothing generated
+    # or in the title project reads errno.
+    flags.append("-fno-math-errno")
     # cpu_features (tools/prepare/cpu.py, XBA-313): the device's own CPU, which the pack records and every reader
     # checks. "lse": the ARMv8.1 atomics inline instead of those loops.
     flags += cpu.flags(cpu_features)
