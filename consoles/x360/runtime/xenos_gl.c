@@ -4793,9 +4793,38 @@ static int resolve_write(const xenos_cp *cp, const resolve_dest *d, const uint8_
 
 /* A depth resolve's rectangle into guest memory: 24_8 (depth dv in the high 24 bits, stencil sv, or 0 when sv is NULL,
  * in the low 8), tiled 32-bit texels, w x h values top row first for the guest pixels at (x0, y0) */
+static inline __attribute__((always_inline)) void depth_rows(uint8_t *wmem, uint32_t base, uint32_t pitch_aligned,
+                                                            uint32_t endian, const uint32_t *dv, const uint8_t *sv,
+                                                            int x0, int y0, int w, int h)
+{
+    uint32_t in_tile[32]; /* the addresses by tile row, as direct_rows (tiled2d_split) */
+    for (int i = 0; i < 32; i++)
+        in_tile[i] = (uint32_t)tiled2d(i, 0, 32, 2);
+    for (int y = 0; y < h; y++) {
+        uint32_t tile = 0;
+        for (int x = 0; x < w; x++) {
+            int gx = x0 + x;
+            if (x == 0 || (gx & 31) == 0)
+                tile = (uint32_t)tiled2d(gx & ~31, y0 + y, pitch_aligned, 2);
+            size_t at = (size_t)y * w + x;
+            uint32_t v = gpu_swap(dv[at] << 8 | (sv ? sv[at] : 0), endian);
+            memcpy(wmem + ((base + (tile ^ in_tile[gx & 31])) & 0x1FFFFFFFu), &v, 4); /* gpu_store's store */
+        }
+    }
+}
+
 static void depth_write(const xenos_cp *cp, uint32_t base, uint32_t pitch_aligned, uint32_t endian, const uint32_t *dv,
                         const uint8_t *sv, int x0, int y0, int w, int h)
 {
+    if (cp->wmem && !(base & 3)) { /* WP-36: dword stores straight into memory, one loop per swap mode */
+        switch (endian & 3) {
+        case 0: depth_rows(cp->wmem, base, pitch_aligned, 0, dv, sv, x0, y0, w, h); break;
+        case 1: depth_rows(cp->wmem, base, pitch_aligned, 1, dv, sv, x0, y0, w, h); break;
+        case 2: depth_rows(cp->wmem, base, pitch_aligned, 2, dv, sv, x0, y0, w, h); break;
+        default: depth_rows(cp->wmem, base, pitch_aligned, 3, dv, sv, x0, y0, w, h); break;
+        }
+        return;
+    }
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             size_t at = (size_t)y * w + x;

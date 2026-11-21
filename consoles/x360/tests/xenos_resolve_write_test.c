@@ -240,6 +240,10 @@ int main(void)
         for (int i = 0; i < 10; i++)
             resolve_write_direct(&cp, &d16, px, PIX_U8X4, 0, 0, 1920, 1080);
         printf("1920 x 1080 5_6_5 resolve write: direct %.2f ms\n", (now_ms() - t3) / 10);
+        double t4 = now_ms();
+        for (int i = 0; i < 10; i++) /* the picture's bytes as depth values and stencil */
+            depth_write(&cp, 0x100000u, 1920, 2, (const uint32_t *)px, px, 0, 0, 1920, 1080);
+        printf("1920 x 1080 24_8 depth write: %.2f ms\n", (now_ms() - t4) / 10);
     }
     free(px);
     free(ref);
