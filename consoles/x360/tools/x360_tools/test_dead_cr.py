@@ -216,6 +216,6 @@ def test_fusion_off_is_the_old_c(monkeypatch):
     on = XenonLifter(None, decode, F, "f", comments=False).function()
     assert "cf_" not in off and "c->cr = ppc_cr_set(c->cr, 6, ppc_cmps(" in off
     # the loop's back edge stores nothing on its way (the block sets cr6 again first); the way out stores it
-    assert "cf_ = xe_cmps(" in on
+    assert "cf_ = xe_cmps(" in on and "if (((int32_t)R(3) == 0)) {" in on
     assert "RC_BLOCK_X(0x82001000u, 2, c->cr = ppc_cr_set(c->cr, 6, cf_)); goto L_82001000_b;" in on
     assert "} c->cr = ppc_cr_set(c->cr, 6, cf_);" in on

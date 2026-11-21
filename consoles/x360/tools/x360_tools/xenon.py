@@ -348,15 +348,16 @@ OE_OTHER = {
 }
 
 
-# Dead CR stores (perf/x360-dead-cr). A compare (or a record form) whose field the conditional branch right after it tests
-# leaves the field in a local (cf_) and the branch tests that; each edge out of the block writes the field into c->cr,
-# except an edge into a block of the function that sets the same field again before anything can see CR: that edge
-# runs the block's RC_BLOCK itself with the store on its way-out path (xenon_rt.h RC_BLOCK_X, taken when the slice ends
-# there) and jumps past the block's own RC_BLOCK. So c->cr holds exactly what it holds without this wherever it can be
-# seen (a slice end, every exit, call, RC_INTERP, mfcr and the other CR readers), and a loop's back edge or a
-# compare-and-branch chain stores nothing on its hot path. What may sit between the two instructions, and before the
-# field is set again in the next block: instructions whose C touches no CR field but other fields' ppc_cr_set /
-# RC_CR0, and neither leaves the function nor hands an instruction to the interpreter (CR_OPAQUE).
+# Dead CR stores. A compare (or a record form) whose field the conditional branch after it tests leaves the field in a
+# local (cf_); the branch tests the relation itself when the compare is right before it (cf_ otherwise), and each edge
+# out of the block writes the field into c->cr, except an edge into a block of the function that sets the same field
+# again before anything can see CR: that edge runs the block's RC_BLOCK itself with the store on its way-out path
+# (xenon_rt.h RC_BLOCK_X, taken when the slice ends there) and jumps past the block's own RC_BLOCK. So c->cr holds
+# exactly what it holds without this wherever it can be seen (a slice end, every exit, call, RC_INTERP, mfcr and the
+# other CR readers), and a loop's back edge or a compare-and-branch chain stores nothing on its hot path. What may sit
+# between the two instructions, and before the field is set again in the next block: instructions whose C touches no
+# CR field but other fields' ppc_cr_set / RC_CR0, and neither leaves the function nor hands an instruction to the
+# interpreter (CR_OPAQUE).
 CR_SET = re.compile(r"c->cr = ppc_cr_set\(c->cr, (\d), ")
 CR_CMP = re.compile(r"^c->cr = ppc_cr_set\(c->cr, (\d), (.*)\);$")
 CR_OPAQUE = ("RC_EXIT", "RC_INTERP", "RC_CALL", "RC_STWCX", "RC_STDCX", "RC_IDLE", "RC_NOT_COVERED", "RC_CHECK",
@@ -410,6 +411,20 @@ class XenonLifter(FnLifter):
             return t[:k] + " cf_ = RC_CR0V(" + t[k + 8:]
         return None
 
+    def _cr_operands(self, i):
+        """(a, b): the C operands the field of producer i compares, as the field's own helper converts them."""
+        n = i.name
+        if n in CR_CMPS:
+            w = self._l(i)
+            if n == "cmpi":
+                return ("(int64_t)%s" % R(i.ra), "%dLL" % i.simm) if w else ("(int32_t)%s" % R(i.ra), "%d" % i.simm)
+            if n == "cmpli":
+                return ("(uint64_t)%s" % R(i.ra), "%duLL" % i.uimm) if w else ("(uint32_t)%s" % R(i.ra), "%du" % i.uimm)
+            t = "int64_t" if n == "cmp" and w else "int32_t" if n == "cmp" else "uint64_t" if w else "uint32_t"
+            return ("(%s)%s" % (t, R(i.ra)), "(%s)%s" % (t, R(i.rb)))
+        t = self._cr_text(i)
+        return ("(int32_t)(uint32_t)(%s)" % t[t.rfind(" RC_CR0(") + 8:-2], "0")
+
     def _cr_text(self, i):
         """The C of i as it is without the fusion (not a branch: no side effects on the lifter's counts)."""
         t = self._cr_texts.get(i.addr)
@@ -426,7 +441,8 @@ class XenonLifter(FnLifter):
         return False
 
     def _plan_cr(self):
-        self.cr_fuse = {}   # bc address -> (field, {edge target: block size when the store is dead there})
+        # bc address -> (field, {edge target: block size when the store is dead there}, compared operands or None)
+        self.cr_fuse = {}
         self.cr_prod = {}   # producer address -> its C
         self.cr_land = set()  # leaders a dead edge jumps into (past their RC_BLOCK)
         self._cr_texts = {}
@@ -445,7 +461,8 @@ class XenonLifter(FnLifter):
                 if r == "kill":
                     c = self._cr_producer(j, n)
                     if c is not None:
-                        prod = (a, c)
+                        # right before the branch: it tests the relation itself (the operands are as compared)
+                        prod = (a, c, self._cr_operands(j) if a == blk[-1] - 4 else None)
                     break
                 if r != "clear":
                     break
@@ -457,7 +474,7 @@ class XenonLifter(FnLifter):
                     dead[t] = len(self._block(t))
                     self.cr_land.add(t)
             self.cr_prod[prod[0]] = prod[1]
-            self.cr_fuse[i.addr] = (n, dead)
+            self.cr_fuse[i.addr] = (n, dead, prod[2])
         self._cr_texts = None
 
     def insn(self, i):
@@ -480,8 +497,12 @@ class XenonLifter(FnLifter):
         fz = self.cr_fuse.get(i.addr)
         if fz is None:
             return FnLifter.op_bc(self, i)
-        n, dead = fz
-        test = "(cf_ & %du)" % (8 >> (i.ra & 3))
+        n, dead, ops = fz
+        bit = i.ra & 3
+        if ops is not None and bit != 3:
+            test = "(%s %s %s)" % (ops[0], ("<", ">", "==")[bit], ops[1])
+        else:
+            test = "(cf_ & %du)" % (8 >> bit)
         if not (i.rd & 8):
             test = "!" + test
         return "if (%s) { %s } %s" % (test, self._cr_edge(i.target, n, dead, False),
