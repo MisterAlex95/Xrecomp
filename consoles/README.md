@@ -1163,6 +1163,35 @@ byte leaves for the dispatcher). The NDS lifter keeps both off: its output is by
 9.85M to 9.06M x86-64 instructions per frame (-8 %), with the same hashes over 600 frames and lockstep with the
 interpreter. Every pack of every console is stale (the toolkit digest).
 
+**GBA: the prefetch model, cheaper (XBA-295).** Lifted code called the cartridge prefetch buffer's model once per
+instruction (`rc_pf_fetch_i`, 23 % of a bench frame, 28 % with its slow path). gba_tools now lifts a run of
+instructions that only add static internal cycles (and literals folded from the function's own region) with one
+`RC_IN`: `rc_pf_fetch_n` charges the run's fetches at once, in closed form (the reads completed meanwhile, then a cycle
+per opcode from the buffer while it has some, then a wait for the read under way each), with a short path for the
+frequent states; a refill is two fetches in one call. Its result is exactly that of as many `rc_pf_fetch` calls (a
+unit test over random states, `test_prefetch`). The segments that are runs, or runs with conditional jumps, check the
+next event with their exact cycles once the bound fails (the most a fetch can cost, for each): fewer go to the
+interpreter (bench: 247556 -> 141524 handed instructions over 30 frames). Details: [gba/tools/README.md « Runs of
+opcode fetches »](gba/tools/README.md). The GBA bench goes from 9.06M to 7.36M x86-64 instructions per frame (-19 %;
+the prefetch functions 2.58M -> 2.20M, the interpreter for handed instructions 1.63M -> 0.93M), with the same hashes
+over 600 frames, lockstep with the interpreter and `GBA_RC_VERIFY`; `gba_rc_fuzz_prefetch` fuzzes the lifter with the
+buffer on and random ROM wait states. The NDS lifter keeps it off (byte-identical
+output). Every pack of every console is stale (the toolkit digest); `GBA_RECOMP_ABI` and the save state format are
+unchanged.
+
+**GBA: speed 6.** The instructions lifted code in the cartridge hands to the interpreter (the rest of a segment an
+event falls inside) run from the interpreter's predecoded blocks instead of a step() each: the block at the handed
+address is decoded with at most the instructions the dispatcher may run in sequence, cut there, and does not go on
+after a taken branch (the earlier attempt, « Not taken » above, decoded whole blocks at every new address and ran
+past them). IWRAM code keeps step() (its blocks would be checked against IWRAM after every lifted call: slower).
+`rc_pf_fetch_n`'s two frequent cases (at the buffer's head with it empty and no read completed since; a refill's new
+start) take a front that saves no registers, 72 % of the bench's calls; the rest goes to the former function. The GBA
+bench goes from 7.36M to 7.09M x86-64 instructions per frame (-3.8 %; the prefetch functions 2.14M -> 1.95M, the
+handed instructions 0.93M -> about 0.85M), arm64 (gcc) 6.23M -> 6.11M (-1.9 %), with the same hashes over 600 frames,
+lockstep with the interpreter (gcc and clang packs), `GBA_RC_VERIFY` and the fuzzers. Every pack of every console is
+stale (the toolkit digest); old packs stay correct and get the handed part at once. `GBA_RECOMP_ABI`, the save state
+format and the NDS lifter's output are unchanged.
+
 **Frame generation (XBA-186).** In a build with `XBOXRECOMP_LSFG` (Android `-PxbaLsfg=1`), under `RECOMP_LSFG=1`, the
 host window feeds the LSFG pacer for every console: only distinct pictures reach the generator (a 30 fps game
 presents each one twice at 60 Hz), the generated frames take the repeats' slots, and the runtimes' frame sleep goes

@@ -16,6 +16,9 @@ predecoded blocks against its reference loop (one full step per instruction), th
 every frame, and with --lockstep-cycles N the CPU every N cycles too (the whole state every 1024 stops). --iwram:
 the random program runs from IWRAM, copied there from the cartridge before every pass, one of its immediates
 patched each time (a counter): the blocks decoded from it must go each time (self-modifying, copied code).
+--prefetch (XBA-295): the program sets WAITCNT first, the cartridge's prefetch buffer on and the ROM wait states
+random (a seed each), so lifted code's runs of fetches (rc_pf_fetch_n), literal stops and exact event checks meet
+every buffer timing.
 """
 
 import argparse
@@ -167,7 +170,7 @@ def rand_thumb(r, a, pushed):
 IWRAM_CODE = 0x03002000  # --iwram: where the program runs (the data at 0x03000100 and the stack stay below)
 
 
-def make_rom(seed, n, irq=True, iwram=False):
+def make_rom(seed, n, irq=True, iwram=False, prefetch=False):
     r = random.Random(seed)
     a = Asm()
     a.emit32(0xEA00002E)  # b 0x080000C0
@@ -190,6 +193,9 @@ def make_rom(seed, n, irq=True, iwram=False):
     a.emit32(0xE1C010B0)  # strh r1, [r0]
     a.emit32(0xE3A01001)  # mov r1, #1
     a.emit32(0xE1C010B8 if irq else 0xE1A00000)  # strh r1, [r0, #8] (IME), or a nop: no interrupts
+    if prefetch:
+        arm_const(a, 1, 0x4000 | r.getrandbits(11))  # WAITCNT: SRAM and WS0-WS2 waits random, prefetch on
+        a.emit32(0xE1C010B4)  # strh r1, [r0, #4] (WAITCNT)
     for reg in ARM_D:
         arm_const(a, reg, r.getrandbits(32))
     if iwram:
@@ -268,6 +274,7 @@ def main(argv=None):
     ap.add_argument("--lockstep-cycles", type=int, default=0)
     ap.add_argument("--iwram", action="store_true", help="the program runs from IWRAM, copied and patched each pass")
     ap.add_argument("--bios", help="a BIOS image for gba_run (default: the built-in one)")
+    ap.add_argument("--prefetch", action="store_true", help="WAITCNT: prefetch buffer on, random ROM wait states")
     args = ap.parse_args(argv)
     if args.bios and not os.path.exists(args.bios):
         print("skipped: BIOS %s not built" % args.bios)
@@ -285,7 +292,7 @@ def main(argv=None):
         os.makedirs(d, exist_ok=True)
         rom = os.path.join(d, "fuzz.gba")
         with open(rom, "wb") as f:
-            f.write(make_rom(seed, args.insns, iwram=args.iwram))
+            f.write(make_rom(seed, args.insns, iwram=args.iwram, prefetch=args.prefetch))
         if args.ref:
             cmd = [args.gba_run, rom, "--quiet", "--frames", str(args.frames), "--lockstep-ref"] + bios
             if args.lockstep_cycles:

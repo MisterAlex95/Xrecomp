@@ -85,6 +85,23 @@ small table. Only bus writes can raise the IRQ line or halt the CPU: their slow 
 so the next test stops there. Measured on a synthetic 200k-instruction ROM: 5x less compile time for aarch64 than one
 label per instruction, the same run time (docs/android/prepare.md « GBA packs »).
 
+**Runs of opcode fetches (XBA-295).** With WAITCNT's prefetch buffer on (games turn it on), every opcode fetch from
+the cartridge goes through the buffer's model (`gba_recomp_rt.h` rc_pf_*), which was a third of a frame. Where
+instructions in a row do nothing to the clock but static internal cycles (no memory access, multiply, jump or exit),
+their bodies cannot tell when the next fetches happen: `RC_IN(A, N, X, S)` charges the fetches of such a *run*, plus
+the next instruction's, in one call (`rc_pf_fetch_n`), each at the cycle it would have had (X: 4 bits of internal
+cycles per instruction). A literal folded from the function's own cartridge region joins the run (S: a bit per
+instruction): its stop of the buffer is computed there, its body keeps the load's wait states. `rc_pf_fetch_n` works
+in closed form: fetches back to back take an opcode a cycle from the buffer while it has some (it gains one per
+sequential read), then each waits for the opcode being read. A run never crosses a label, and its result is exactly N
+calls of `rc_pf_fetch` (`consoles/gba/tests/test_prefetch.c`, random states). Its two frequent cases (at the buffer's head with it
+empty and no read completed since; a new start at a refill's target) take a front without a stack frame, the rest
+`rc_pf_fetch_n_mid`. A segment that is one run checks the next
+event with the run's exact cycles once the bound (the most a fetch can cost, for each) fails (`RC_STOP_IN` /
+`RC_CHECK_IN`); a segment of plain instructions, literals and conditional jumps does the same on a copy of the buffer's
+state (`RC_STOP_X` / `RC_CHECK_X`), as if no jump were taken (a jump taken leaves earlier). Fewer segments go to the
+interpreter for an event that falls after them. The NDS lifter keeps all of it off (`seg_resume`).
+
 Control flow: branches to addresses of the same function are `goto`s; calls, returns, BX and computed jumps return
 to the dispatcher with PC set (no C stack growth whatever the game does; a direct-mapped cache makes each dispatch a
 probe). SWI, MSR, MRS of SPSR, exception returns (`movs pc` / `subs pc` / `ldm {pc}^`), LDM/STM with the S bit, SWP,

@@ -135,6 +135,9 @@ static bool machine_ok(const gba_machine *t)
         if (!t->wait16[r][0] || !t->wait16[r][1] || !t->wait32[r][0] || !t->wait32[r][1] || !t->fetch16[r] ||
             !t->fetch32[r] || !t->fetchmax16[r] || !t->fetchmax32[r])
             return false;
+    /* The prefetch buffer: rc_pf_fetch_n divides by the cycles of a read while the unit runs (XBA-295). */
+    if ((t->pf.valid || t->pf.run) && !t->pf.duty)
+        return false;
     /* The video line: phase_offset[line_phase]; vcount past the last line never wraps (no VBlank, no frame end). */
     if (t->line_phase < 0 || t->line_phase > 2 || t->vcount >= GBA_LINES)
         return false;

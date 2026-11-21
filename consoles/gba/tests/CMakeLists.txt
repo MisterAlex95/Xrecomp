@@ -22,7 +22,8 @@ endif()
 #   gba_mgba_<group>   the mGBA test suite's groups (mgba_suite.sh, XBA-201): pass counts at least the ones reached
 #                      (a regression fails), built-in BIOS; gba_mgba_lle_<group> through the Cult-of-GBA BIOS
 #   gba_rc_*           the same ROMs recompiled (gba_tools.recomp + cc, discovery loop), in lockstep with the
-#                      interpreter; gba_rc_fuzz: random ARM / Thumb programs, same comparison (needs python3, cc)
+#                      interpreter; gba_rc_fuzz: random ARM / Thumb programs, same comparison (needs python3, cc);
+#                      gba_rc_fuzz_prefetch: the same with the prefetch buffer on (XBA-295)
 #   gba_lockref_*      the interpreter's predecoded blocks against its reference loop (gba_run --lockstep-ref,
 #                      XBA-208)
 # The ROM and BIOS tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays
@@ -223,6 +224,11 @@ if(TARGET gba_run)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --gba-run $<TARGET_FILE:gba_run>
                     --work ${GBA_RC_WORK}/fuzz --seeds 0-5 --frames 20)
         set_tests_properties(gba_rc_fuzz PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+        # The same with the cartridge's prefetch buffer on and random ROM wait states (XBA-295: runs of fetches).
+        add_test(NAME gba_rc_fuzz_prefetch
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py --gba-run $<TARGET_FILE:gba_run>
+                    --work ${GBA_RC_WORK}/fuzz_prefetch --seeds 0-5 --frames 20 --prefetch)
+        set_tests_properties(gba_rc_fuzz_prefetch PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
     endif()
 
     # The interpreter's predecoded blocks (XBA-208) against its reference loop, one full step per instruction
