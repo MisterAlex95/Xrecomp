@@ -11,6 +11,8 @@
  *
  * EGL and GLES are loaded at run time (dlopen, as the GameCube's renderer does): no build dependency; without them
  * (or without a surfaceless EGL display) xenos_gl_create fails with a reason and the runtime runs without drawing.
+ * X360_ANGLE_DIR=DIR loads them from DIR instead (libEGL / libGLESv2 .dylib, .so off Apple) and uses ANGLE's default
+ * display: the Mac, with the Android emulator's ANGLE (lib64/gles_angle), for checks of the renderer there.
  *
  * Render state: blending (factors, equations, constant colour), colour mask, depth test / write with a D24S8
  * buffer, stencil (front and back), culling and winding, the window scissor. Quad lists become triangles; rectangle
@@ -67,6 +69,13 @@ typedef struct xenos_gl_stats {
     uint64_t edram_stale;          /* overlaps that could not be carried over: the rows cleared (colour / depth: kept) */
     uint64_t msaa_surfaces;        /* render targets with a multisampled buffer */
     uint64_t programs;             /* XBA-314: programs compiled and linked (the window's shader badge counts them) */
+    /* where the renderer's time goes (the perf line's gpu field): wall time on the caller's thread, CLOCK_MONOTONIC */
+    uint64_t draw_calls;           /* xenos_gl_draw calls, resolves and skipped draws included */
+    uint64_t vertices_fetched;     /* vertices converted from guest memory (draws and computed-index buffers) */
+    uint64_t resolved_pixels;      /* pixels resolves wrote to guest memory (colour and depth) */
+    uint64_t resolve_ns;           /* in resolves, all of it: read back, write, host copy, memory hash, clears */
+    uint64_t resolve_read_ns;      /* of which reading the picture back (glReadPixels and its conversion) */
+    uint64_t resolve_write_ns;     /* of which encoding it and writing it to guest memory */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

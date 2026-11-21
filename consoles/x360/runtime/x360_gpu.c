@@ -12,8 +12,10 @@
  * (and the KTHREAD's) processor byte says it, since Direct3D's handler clears the bit of the CPU it runs on
  * (lbz 0x10C(r13)) from the word the ring then waits on. The vertical blank runs as CPU 2. VdSwap puts the front
  * buffer's fetch constant and the swap token in the ring; the front buffer of each swap is recorded (and traced). */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "x360_internal.h"
 #include "xenos_cp.h"
@@ -35,8 +37,23 @@ struct x360_gpu {
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
+    /* --dump-shaders without a file system call per load (host state, not in save states): the (stage, CRC) of each
+     * microcode already on disk, open-addressed (0 = empty, else stage << 32 | CRC | 1 << 33), and per stage the
+     * microcode of the last load, so a reload of the same words skips even the byte swap and the CRC */
+    uint64_t *dumped;
+    uint32_t dumped_cap, dumped_n; /* cap: a power of two, at most half full */
+    uint32_t last_words[2];        /* 0: no previous load for that stage */
+    uint32_t *last_code[2];
     xenos_gl *gl;         /* --render: the GLES renderer (host state: not in save states) */
+    uint64_t cp_ns;       /* wall time running the ring's packets (draws and resolves included): the perf line's gpu */
 };
+
+static uint64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
 
 static void gl_draw(void *ctx, const xenos_cp *cp, const xenos_draw *d)
 {
@@ -50,11 +67,63 @@ static void gl_swap(void *ctx, const xenos_cp *cp)
 
 static struct x360_gpu *gpu_of(x360_machine *x);
 
+/* the set of dumped (stage, CRC): 1 when key was already in it, else inserted (when there is room) and 0 */
+static int dumped_test(struct x360_gpu *g, uint64_t key, int insert)
+{
+    if (g->dumped_cap) {
+        uint32_t m = g->dumped_cap - 1, i = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 32) & m;
+        for (; g->dumped[i]; i = (i + 1) & m)
+            if (g->dumped[i] == key)
+                return 1;
+        if (!insert)
+            return 0;
+        if (2 * (g->dumped_n + 1) <= g->dumped_cap) {
+            g->dumped[i] = key;
+            g->dumped_n++;
+            return 0;
+        }
+    }
+    if (!insert)
+        return 0;
+    uint32_t cap = g->dumped_cap ? 2 * g->dumped_cap : 1024;
+    uint64_t *t = calloc(cap, sizeof *t);
+    if (!t)
+        return 0; /* no memory: the file system check stays the only one */
+    for (uint32_t k = 0; k < g->dumped_cap; k++)
+        if (g->dumped[k]) {
+            uint32_t j = (uint32_t)((g->dumped[k] * 0x9E3779B97F4A7C15ull) >> 32) & (cap - 1);
+            while (t[j])
+                j = (j + 1) & (cap - 1);
+            t[j] = g->dumped[k];
+        }
+    free(g->dumped);
+    g->dumped = t;
+    g->dumped_cap = cap;
+    return dumped_test(g, key, 1);
+}
+
+static void dumped_reset(struct x360_gpu *g)
+{
+    free(g->dumped);
+    g->dumped = NULL;
+    g->dumped_cap = g->dumped_n = 0;
+    for (int k = 0; k < 2; k++) {
+        free(g->last_code[k]);
+        g->last_code[k] = NULL;
+        g->last_words[k] = 0;
+    }
+}
+
 static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t words)
 {
     x360_machine *x = ctx;
     struct x360_gpu *g = x->gpu;
     if (!g || !g->shader_dir[0] || !words)
+        return;
+    int st = pixel ? 1 : 0;
+    /* the same words as this stage's previous load (the code buffer is the command processor's, so its address says
+     * nothing: the words themselves are compared) */
+    if (g->last_words[st] == words && !memcmp(g->last_code[st], code, 4 * (size_t)words))
         return;
     uint8_t be[4 * XENOS_SHADER_WORDS];
     for (uint32_t k = 0; k < words; k++) {
@@ -63,17 +132,30 @@ static void shader_loaded(void *ctx, int pixel, const uint32_t *code, uint32_t w
         be[4 * k + 2] = (uint8_t)(code[k] >> 8);
         be[4 * k + 3] = (uint8_t)code[k];
     }
-    char path[600];
-    snprintf(path, sizeof path, "%s/%s_%08X.bin", g->shader_dir, pixel ? "ps" : "vs", x360_crc32(be, 4 * words));
-    FILE *f = fopen(path, "rb");
-    if (f) { /* already there */
-        fclose(f);
-        return;
+    uint32_t crc = x360_crc32(be, 4 * words);
+    uint64_t key = (uint64_t)st << 32 | crc | 1ull << 33;
+    int known = dumped_test(g, key, 0);
+    if (!known) {
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s_%08X.bin", g->shader_dir, pixel ? "ps" : "vs", crc);
+        FILE *f = fopen(path, "rb");
+        if (f) { /* already there */
+            fclose(f);
+            known = 1;
+        } else if ((f = fopen(path, "wb"))) {
+            known = fwrite(be, 4, words, f) == words;
+            known &= fclose(f) == 0;
+        }
+        if (known)
+            dumped_test(g, key, 1);
     }
-    f = fopen(path, "wb");
-    if (f) {
-        fwrite(be, 4, words, f);
-        fclose(f);
+    if (!known)
+        return; /* not on disk: the next load of these words tries again */
+    if (!g->last_code[st])
+        g->last_code[st] = malloc(4 * XENOS_SHADER_WORDS);
+    if (g->last_code[st]) {
+        memcpy(g->last_code[st], code, 4 * (size_t)words);
+        g->last_words[st] = words;
     }
 }
 
@@ -177,6 +259,36 @@ void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint
     *drawn = s.drawn, *frames = s.frames, *front_buffer_frames = s.front_buffer_frames;
 }
 
+void x360_render_perf_get(x360_machine *x, x360_render_perf *out)
+{
+    memset(out, 0, sizeof *out);
+    if (!x->gpu)
+        return;
+    out->gpu_ns = x->gpu->cp_ns;
+    out->swaps = x->gpu->cp.swaps;
+    if (!x->gpu->gl)
+        return;
+    xenos_gl_stats s;
+    xenos_gl_get_stats(x->gpu->gl, &s);
+    out->resolve_ns = s.resolve_ns, out->read_ns = s.resolve_read_ns, out->write_ns = s.resolve_write_ns;
+    out->draws = s.draw_calls, out->resolves = s.resolves, out->pixels = s.resolved_pixels;
+    out->vertices = s.vertices_fetched;
+}
+
+int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
+                            const char *unit, char *out, size_t n)
+{
+#define D(f) (now->f >= since->f ? now->f - since->f : 0) /* a counter behind the snapshot: none in this window */
+    double k = frames ? 1.0 / (double)frames : 0.0, ms = k / 1e6;
+    return snprintf(out, n,
+                    "gpu %.1f (resolve %.1f: read %.1f write %.1f; %.0f draws, %.1f resolves, %.1f Mpx, "
+                    "%.1f k vertices) ms/%s",
+                    (double)D(gpu_ns) * ms, (double)D(resolve_ns) * ms, (double)D(read_ns) * ms,
+                    (double)D(write_ns) * ms, (double)D(draws) * k, (double)D(resolves) * k,
+                    (double)D(pixels) * k / 1e6, (double)D(vertices) * k / 1e3, unit);
+#undef D
+}
+
 uint64_t x360_render_programs(x360_machine *x)
 {
     xenos_gl_stats s;
@@ -189,8 +301,10 @@ uint64_t x360_render_programs(x360_machine *x)
 void x360_set_shader_dump(x360_machine *x, const char *dir)
 {
     struct x360_gpu *g = gpu_of(x);
-    if (g)
+    if (g) {
         snprintf(g->shader_dir, sizeof g->shader_dir, "%s", dir ? dir : "");
+        dumped_reset(g); /* another directory: what the old one holds says nothing */
+    }
 }
 
 void x360_gpu_opcode_histogram(x360_machine *x, FILE *out)
@@ -248,6 +362,7 @@ static struct x360_gpu *gpu_of(x360_machine *x)
         x->gpu->irq_thread = -1;
         x->gpu->cp.shader_loaded = shader_loaded;
         x->gpu->cp.mem = x360_p(x, X360_VIEW_64K); /* physical memory, mapped whole (x360_mem.c) */
+        x->gpu->cp.wmem = x360_p(x, X360_VIEW_64K); /* the same, for resolves' stores (what phys_write does) */
         xenos_cp_init(&x->gpu->cp);
     }
     return x->gpu;
@@ -261,8 +376,10 @@ int x360_gpu_init(x360_machine *x)
 
 void x360_gpu_free(x360_machine *x)
 {
-    if (x->gpu)
+    if (x->gpu) {
         xenos_gl_destroy(x->gpu->gl);
+        dumped_reset(x->gpu);
+    }
     free(x->gpu);
     x->gpu = NULL;
 }
@@ -323,7 +440,9 @@ void x360_gpu_poll(x360_machine *x)
         uint32_t w = x360_r32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR);
         if (w != g->last_wptr || g->cp.stalled) {
             g->last_wptr = w;
+            uint64_t t0 = mono_ns();
             xenos_cp_set_wptr(&g->cp, w);
+            g->cp_ns += mono_ns() - t0;
         }
     }
     if (g->irq_callback && now >= g->next_vblank) {
