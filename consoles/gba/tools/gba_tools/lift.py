@@ -45,6 +45,7 @@ class FnLifter:
         self.rom = rom
         self.seg_resume = seg_resume  # every segment start is a resume point too (« blocks and the event checks »)
         self.lift_psr = seg_resume  # MRS SPSR and MSR lifted (arm_msr); the GBA's packs, both from XBA-281
+        self.fetch_runs = seg_resume  # one RC_IN for a run of plain instructions' fetches (fetch_runs, XBA-295)
         self.thumb = thumb
         self.addrs = set(addrs)
         self.pipe = 4 if thumb else 8
@@ -725,6 +726,10 @@ class FnLifter:
         else:
             out.append("    default: RC_NOT_COVERED();")
         out.append("    }")
+        runs, in_run = {}, set()
+        if self.fetch_runs:
+            runs = fetch_runs(addrs, size, bodies, leaders | segs | self.targets)
+            in_run = {x + k * size for x, (n, _) in runs.items() for k in range(1, n)}
         for i, x in enumerate(addrs):
             op, body = ops[x], bodies[x]
             text = disasm(op, x, self.thumb) if comments else ""
@@ -736,7 +741,11 @@ class FnLifter:
                 continue
             if x in leaders:
                 out.append("    RC_STOP(%s, %s, %d);" % (hx(x), segment_cost(addrs, i, size, leaders, bodies), left[x]))
-            out.append("    RC_I(%s);" % hx(x))
+            if x in runs:
+                n, extras = runs[x]
+                out.append("    RC_IN(%s, %d, 0x%X%s);" % (hx(x), n, extras, "u" if extras < 1 << 32 else "ull"))
+            elif x not in in_run:
+                out.append("    RC_I(%s);" % hx(x))
             if body:
                 out.append("    {")
                 out += ["        " + s for s in body]
@@ -817,6 +826,55 @@ def segment_cost(addrs, i, size, leaders, bodies):
         terms += t
         j += 1
     return "%d, %s" % (nfc + 1, " + ".join([str(const)] + terms))
+
+
+# ---- runs of opcode fetches (XBA-295) ---------------------------------------------------------------------------
+#
+# The cartridge's prefetch buffer (rc_pf_fetch) is a call per instruction. Where instructions in a row do nothing to
+# the clock but static internal cycles (no memory access, no folded literal, no multiply, no jump or exit, nothing
+# else that reads `now` or the machine), their bodies cannot tell when the fetches after theirs happen: RC_IN charges
+# the fetches of such a run, plus the next instruction's, at its start, in one call (rc_pf_fetch_n), each fetch at the
+# cycle it would have had (EXTRAS: 4 bits per instruction, its internal cycles before the next fetch). The run's last
+# instruction (any kind) then runs with `now` where it was before. A run never crosses a label.
+
+PLAIN_NOW = re.compile(r"^now \+= (\d+);$")
+RUN_MAX = 16  # fetches per run at most (EXTRAS: 4 bits for each of the first 15)
+
+
+def plain_extra(body):
+    """The internal cycles of a plain instruction (one whose fetch a run may move: see above), or None."""
+    if body is None or is_memory(body):
+        return None
+    extra = 0
+    for s in body:
+        m = PLAIN_NOW.match(s)  # top level only: a conditional instruction's cycles are not static
+        if m:
+            extra += int(m.group(1))
+            continue
+        # RC_NEXTRA() is 0 where the buffer is on (a cartridge function); elsewhere RC_IN charges each fetch as RC_I
+        t = s.replace("now += RC_NEXTRA();", "")
+        if re.search(r"\bnow\b|\bRC_|\bh->|\bgoto\b|\breturn\b|\bepc\b|\bm_\b|rc_mul_cycles", t):
+            return None
+    return extra if extra < 16 else None
+
+
+def fetch_runs(addrs, size, bodies, labels):
+    """{first address: (fetches, extras)} for every run of two fetches or more."""
+    runs = {}
+    i = 0
+    while i < len(addrs):
+        j, extras = i, 0
+        while j - i + 1 < RUN_MAX and j + 1 < len(addrs) and addrs[j + 1] == addrs[j] + size \
+                and addrs[j + 1] not in labels and bodies[addrs[j + 1]] is not None:
+            e = plain_extra(bodies[addrs[j]])
+            if e is None:
+                break
+            extras |= e << (4 * (j - i))
+            j += 1
+        if j > i and bodies[addrs[i]] is not None:
+            runs[addrs[i]] = (j - i + 1, extras)
+        i = j + 1
+    return runs
 
 
 def block_left(addrs, size, leaders):

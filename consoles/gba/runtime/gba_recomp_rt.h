@@ -330,6 +330,76 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_i(gba_rc_head *h, 
     return rc_pf_fetch_ool(h, now, addr, thumb, ncost);
 }
 
+/* N (>= 2) opcode fetches from the cartridge in a row with the buffer on, the first at `now` from addr, each next one
+ * at the following opcode, X's low 4 bits cycles after the previous one ended (X: 4 bits per fetch, the instruction's
+ * internal cycles): the sum of what N calls of rc_pf_fetch return, leaving the same state (RC_IN, XBA-295; checked by
+ * consoles/gba/tests/test_prefetch.c). After the first fetch the next one is always at the buffer's head, with the
+ * unit reading: only that case runs here, on locals. */
+static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, uint64_t now, uint32_t addr,
+                                                                bool thumb, uint32_t ncost, uint32_t n, uint64_t x)
+{
+    gba_rc_prefetch *p = &h->pf;
+    uint32_t w = thumb ? 2u : 4u, total = 0, c;
+    if (!(p->valid && addr == p->head && p->thumb == thumb && (p->run || p->count))) {
+        total = rc_pf_fetch_ool(h, now, addr, thumb, ncost); /* the state then reads at the head */
+        now += total + (uint32_t)(x & 15);
+        x >>= 4;
+        n--;
+    }
+    uint64_t time = p->time;
+    uint32_t head = p->head, left = p->left, count = p->count;
+    const uint32_t cap = p->cap, duty = p->duty;
+    if (!p->run) { /* full (only before the first fetch): advancing only moves `time` */
+        if (now > time)
+            time = now;
+        count--;
+        head += w;
+        left = duty;
+        total += 1;
+        now += 1 + (uint32_t)(x & 15);
+        x >>= 4;
+        n--;
+    }
+    while (n) {
+        if (now > time) { /* rc_pf_advance */
+            uint64_t e = now - time;
+            time = now;
+            while (e >= left) {
+                e -= left;
+                if (++count >= cap) { /* full, the head in it: the fetch makes room, reading resumes */
+                    count--;
+                    head += w;
+                    left = duty;
+                    c = 1;
+                    goto next;
+                }
+                left = duty;
+            }
+            left -= (uint32_t)e;
+        }
+        head += w;
+        if (count) {
+            count--;
+            c = 1;
+        } else { /* being read: the rest of that read, then the next one starts */
+            c = left;
+            left = duty;
+            time = now + c;
+        }
+    next:
+        total += c;
+        now += c + (uint32_t)(x & 15);
+        x >>= 4;
+        n--;
+    }
+    p->time = time;
+    p->head = head;
+    p->left = left;
+    p->count = (uint8_t)count;
+    p->run = true;
+    return total;
+}
+
 /* The opcode fetch at the start of the instruction at pc (the pipeline reads the opcode at pc + 8 / + 4 meanwhile):
  * sequential, from the prefetch buffer in the cartridge when it is on. */
 static inline uint32_t rc_fetch_cost(gba_rc_head *h, uint64_t now, uint32_t pc, bool thumb)
@@ -398,8 +468,10 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
 
 #ifdef GBA_RC_COUNT
 #define RC_COUNT() (h->rc_native++)
+#define RC_COUNT_N(N) (h->rc_native += (N))
 #else
 #define RC_COUNT() ((void)0)
+#define RC_COUNT_N(N) ((void)0)
 #endif
 
 /* Start of the instruction at A: its opcode fetch (from the prefetch buffer in the cartridge when it is on: no branch
@@ -410,6 +482,16 @@ static inline uint32_t rc_refill_cost(gba_rc_head *h, uint64_t now, uint32_t r15
                                    RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0])                         \
                    : fc;                                                                                             \
         RC_COUNT();                                                                                                  \
+    } while (0)
+
+/* RC_I for the N instructions from A, a run (gba_tools lift.py « runs of opcode fetches »): their fetches at once, X
+ * the internal cycles of each but the last (4 bits each); the run's other instructions have no RC_I. */
+#define RC_IN(A, N, X)                                                                                               \
+    do {                                                                                                             \
+        now += pf_ ? rc_pf_fetch_n(h, now, (uint32_t)(A) + RC_PIPE, RC_T,                                            \
+                                   RC_T ? h->wait16[RC_REGION][0] : h->wait32[RC_REGION][0], (N), (X))               \
+                   : (uint32_t)(N) * fc;                                                                             \
+        RC_COUNT_N(N);                                                                                               \
     } while (0)
 
 /* The event check at the start of a block (A, a resume point), for its first segment (NFC fetches + EXTRA cycles,
