@@ -119,6 +119,7 @@ struct gx_state {
     gx_gl *gl;
     gx_stats stats;
     bool warned[64];
+    struct gx_vplan *vplan;    /* gx_vtx.c: each VAT's decoded vertex format, kept while its registers stay */
 };
 
 /* ---- gx_fifo.c ---- */

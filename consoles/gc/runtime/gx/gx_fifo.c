@@ -72,6 +72,7 @@ void gx_destroy(gx_state *gx)
     free(gx->tmem);
     free(gx->vout);
     free(gx->cmd);
+    free(gx->vplan);
     free(gx);
 }
 
