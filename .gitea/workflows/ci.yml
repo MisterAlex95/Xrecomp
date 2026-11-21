@@ -6,9 +6,11 @@
 #
 # Gating (XBA-53, docs/android/toolchain.md « CI gating »):
 #   pull request   linux, then android-toolkit (NDK compile, app unit tests) when the PR touches the Android build
-#   push to main   linux, then android-image, then android-toolchain (rebuilt only when its key changes, XBA-125),
-#                  then android-apk (xrecomp-latest); then linux-arm64 (fails on a failure not in
-#                  tools/ci/arm64-expected.txt; no longer a gate before the APK: Thor first, XBA-269)
+#   push to main   android-image, then android-toolchain (rebuilt only when its key changes, XBA-125), then
+#                  android-apk (xrecomp-latest), started at once: linux runs beside it and no longer gates the APK;
+#                  then linux-arm64 (fails on a failure not in tools/ci/arm64-expected.txt; not a gate either, XBA-269).
+#                  A newer push to main cancels the run still going: only the latest main gets its APK (the heavy
+#                  lock frees itself when the cancelled holder's container is gone).
 #   both           homebrew after linux (on main after the APK chain) (XBA-149: the GBA / PS1 / N64 test corpus, then the GBA programs as recompiled
 #                  packs with screenshots, XBA-180; on PRs only when it is touched)
 #   weekly         linux, then device-tests (the device test bundle; fails when a project stops building)
@@ -36,12 +38,12 @@ on:
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   # XBA-100: the runner is the maintainers' shared host and every job drives its Docker, so a pull request from a fork
   # (someone else's code) never runs here; a maintainer pushes the branch to this repository to test it. Every other
-  # job needs linux, so this one guard stops them all.
+  # pull-request job needs linux, so this one guard stops them all (the main-only Android chain never runs on a PR).
   linux:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -405,7 +407,6 @@ jobs:
 
   # The Android toolchain image (docs/android/toolchain.md) builds, and its NDK builds SDL2 for arm64-v8a / API 30.
   android-image:
-    needs: linux
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     container:
