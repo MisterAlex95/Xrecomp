@@ -80,6 +80,7 @@ public class LauncherConsoleControlsTest {
         Toolchain.assetsOverride = null;
         Toolchain.nativeDirOverride = null;
         LauncherActivity.lsfgBuiltOverride = null;
+        LauncherActivity.lsfgReadyOverride = null;
         RuntimeEnvironment.setQualifiers("en-w1920dp-h1080dp-land-mdpi");
     }
 
@@ -443,6 +444,7 @@ public class LauncherConsoleControlsTest {
         a.finish();
 
         LauncherActivity.lsfgBuiltOverride = true;
+        LauncherActivity.lsfgReadyOverride = true;
         a = launch();
         String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(n64)).tid;
         openControls(a, "Star Race", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
@@ -469,6 +471,39 @@ public class LauncherConsoleControlsTest {
         assertEquals("2", mult);
         key(a, KeyEvent.KEYCODE_DPAD_LEFT);
         assertNull("back to Settings' choice", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
+    }
+
+    /**
+     * WP-C: a console game's Frame generation with no Lossless.dll imported: the row keeps the game's choice but is
+     * dimmed and says where to import the DLL; with the shaders ready it is a plain row again.
+     */
+    @Test
+    public void consoleOptionsFrameGenerationNeedsDll() throws Exception {
+        File n64 = rom("n64", "Star Race.z64", ConsoleTest.n64(0));
+        String title = app.getString(R.string.OPT_LSFG);
+        LauncherActivity.lsfgBuiltOverride = true;
+        LauncherActivity a = launch();
+        String key = LibraryIndex.read(Library.indexFile(app.getFilesDir())).find(LibraryIndex.fileLoc(n64)).tid;
+        assertTrue(ConsoleVideo.setGameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN, "1"));
+        openControls(a, "Star Race", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        Widgets.MenuRow r = row(a, title);
+        assertNotNull(r);
+        assertTrue("no DLL: dimmed", r.dim);
+        assertEquals(app.getString(R.string.ROM_OPT_FRAMEGEN_NEEDS_DLL), r.description);
+        assertEquals("the game's choice kept", app.getString(R.string.VAL_LSFG_2X), r.value);
+        focusRow(a, title);
+        assertEquals(app.getString(R.string.ROM_OPT_FRAMEGEN_NEEDS_DLL), a.descriptionForTest());
+        assertEquals("1", ConsoleVideo.gameChoice(app, key, ConsoleVideo.Setting.FRAMEGEN));
+        a.finish();
+
+        LauncherActivity.lsfgReadyOverride = true;
+        a = launch();
+        openControls(a, "Star Race", R.string.ROM_OPTIONS, LauncherActivity.Screen.ROM_OPTIONS);
+        r = row(a, title);
+        assertNotNull(r);
+        assertFalse("shaders ready: a plain row", r.dim);
+        assertEquals(app.getString(R.string.ROM_OPT_FRAMEGEN_DETAIL), r.description);
+        assertEquals(app.getString(R.string.VAL_LSFG_2X), r.value);
     }
 
     /**

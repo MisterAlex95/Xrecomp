@@ -76,6 +76,7 @@ public class LauncherScreensTest {
         Toolchain.nativeDirOverride = null;
         LauncherActivity.clock = android.os.SystemClock::uptimeMillis;
         LauncherActivity.lsfgBuiltOverride = null;
+        LauncherActivity.lsfgReadyOverride = null;
         RuntimeEnvironment.setQualifiers("en-w1920dp-h1080dp-land-mdpi");
     }
 

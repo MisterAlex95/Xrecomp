@@ -2,6 +2,7 @@ package fr.adserver.xrecomp;
 
 import android.content.Context;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -205,6 +206,9 @@ final class ConsoleVideo {
      * The same with the game's frame generation choice (XBA-186, gameFramegen: "1", "0" or null): a console game gets
      * RECOMP_LSFG (its choice, else Settings') and {@link #LSFG_ENV} from cfg; an Xbox game gets RECOMP_LSFG unset
      * (the runtime reads recomp.cfg's line itself), so a console game's own choice does not stay in the process.
+     * Frame generation on with no usable shader cache (RECOMP_LSFG_DIR empty or not a directory: no Lossless.dll
+     * imported) goes as off: the runtime would only log « lsfg: no shader cache »; the stored choice stays, so it
+     * works once the DLL is imported.
      */
     static List<String[]> runEnv(Console con, String gameScale, String gameFilter, String gameUpscale,
                                  String gameFramegen, RecompConfig cfg) {
@@ -219,13 +223,21 @@ final class ConsoleVideo {
             for (String k : SHARED_ENV)
                 out.add(new String[] { k, resolve(null, cfg == null ? null : cfg.get(k)) });
         }
-        out.add(new String[] { ENV_LSFG, console ? resolve(gameFramegen, cfg == null ? null : cfg.get(ENV_LSFG))
-                                                 : null });
+        String lsfg = console ? resolve(gameFramegen, cfg == null ? null : cfg.get(ENV_LSFG)) : null;
+        if (lsfg != null && !LSFG_OFF.equals(lsfg)
+            && !lsfgDirUsable(resolve(null, cfg == null ? null : cfg.get(RecompConfig.LSFG_DIR_KEY))))
+            lsfg = LSFG_OFF;
+        out.add(new String[] { ENV_LSFG, lsfg });
         if (console) {
             for (String k : LSFG_ENV)
                 out.add(new String[] { k, resolve(null, cfg == null ? null : cfg.get(k)) });
         }
         return out;
+    }
+
+    /** The shader cache recomp.cfg names (RECOMP_LSFG_DIR) exists: a Lossless.dll was imported. */
+    static boolean lsfgDirUsable(String dir) {
+        return dir != null && !dir.isEmpty() && new File(dir).isDirectory();
     }
 
     /** The label of the game's choice: « As in Settings » or the value's. */

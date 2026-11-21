@@ -147,12 +147,13 @@ public class ConsoleVideoTest {
         cfg.set("RECOMP_LSFG", "1");
         cfg.set("RECOMP_LSFG_MULT", "2");
         cfg.set("RECOMP_LSFG_PERF", "1");
-        cfg.set("RECOMP_LSFG_DIR", "/data/x/files/lsfg/abc");
+        String cache = tmp.newFolder("lsfg-abc").getAbsolutePath();
+        cfg.set("RECOMP_LSFG_DIR", cache);
         List<String[]> env = ConsoleVideo.runEnv(Console.N64, null, null, null, null, cfg);
         assertEquals("1", value(env, "RECOMP_LSFG"));
         assertEquals("2", value(env, "RECOMP_LSFG_MULT"));
         assertEquals("1", value(env, "RECOMP_LSFG_PERF"));
-        assertEquals("/data/x/files/lsfg/abc", value(env, "RECOMP_LSFG_DIR"));
+        assertEquals(cache, value(env, "RECOMP_LSFG_DIR"));
         // The game's own choice wins; the rest stays Settings'.
         env = ConsoleVideo.runEnv(Console.GBA, null, null, null, "0", cfg);
         assertEquals("0", value(env, "RECOMP_LSFG"));
@@ -171,6 +172,40 @@ public class ConsoleVideoTest {
         assertEquals(R.string.VAL_OFF, ConsoleVideo.label(ConsoleVideo.Setting.FRAMEGEN, "0"));
         assertTrue(ConsoleVideo.applies(ConsoleVideo.Setting.FRAMEGEN, Console.GBA));
         assertFalse(ConsoleVideo.applies(ConsoleVideo.Setting.FRAMEGEN, Console.XBOX));
+    }
+
+    /** WP-C: frame generation on (Settings' or the game's own) with no usable shader cache goes as off, so the
+     *  runtime does not start it only to log « lsfg: no shader cache »; the stored choices stay. */
+    @Test
+    public void framegenNeedsShaderCache() throws Exception {
+        File dir = tmp.newFolder("ext-nodll");
+        RecompConfig cfg = RecompConfig.load(dir);
+        cfg.set("RECOMP_LSFG", "1");
+        cfg.set("RECOMP_LSFG_MULT", "2");
+        // No Lossless.dll imported: no RECOMP_LSFG_DIR line.
+        assertEquals("0", value(ConsoleVideo.runEnv(Console.N64, null, null, null, null, cfg), "RECOMP_LSFG"));
+        assertEquals("0", value(ConsoleVideo.runEnv(Console.GBA, null, null, null, "1", cfg), "RECOMP_LSFG"));
+        // A line naming nothing there, or a file.
+        cfg.set("RECOMP_LSFG_DIR", new File(dir, "gone").getAbsolutePath());
+        assertEquals("0", value(ConsoleVideo.runEnv(Console.PS1, null, null, null, "1", cfg), "RECOMP_LSFG"));
+        File f = tmp.newFile("not-a-dir");
+        cfg.set("RECOMP_LSFG_DIR", f.getAbsolutePath());
+        assertEquals("0", value(ConsoleVideo.runEnv(Console.PS1, null, null, null, "1", cfg), "RECOMP_LSFG"));
+        // Off and unset are unchanged.
+        assertEquals("0", value(ConsoleVideo.runEnv(Console.PS1, null, null, null, "0", cfg), "RECOMP_LSFG"));
+        cfg.set("RECOMP_LSFG", null);
+        assertNull(value(ConsoleVideo.runEnv(Console.PS1, null, null, null, null, cfg), "RECOMP_LSFG"));
+        // The DLL imported (the cache directory exists): the same choices turn it on; nothing stored changed.
+        cfg.set("RECOMP_LSFG", "1");
+        cfg.set("RECOMP_LSFG_DIR", tmp.newFolder("lsfg-cache").getAbsolutePath());
+        assertEquals("1", value(ConsoleVideo.runEnv(Console.N64, null, null, null, null, cfg), "RECOMP_LSFG"));
+        assertEquals("1", value(ConsoleVideo.runEnv(Console.GBA, null, null, null, "1", cfg), "RECOMP_LSFG"));
+        assertEquals("1", cfg.get("RECOMP_LSFG"));
+        // An Xbox game is left to recomp.cfg as before.
+        assertNull(value(ConsoleVideo.runEnv(Console.XBOX, null, null, null, "1", cfg), "RECOMP_LSFG"));
+        assertFalse(ConsoleVideo.lsfgDirUsable(null));
+        assertFalse(ConsoleVideo.lsfgDirUsable(""));
+        assertFalse(ConsoleVideo.lsfgDirUsable(f.getAbsolutePath()));
     }
 
     /** XBA-184: the internal resolution, RECOMP_UPSCALE: a PS1 or N64 game's own (upscale_&lt;KEY&gt;), else Settings',

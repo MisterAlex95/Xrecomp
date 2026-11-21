@@ -3330,7 +3330,7 @@ public class LauncherActivity extends Activity {
     private String lsfgStatus(int[] kind) {
         String dir = cfg == null ? null : cfg.get(RecompConfig.LSFG_DIR_KEY);
         kind[0] = NOTE_INFO;
-        if (dir == null || dir.isEmpty() || !new File(dir).isDirectory())
+        if (!ConsoleVideo.lsfgDirUsable(dir))
             return getString(R.string.LSFG_NO_DLL);
         long[] m;
         try {
@@ -3339,6 +3339,18 @@ public class LauncherActivity extends Activity {
             return getString(R.string.LSFG_NO_DLL);
         }
         return lsfgStatusOf(m, kind);
+    }
+
+    /** Tests: stands in for the imported shaders' state when set (no LsfgNative in the unit tests). */
+    static Boolean lsfgReadyOverride;
+
+    /** The imported shaders can run frame generation (lsfgStatus' « Shaders ready », full or performance set). */
+    private boolean lsfgReady() {
+        if (lsfgReadyOverride != null)
+            return lsfgReadyOverride;
+        int[] kind = new int[1];
+        lsfgStatus(kind);
+        return kind[0] == NOTE_OK;
     }
 
     private String lsfgStatusOf(long[] m, int[] kind) {
@@ -9065,6 +9077,12 @@ public class LauncherActivity extends Activity {
         for (int i = 0; i < o.choices.length; i++)
             labels[i + 1] = getString(o.choices[i].label);
         MenuRow r = settingRow(list, getString(o.title), gameOptionDetail(o));
+        if (o.needsLsfg && !lsfgReady()) {
+            // WP-C: no shaders imported, the runtime would only log « lsfg: no shader cache » (ConsoleVideo.runEnv
+            // passes it as off): the game's choice stays, for when the DLL is imported, but the row says why.
+            r.setDim(true);
+            r.setDescription(getString(R.string.ROM_OPT_FRAMEGEN_NEEDS_DLL));
+        }
         r.setChoices(labels);
         Runnable refresh = () -> {
             RecompConfig game = GameSettings.load(this, key);
