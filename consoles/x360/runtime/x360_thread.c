@@ -508,7 +508,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
     x->perf.dispatches += dispatches;
 }
 
-/* WP-19: the calling thread's CPU time (the perf line's guest time, read around each scheduler turn) */
+/* WP-19: the calling thread's CPU time (the perf line's guest time, read at x360_run's entry and exit: WP-31) */
 static uint64_t thread_cpu_ns(void)
 {
     struct timespec ts;
@@ -626,6 +626,7 @@ int x360_run(x360_machine *x, uint64_t insns)
     x360_install_fault_handler(x);
     if (x->host)
         return run_host(x, insns);
+    uint64_t c0 = thread_cpu_ns(), gpu0 = x360_gpu_cpu_ns(x);
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
     x->m.rc_stop = stop; /* WP-16: run_thread's budget, as direct calls (RC_CALL) see it */
@@ -644,11 +645,13 @@ int x360_run(x360_machine *x, uint64_t insns)
         x360_audio_poll(x);
         x360_xma_poll(x);
         x360_input_poll(x);
-        if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
-            uint64_t now = x360_now(x);
-            x360_w64(x, x->timestamp_bundle, now);
-            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + now);
-            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(now / 10000));
+        uint64_t bnow = x->timestamp_bundle ? x360_now(x) : 0;
+        if (x->timestamp_bundle && x->bundle_written != bnow + 1) {
+            /* KeTimeStampBundle: interrupt time, system time, tick count (ms); WP-32: when the time moved */
+            x->bundle_written = bnow + 1;
+            x360_w64(x, x->timestamp_bundle, bnow);
+            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + bnow);
+            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(bnow / 10000));
         }
         int picked = x360_kdpc_ready(x); /* a DPC runs ahead of every thread */
         for (int n = 1; picked < 0 && n <= x->nthreads; n++) {
@@ -681,11 +684,12 @@ int x360_run(x360_machine *x, uint64_t insns)
             x->threads[picked].cpu.reserve = 0;
         }
         x->cur = picked;
-        uint64_t c0 = thread_cpu_ns();
         run_thread(x, &x->threads[picked]);
-        x->perf.guest_cpu_ns += thread_cpu_ns() - c0;
         x->perf.turns++;
     }
+    /* WP-31: the guest time once per call, not around every turn (two clock reads a turn were ~1.1 ms a swap) */
+    uint64_t cpu = thread_cpu_ns() - c0, gpu = x360_gpu_cpu_ns(x) - gpu0;
+    x->perf.guest_cpu_ns += cpu > gpu ? cpu - gpu : 0;
     return x->status;
 }
 

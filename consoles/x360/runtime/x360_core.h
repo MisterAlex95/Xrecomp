@@ -110,7 +110,8 @@ typedef struct x360_render_perf {
     uint64_t passes;     /* render passes (draws, clears, blits after a framebuffer change) */
     uint64_t hashed;     /* guest memory bytes hashed to see whether it changed */
     /* WP-19, the second perf line (x360_render_perf_format_guest); host counters, not in save states */
-    uint64_t guest_cpu_ns;  /* thread CPU time of the scheduler's turns (guest code, HLE, interpreter) */
+    uint64_t guest_cpu_ns;  /* thread CPU time in x360_run less the command processor's (guest code, HLE, interpreter,
+                             * the scheduler's polls) */
     uint64_t dispatches;    /* lifted functions entered from the dispatcher */
     uint64_t turns;         /* scheduler turns (a thread run until its slice ends, it blocks or ends) */
     uint64_t guest_swaps;   /* swaps the command processor ran (unlike swaps, not reset by a state load) */
