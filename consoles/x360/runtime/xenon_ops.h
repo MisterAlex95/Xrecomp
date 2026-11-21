@@ -187,6 +187,7 @@ typedef int8_t xv_s8x16 __attribute__((vector_size(16)));
 typedef uint16_t xv_u16x8 __attribute__((vector_size(16)));
 typedef int16_t xv_s16x8 __attribute__((vector_size(16)));
 typedef uint32_t xv_u32x4 __attribute__((vector_size(16)));
+typedef float xv_f32x4 __attribute__((vector_size(16)));
 #else
 #define XV_VEC 0
 #endif
@@ -333,7 +334,7 @@ static inline float xv_f(uint32_t u)
  * alone. Hosts differ on all of it: x86 SSE takes the first source of the instruction the compiler chose (which may
  * swap the operands of a commutative op, so the NaN depended on the -O level) and makes 0xFFC00000; AArch64 prefers a
  * signalling NaN over a quiet one. So every float helper computes on the host, and only where a result lane is a NaN
- * (one integer test for the whole vector) a cold path rebuilds it from the operands' bits by the rule above. Elsewhere
+ * (one integer test for the whole vector) a second path rebuilds it from the operands' bits by the rule above. Elsewhere
  * the host result is the architected one: IEEE single precision, round to nearest, a single rounding in fmaf.
  *
  * The operand order of each helper is its instruction's vA, vB, vC: xv_maddfp(a, c, b) and xv_nmsubfp(a, c, b) (vA *
@@ -379,7 +380,27 @@ XV_HOT int xv_anynan(xe_v128 v)
 #define XV_UNLIKELY(x) (x)
 #endif
 
-/* the cold path: each NaN lane of r rebuilt from the operands a, b, c (precedence order) */
+/* the NaN path: each NaN lane of r rebuilt from the operands a, b, c (precedence order). Not that cold: Warhammer runs
+ * hundreds of thousands of NaN lanes a minute through vrefp / vmulfp128 / vsubfp (out of line it took 0.5 % of the
+ * time), so with vector extensions it is the same choice made with masks, inline and without a branch per lane. */
+#if XV_VEC
+XV_HOT xe_v128 xv_fixnan(xe_v128 r, xe_v128 a, xe_v128 b, xe_v128 c)
+{
+    xv_u32x4 x, y, z, w;
+    memcpy(&x, &r, 16);
+    memcpy(&y, &a, 16);
+    memcpy(&z, &b, 16);
+    memcpy(&w, &c, 16);
+    xv_u32x4 nx = (xv_u32x4)((x & 0x7FFFFFFFu) > 0x7F800000u), ny = (xv_u32x4)((y & 0x7FFFFFFFu) > 0x7F800000u),
+             nz = (xv_u32x4)((z & 0x7FFFFFFFu) > 0x7F800000u), nw = (xv_u32x4)((w & 0x7FFFFFFFu) > 0x7F800000u);
+    xv_u32x4 p = (nw & (w | 0x00400000u)) | (~nw & XV_QNAN);
+    p = (nz & (z | 0x00400000u)) | (~nz & p);
+    p = (ny & (y | 0x00400000u)) | (~ny & p);
+    x = (nx & p) | (~nx & x);
+    memcpy(&r, &x, 16);
+    return r;
+}
+#else
 static XV_COLD xe_v128 xv_fixnan(xe_v128 r, xe_v128 a, xe_v128 b, xe_v128 c)
 {
     for (int k = 0; k < 4; k++)
@@ -387,6 +408,7 @@ static XV_COLD xe_v128 xv_fixnan(xe_v128 r, xe_v128 a, xe_v128 b, xe_v128 c)
             r.u32[k] = xv_nan3(a.u32[k], b.u32[k], c.u32[k]);
     return r;
 }
+#endif
 
 #define XV_FIX2(r, a, b)                                                                                               \
     do {                                                                                                               \
@@ -414,12 +436,69 @@ static XV_COLD xe_v128 xv_fixnan(xe_v128 r, xe_v128 a, xe_v128 b, xe_v128 c)
         return r;                                                                                                      \
     }
 
+#if XV_VEC
+/* SIMD (SSE2 / NEON through the vector extensions, inline at the packs' -O1): the same IEEE lanes as the loop, and the
+ * same NaN path, so the results are the plain C's bit for bit (x360_vmx_ref) */
+XV_HOT xv_f32x4 xv_vf(xe_v128 v)
+{
+    xv_f32x4 x;
+    memcpy(&x, &v, 16);
+    return x;
+}
+
+XV_HOT xe_v128 xv_unvf(xv_f32x4 x)
+{
+    xe_v128 v;
+    memcpy(&v, &x, 16);
+    return v;
+}
+
+#define XV_VF2(name, vexpr)                                                                                            \
+    XV_HOT xe_v128 name(xe_v128 a, xe_v128 b)                                                                          \
+    {                                                                                                                  \
+        xv_f32x4 x = xv_vf(a), y = xv_vf(b);                                                                           \
+        xe_v128 r = xv_unvf(vexpr);                                                                                    \
+        XV_FIX2(r, a, b);                                                                                              \
+        return r;                                                                                                      \
+    }
+XV_VF2(xv_addfp, x + y)
+XV_VF2(xv_subfp, x - y)
+XV_VF2(xv_mulfp, x * y)
+#else
 XV_MAPF2(xv_addfp, f32[k] = a.f32[k] + b.f32[k])
 XV_MAPF2(xv_subfp, f32[k] = a.f32[k] - b.f32[k])
 XV_MAPF2(xv_mulfp, f32[k] = a.f32[k] * b.f32[k])
+#endif
 /* vmaxfp / vminfp: +0 is greater than -0 (AltiVec PEM: max(+0, -0) = +0, min(+0, -0) = -0), so equal operands combine
  * their sign bits; with a NaN operand both compares are false and the lane is a NaN (a's if it is one, else b's), which
- * the cold path replaces by the rule's. */
+ * the NaN path replaces by the rule's. */
+#if XV_VEC
+/* SIMD: the three compares as masks; unordered lanes take a | b, a NaN too (a NaN's exponent and some fraction bit) */
+XV_HOT xe_v128 xv_maxminfp(xe_v128 a, xe_v128 b, int min)
+{
+    xv_f32x4 x = xv_vf(a), y = xv_vf(b);
+    xv_u32x4 u, v;
+    memcpy(&u, &a, 16);
+    memcpy(&v, &b, 16);
+    xv_u32x4 gt = (xv_u32x4)(x > y), lt = (xv_u32x4)(x < y), eq = (xv_u32x4)(x == y);
+    xv_u32x4 hi = min ? lt : gt, lo = min ? gt : lt;
+    xv_u32x4 m = (hi & u) | (lo & v) | (eq & (min ? u | v : u & v)) | (~(gt | lt | eq) & (u | v));
+    xe_v128 r;
+    memcpy(&r, &m, 16);
+    XV_FIX2(r, a, b);
+    return r;
+}
+
+XV_HOT xe_v128 xv_maxfp(xe_v128 a, xe_v128 b)
+{
+    return xv_maxminfp(a, b, 0);
+}
+
+XV_HOT xe_v128 xv_minfp(xe_v128 a, xe_v128 b)
+{
+    return xv_maxminfp(a, b, 1);
+}
+#else
 XV_MAPF2(xv_maxfp, u32[k] = a.f32[k] > b.f32[k]    ? a.u32[k]
                           : a.f32[k] == b.f32[k] ? a.u32[k] & b.u32[k]
                           : b.f32[k] > a.f32[k]  ? b.u32[k]
@@ -430,6 +509,7 @@ XV_MAPF2(xv_minfp, u32[k] = a.f32[k] < b.f32[k]    ? a.u32[k]
                           : b.f32[k] < a.f32[k]  ? b.u32[k]
                           : xv_isnan(a.u32[k])   ? a.u32[k]
                                                  : b.u32[k])
+#endif
 XV_MAP2(xv_and, u32[k] = a.u32[k] & b.u32[k])
 XV_MAP2(xv_andc, u32[k] = a.u32[k] & ~b.u32[k])
 XV_MAP2(xv_or, u32[k] = a.u32[k] | b.u32[k])
@@ -459,9 +539,39 @@ static inline uint32_t xv_cr6(xe_v128 v)
     return (all == ~0u ? 8u : 0u) | (any == 0 ? 2u : 0u);
 }
 
-/* vmaddfp: a * c + b, one rounding; NaN precedence a, b, c */
-static inline xe_v128 xv_maddfp(xe_v128 a, xe_v128 c, xe_v128 b)
+/* XV_VFMA: a fused multiply-add of four lanes the compiler can say (NEON fmla on every aarch64, FMA3 on x86-64 builds
+ * that enable it); elsewhere fmaf per lane (on plain x86-64 a libm call: those helpers stay out of line) */
+#if XV_NEON
+#define XV_VFMA 1
+XV_HOT xv_f32x4 xv_vfma(xv_f32x4 x, xv_f32x4 y, xv_f32x4 z) /* x * y + z, one rounding */
 {
+    return (xv_f32x4)vfmaq_f32((float32x4_t)z, (float32x4_t)x, (float32x4_t)y);
+}
+#elif XV_SSE2 && defined(__FMA__)
+#define XV_VFMA 1
+#include <immintrin.h>
+XV_HOT xv_f32x4 xv_vfma(xv_f32x4 x, xv_f32x4 y, xv_f32x4 z)
+{
+    return (xv_f32x4)_mm_fmadd_ps((__m128)x, (__m128)y, (__m128)z);
+}
+#else
+#define XV_VFMA 0
+#endif
+#if XV_VFMA
+#define XV_FMAHOT XV_HOT
+#else
+#define XV_FMAHOT static inline
+#endif
+
+/* vmaddfp: a * c + b, one rounding; NaN precedence a, b, c */
+XV_FMAHOT xe_v128 xv_maddfp(xe_v128 a, xe_v128 c, xe_v128 b)
+{
+#if XV_VFMA
+    xe_v128 v = xv_unvf(xv_vfma(xv_vf(a), xv_vf(c), xv_vf(b)));
+    if (XV_UNLIKELY(xv_anynan(v)))
+        v = xv_fixnan(v, a, b, c);
+    return v;
+#endif
     xe_v128 r;
     for (int k = 0; k < 4; k++)
         r.f32[k] = fmaf(a.f32[k], c.f32[k], b.f32[k]);
@@ -472,9 +582,20 @@ static inline xe_v128 xv_maddfp(xe_v128 a, xe_v128 c, xe_v128 b)
 
 /* vnmsubfp: -(a * c - b), negated after rounding: an exact zero comes out as -0. The negation is a sign-bit flip,
  * because compilers may turn -fmaf(a, c, -b) into fmaf(-a, c, b) (AArch64 fmsub), which gives +0 there. A NaN result
- * is not negated (AltiVec PEM): the cold path rebuilds it from the operands, precedence a, b, c. */
-static inline xe_v128 xv_nmsubfp(xe_v128 a, xe_v128 c, xe_v128 b)
+ * is not negated (AltiVec PEM): the NaN path rebuilds it from the operands, precedence a, b, c. */
+XV_FMAHOT xe_v128 xv_nmsubfp(xe_v128 a, xe_v128 c, xe_v128 b)
 {
+#if XV_VFMA
+    xv_u32x4 m;
+    xv_f32x4 f = xv_vfma(xv_vf(a), xv_vf(c), -xv_vf(b));
+    memcpy(&m, &f, 16);
+    m ^= 0x80000000u;
+    xe_v128 v;
+    memcpy(&v, &m, 16);
+    if (XV_UNLIKELY(xv_anynan(v)))
+        v = xv_fixnan(v, a, b, c);
+    return v;
+#endif
     xe_v128 r;
     for (int k = 0; k < 4; k++) {
         r.f32[k] = fmaf(a.f32[k], c.f32[k], -b.f32[k]);
@@ -513,8 +634,19 @@ static XV_COLD float xv_msumfp_nan(xe_v128 a, xe_v128 b, int n)
     return s;
 }
 
-static inline xe_v128 xv_msum3fp(xe_v128 a, xe_v128 b)
+/* SIMD: the four products at once, then the sums in the same order as the plain C (a horizontal add would pair them
+ * differently and round differently) */
+XV_HOT xe_v128 xv_msum3fp(xe_v128 a, xe_v128 b)
 {
+#if XV_VEC
+    xv_f32x4 p = xv_vf(a) * xv_vf(b);
+    float t = p[0] + p[1];
+    t += p[2];
+    if (XV_UNLIKELY(t != t))
+        t = xv_msumfp_nan(a, b, 3);
+    xv_f32x4 w = {t, t, t, t};
+    return xv_unvf(w);
+#endif
     float s = a.f32[0] * b.f32[0] + a.f32[1] * b.f32[1];
     s += a.f32[2] * b.f32[2];
     if (XV_UNLIKELY(s != s))
@@ -524,8 +656,18 @@ static inline xe_v128 xv_msum3fp(xe_v128 a, xe_v128 b)
     return r;
 }
 
-static inline xe_v128 xv_msum4fp(xe_v128 a, xe_v128 b)
+XV_HOT xe_v128 xv_msum4fp(xe_v128 a, xe_v128 b)
 {
+#if XV_VEC
+    xv_f32x4 p = xv_vf(a) * xv_vf(b);
+    float t = p[0] + p[1];
+    t += p[2];
+    t += p[3];
+    if (XV_UNLIKELY(t != t))
+        t = xv_msumfp_nan(a, b, 4);
+    xv_f32x4 w = {t, t, t, t};
+    return xv_unvf(w);
+#endif
     float s = a.f32[0] * b.f32[0] + a.f32[1] * b.f32[1];
     s += a.f32[2] * b.f32[2];
     s += a.f32[3] * b.f32[3];
@@ -540,8 +682,14 @@ static inline xe_v128 xv_msum4fp(xe_v128 a, xe_v128 b)
  * vlogefp of a negative number) */
 #define XV_FIX1(r, b) XV_FIX2(r, b, xv_words(0, 0, 0, 0))
 
-static inline xe_v128 xv_refp(xe_v128 b)
+XV_HOT xe_v128 xv_refp(xe_v128 b)
 {
+#if XV_VEC
+    const xv_f32x4 one = {1.0f, 1.0f, 1.0f, 1.0f};
+    xe_v128 v = xv_unvf(one / xv_vf(b));
+    XV_FIX1(v, b);
+    return v;
+#endif
     xe_v128 r;
     for (int k = 0; k < 4; k++)
         r.f32[k] = 1.0f / b.f32[k];
@@ -549,8 +697,19 @@ static inline xe_v128 xv_refp(xe_v128 b)
     return r;
 }
 
-static inline xe_v128 xv_rsqrtefp(xe_v128 b)
+XV_HOT xe_v128 xv_rsqrtefp(xe_v128 b)
 {
+#if XV_NEON || XV_SSE2
+    const xv_f32x4 one = {1.0f, 1.0f, 1.0f, 1.0f};
+#if XV_NEON
+    xv_f32x4 q = (xv_f32x4)vsqrtq_f32((float32x4_t)xv_vf(b));
+#else
+    xv_f32x4 q = (xv_f32x4)_mm_sqrt_ps((__m128)xv_vf(b));
+#endif
+    xe_v128 v = xv_unvf(one / q);
+    XV_FIX1(v, b);
+    return v;
+#endif
     xe_v128 r;
     for (int k = 0; k < 4; k++)
         r.f32[k] = 1.0f / sqrtf(b.f32[k]);
