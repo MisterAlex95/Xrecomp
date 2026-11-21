@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- « Report a problem » (XBA-339): the in-game menu's page and the launcher's sheet (ProblemReport). -->
+<resources>
+    <string name="REPORT_PROBLEM">Report a problem</string>
+    <string name="REPORT_PROBLEM_DETAIL">A black screen, broken pictures, no sound: say it in one line. It goes to the XRecomp developers with the last game\'s log and its last events, once you have seen what is sent and chosen Send.</string>
+    <string name="REPORT_PROBLEM_HINT">What goes wrong? (one line)</string>
+    <string name="REPORT_PROBLEM_TEXT">What goes wrong</string>
+    <string name="REPORT_PROBLEM_TEXT_NONE">Required: tap to write it</string>
+    <string name="REPORT_PROBLEM_SHOT">Add a screenshot</string>
+    <string name="REPORT_PROBLEM_SHOT_SUB">The game\'s picture, shown below before anything leaves</string>
+    <string name="REPORT_PROBLEM_SHOT_NONE">No picture of the game to add</string>
+    <string name="REPORT_PROBLEM_SHOT_TAKING">Taking the picture…</string>
+    <string name="REPORT_PROBLEM_PREPARING">Gathering the log…</string>
+    <string name="REPORT_PROBLEM_EXPLAIN">Sent only if you choose Send: your line, the game\'s log and its last events (no names, only what was done), without folders, addresses or links. No game data, no account, no e-mail.</string>
+    <string name="REPORT_PROBLEM_NO_TEXT">Write what goes wrong first.</string>
+    <string name="REPORT_PROBLEM_RUNNING">A game is running: use Report a problem in its menu.</string>
+</resources>

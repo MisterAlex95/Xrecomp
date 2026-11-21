@@ -3171,6 +3171,66 @@ Check on the device (Alex):
    second issue, « Game: native crash … », with `last-game.log` and the top frame.
 5. Airplane mode, send a report: « Could not send … ». Network back, send another: both arrive.
 
+### Report a problem (XBA-339)
+
+Most recomp bugs do not crash (a black screen, broken textures, no sound, a hang). **Report a problem** sends one line
+from the player as a Rustrak feedback (Rustrak › Feedback), tap-only, never automatic. Shown only when the build has a
+DSN (`CrashReport.available`).
+
+| Where | What |
+|---|---|
+| In-game menu, main page (above Back to launcher) | The Report page: what is sent, **What goes wrong** (the line), **Add a screenshot** (On / Off, Off by default), the preview under it when On, the summary, **Send**, Back. |
+| Settings › Advanced, under « Send a report about the last game » | A sheet: what is sent, the summary, **What goes wrong**, **Send**, Cancel. No screenshot (the launcher's process has no game frame). A game still running: the note points to its menu. |
+
+The line is typed in a small dialog (the keyboard, as Add a code): required (Send is dimmed and opens the dialog while
+it is empty), one line (white space folded), 500 characters at most. No name or e-mail field.
+
+What leaves, after Send only (`ProblemReport.build` over `CrashReport.feedback`): the line, scrubbed like the rest of
+a report; the tags of a crash report (`kind` `feedback`, `console`, `game_key`, `game`, `device`, `android`, `abi`) and
+`from` (`game` / `launcher`); the log (in the game: the process's logcat as « Share log » writes it, `game.log`; from
+the launcher: `last-game.log`), scrubbed and trimmed as above; the run's breadcrumbs; the screenshot when ticked.
+
+The screenshot: taken when the box is ticked (the frame the runtime shows, `CompanionNative.nativeScreenshot`, the
+game held behind the menu), decoded near size, downscaled to 640 px on its longest side, JPEG (quality 85, lower
+until it fits) under `CrashReport.SHOT_MAX` (512 KB); the preview is those exact bytes decoded. Unticking drops it. No
+frame: the box unticks itself and says so. The log gathering, the picture and the send run off the UI thread.
+
+### Breadcrumbs (XBA-340)
+
+The last events of the game's run, attached to every report (crash, Prepare, feedback): `files/logs/breadcrumbs.txt`,
+the newest 50 (`Breadcrumbs`). The game process writes them through typed helpers (`GameCrumbs`): every value is a
+number, on / off or a word from a fixed list (anything else becomes `other`); never a game, save, cheat, mod, disc,
+driver or file name, never anything typed. `Breadcrumbs.ALLOWED` checks the event names again, at write and at read.
+
+| Event | When | Data |
+|---|---|---|
+| `game_start` | The game's process starts (ShellActivity; the ring starts again) | `console`, `renderer` (`auto` / `cpu` / `gl`), `upscale`, `pads` (a count) |
+| `mod` | At the start, when mods are on for the title | `state=on`, `count` |
+| `savestate_save`, `savestate_load` | Menu slots, the pad's quick save / load, the resume at the start, the automatic slot | `slot` (number or `auto`), `result` (`ok` or the code), `via` (`menu`, `hotkey`, `resume`, `auto`) |
+| `fast_forward` | The menu's row; the fast-forward chord pressed | `state` (`on` / `off` / `toggle` / `hold`), `via` |
+| `rewind` | The rewind chord pressed (the pad's keys or triggers; the crumb says the chord, not that the game rewound) | `via=hotkey` |
+| `cheat` | A cheat turned on or off in the menu | `state` (never which) |
+| `renderer`, `resolution`, `speed`, `setting` | A setting changed in the menu: one crumb per setting when the menu closes, its last value | `name` (the key without `RECOMP_`, or `scale`, `filter`, `widescreen`, `p480`, `language`, `vk_driver`), `value` (a known word, else `other`) |
+| `menu_open`, `menu_close` | The in-game menu | `via` (`back`, `guide`, `combo`, `swipe`, `panel`) |
+| `pause`, `resume` | The game leaves the screen or comes back (onStop / onStart) | |
+| `pad_connect`, `pad_disconnect` | The controller count changes | `pads` |
+| `low_memory` | `onTrimMemory`, but the trip to the background and repeats | `level` |
+| `disc_change` | Change disc | `disc` (its number) |
+| `game_end` | Quit, the title leaving by itself, a restart, an image to prepare, no game data, a bad pack | `how` |
+
+Check on the device (Alex):
+1. In a game, menu › **Report a problem**: type a line, leave the screenshot unticked, Send: « Report sent ». In
+   Rustrak › Feedback, the line with `game.log` attached, no image.
+2. Again with **Add a screenshot** ticked: the preview shows the paused frame (not the menu); Send: the feedback has
+   `screenshot.jpg` (640 px wide or less). Untick before Send: no image.
+3. From the launcher, no game running: Settings › Advanced › **Report a problem**: the line, Send: a feedback with
+   `last-game.log`.
+4. Start a game, save a state, load it, toggle a cheat, open and close the menu, then quit (or crash it). Send a
+   report about the last game: in Rustrak the event's breadcrumbs show those steps in order, and nothing else (no
+   names).
+5. On a 4:3 or square handheld (or the Thor with the bottom screen off): the Report page scrolls, every row reachable
+   with the D-pad.
+
 ## Automatic reports and release health (XBA-336)
 
 **Settings › Advanced › Privacy** (its value: On / Off; hidden without a DSN and in a game's own app, which has no

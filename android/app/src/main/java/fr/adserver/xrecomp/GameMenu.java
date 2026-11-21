@@ -54,7 +54,7 @@ import java.util.function.LongSupplier;
  *       Settings (performance overlay, game volume, bottom screen, a console game's scale and filter
  *       and the picture shader (XBA-206): all live; this game's language, widescreen and 480p, internal resolution,
  *       Vulkan driver and most Game settings: read at the start, so « Restart to apply » shows at the top once one
- *       of them changed (a second press restarts the game in a new process); Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
+ *       of them changed (a second press restarts the game in a new process); Share log), Controls, Screenshot, Report a problem (XBA-339), Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
  * </ul>
@@ -221,6 +221,22 @@ final class GameMenu {
          * title's own quick reboot), so the settings it reads once at its start take effect.
          */
         default void restartGame() {}
+
+        /**
+         * XBA-339: the game's frame now, as a picture file (the runtime's BMP, in the cache; the caller deletes it),
+         * or null. Called off the UI thread.
+         */
+        default java.io.File captureFrame() {
+            return null;
+        }
+
+        /** XBA-339: this process's log written to a file for a report, or null. Called off the UI thread. */
+        default java.io.File reportLog() {
+            return null;
+        }
+
+        /** XBA-339: the one-line dialog of Report a problem (ProblemReport.askText); done(text) on OK. */
+        default void askReportText(String current, java.util.function.Consumer<String> done) {}
     }
 
     /** The automatic slot (« Where you left off ») and the kinds of nativeStateEvent. */
@@ -245,12 +261,12 @@ final class GameMenu {
     static final int ROW_H = Theme.ROW_H;
     static final int VOLUME_STEP = 10;
 
-    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS, GAME_SETTINGS, CHEATS, CHEATS_DELETE }
+    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS, GAME_SETTINGS, CHEATS, CHEATS_DELETE, REPORT }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
                 FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE, SHADER,
-                TOUCH_EDIT, RESTART }
+                TOUCH_EDIT, RESTART, REPORT, REPORT_TEXT, REPORT_SHOT, REPORT_SEND }
 
     private final Activity activity;
     private final Host host;
@@ -292,6 +308,26 @@ final class GameMenu {
     /** What the game started with of the settings that are not live ({@link #restartSnapshot}). */
     private String restartBase;
     private long restartArmedAt = -1;
+    /** XBA-340: the settings changed while the menu is open, one breadcrumb each when it closes. */
+    final GameCrumbs.Pending crumbs = new GameCrumbs.Pending();
+    /** XBA-340: the rewind and fast-forward chords, built with the hotkeys. */
+    private GameCrumbs.Chords chords;
+    /** XBA-339: Report a problem's draft: the line, the screenshot (ticked, its bytes), the report once gathered. */
+    private String reportText = "";
+    private boolean reportShotOn;
+    private byte[] reportShot;
+    private CrashReport reportDraft;
+    /** A new page or a send: callbacks of an older one are dropped. */
+    private int reportGen;
+    private android.widget.ImageView reportPreview;
+    private TextView reportSummary;
+    /** Where the report's work runs (the log, the picture, the send): off the UI thread; tests run it in place. */
+    Executor reportWork = REPORT_WORK;
+    private static final Executor REPORT_WORK = Executors.newSingleThreadExecutor(r -> {
+        Thread th = new Thread(r, "report-problem");
+        th.setDaemon(true);
+        return th;
+    });
 
     /** Keys whose down went to the game and that are still held: released in the game when the menu opens. */
     private final Map<Integer, KeyEvent> held = new HashMap<>();
@@ -573,6 +609,9 @@ final class GameMenu {
         openedAt = clock.getAsLong();
         downWhileOpen.clear();
         Log.i(LauncherActivity.TAG, "shell: menu open (" + why + ")");
+        GameCrumbs.menu(activity, true, why);
+        if (chords != null)
+            chords.reset();   // every key is released in the game below
         host.menuOpened();
         releaseGameInput();
         host.hold(true);
@@ -603,6 +642,8 @@ final class GameMenu {
             return;
         open = false;
         Log.i(LauncherActivity.TAG, "shell: menu closed");
+        crumbs.flush(activity);
+        GameCrumbs.menu(activity, false, null);
         stopNav();
         disarmQuit();
         handler.removeCallbacks(sessionTick);
@@ -741,6 +782,11 @@ final class GameMenu {
                 if (combo.held())
                     handler.postDelayed(comboFire, MenuTriggers.COMBO_MS);
             }
+            if (e.getRepeatCount() == 0 && (down || up) && chords != null) {   // XBA-340: rewind, fast-forward
+                Hotkeys.Action a = chords.key(ck, down);
+                if (a != null)
+                    GameCrumbs.Chords.crumb(activity, a);
+            }
             return false;
         }
         if (down) {
@@ -812,6 +858,13 @@ final class GameMenu {
                 MotionEvent old = lastMotion.put(e.getDeviceId(), MotionEvent.obtain(e));
                 if (old != null)
                     old.recycle();
+                if (chords != null && e.getActionMasked() == MotionEvent.ACTION_MOVE) {   // XBA-340: L2 / R2 as axes
+                    Hotkeys.Action a = chords.triggers(
+                            Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE)),
+                            Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS)));
+                    if (a != null)
+                        GameCrumbs.Chords.crumb(activity, a);
+                }
             }
             return false;
         }
@@ -941,7 +994,7 @@ final class GameMenu {
             }
             Item from = page == Page.SETTINGS ? Item.SETTINGS : page == Page.DISCS ? Item.DISC
                         : page == Page.SAVE_SLOTS ? Item.STATE_SAVE : page == Page.LOAD_SLOTS ? Item.STATE_LOAD
-                        : page == Page.CHEATS ? Item.CHEATS : Item.CONTROLS;
+                        : page == Page.CHEATS ? Item.CHEATS : page == Page.REPORT ? Item.REPORT : Item.CONTROLS;
             showPage(Page.MAIN, from);
             return;
         }
@@ -999,6 +1052,8 @@ final class GameMenu {
             row(Item.SCREENSHOT, s(R.string.MENU_SCREENSHOT));
             if (discs().size() >= 2)   // XBA-166: a multi-disc PlayStation game
                 row(Item.DISC, s(R.string.MENU_DISC));
+            if (CrashReport.available(activity))   // XBA-339
+                row(Item.REPORT, s(R.string.REPORT_PROBLEM));
             // A game's own app has no launcher to go back to: the row leaves to Android's home screen (the game
             // waits there as it would behind the launcher; the « Launcher » app shortcut still opens the settings).
             row(Item.LAUNCHER, s(TitleApp.ownTitleId(activity) != null ? R.string.MENU_LEAVE : R.string.MENU_LAUNCHER));
@@ -1160,6 +1215,9 @@ final class GameMenu {
             row(Item.BACK, s(R.string.MENU_BACK));
             break;
         }
+        case REPORT:
+            reportPage();
+            break;
         case DISCS:
             pageV.setText(s(R.string.MENU_DISC));
             pageV.setVisibility(View.VISIBLE);
@@ -1243,6 +1301,7 @@ final class GameMenu {
         for (Ps1Discs.Disc x : discList)
             now.add(new Ps1Discs.Disc(x.name, x.spec, x.number, x == d));
         discList = now;
+        GameCrumbs.disc(activity, d.number);
         close();
         flash(activity.getString(R.string.MENU_DISC_DONE, d.number), true);
     }
@@ -1291,6 +1350,7 @@ final class GameMenu {
                 cheats.toggle(index);
                 boolean ok = cheats.save();
                 boolean on = index < cheats.list.size() && cheats.list.get(index).enabled;
+                GameCrumbs.cheat(activity, on);
                 r.setValue(s(on ? R.string.MENU_ON : R.string.MENU_OFF));
                 r.invalidate();
                 Log.i(LauncherActivity.TAG, "shell: menu: cheat \"" + c.name + "\" " + (on ? "on" : "off") + " for "
@@ -1305,6 +1365,193 @@ final class GameMenu {
             r.setOnClickListener(v -> toggle.run());
         }
         list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
+    }
+
+    // ---- Report a problem (XBA-339) ------------------------------------------------------------------------------
+
+    private android.graphics.Bitmap reportPreviewBitmap;
+
+    /** A setting choice's value for its breadcrumb (GameCrumbs.value keeps it only when it is a known word). */
+    private static String firstValue(RecompConfig.Choice c) {
+        for (String v : c.values)
+            if (v != null)
+                return v;
+        return null;
+    }
+
+    /** The page opens empty: the line to write, the screenshot unticked; the log is gathered meanwhile. */
+    private void openReport() {
+        int gen = ++reportGen;
+        reportText = "";
+        reportShotOn = false;
+        reportShot = null;
+        reportPreviewBitmap = null;
+        reportDraft = null;
+        showPage(Page.REPORT, Item.REPORT_TEXT);
+        String key = titleId(), title = key == null ? null : gameTitle();
+        Log.i(LauncherActivity.TAG, "shell: menu: report a problem");
+        reportWork.execute(() -> {
+            java.io.File log;
+            try {
+                log = host.reportLog();
+            } catch (RuntimeException e) {
+                log = null;
+            }
+            CrashReport r = ProblemReport.build(activity, ProblemReport.FROM_GAME, key, title, "", log,
+                                                LogProvider.gameLogFile(activity).getName(), null);
+            handler.post(() -> {
+                if (gen != reportGen)
+                    return;
+                reportDraft = r;
+                updateReport();
+            });
+        });
+    }
+
+    /** The Report page: what it sends, the line, Add a screenshot (its preview under it), the summary, Send. */
+    private void reportPage() {
+        pageV.setText(s(R.string.REPORT_PROBLEM));
+        pageV.setVisibility(View.VISIBLE);
+        TextView explain = Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM,
+                                      s(R.string.REPORT_PROBLEM_EXPLAIN));
+        explain.setMaxLines(6);
+        explain.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        explain.setLineSpacing(0, 1.15f);
+        explain.setPadding(Theme.ROW_INSET, 0, Theme.ROW_INSET, Theme.S2);
+        list.addView(explain, new LinearLayout.LayoutParams(-1, -2));
+        row(Item.REPORT_TEXT, s(R.string.REPORT_PROBLEM_TEXT));
+        Widgets.MenuRow shot = row(Item.REPORT_SHOT, s(R.string.REPORT_PROBLEM_SHOT));
+        shot.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
+        shot.cycler = dir -> setReportShot(!reportShotOn);
+        reportPreview = new android.widget.ImageView(activity);
+        reportPreview.setAdjustViewBounds(true);
+        reportPreview.setScaleType(android.widget.ImageView.ScaleType.FIT_START);
+        reportPreview.setMaxHeight(220);
+        reportPreview.setPadding(Theme.ROW_INSET, Theme.S1, Theme.ROW_INSET, Theme.S1);
+        list.addView(reportPreview, new LinearLayout.LayoutParams(-1, -2));
+        reportSummary = Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT, "");
+        reportSummary.setMaxLines(5);
+        reportSummary.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        reportSummary.setLineSpacing(0, 1.15f);
+        reportSummary.setPadding(Theme.ROW_INSET, Theme.S2, Theme.ROW_INSET, Theme.S2);
+        list.addView(reportSummary, new LinearLayout.LayoutParams(-1, -2));
+        row(Item.REPORT_SEND, s(R.string.REPORT_SEND));
+        row(Item.BACK, s(R.string.MENU_BACK));
+        updateReport();
+    }
+
+    private void updateReport() {
+        if (page != Page.REPORT)
+            return;
+        Widgets.MenuRow r = rows.get(Item.REPORT_TEXT);
+        if (r != null)
+            r.setSubtitle(reportText.isEmpty() ? s(R.string.REPORT_PROBLEM_TEXT_NONE) : reportText);
+        r = rows.get(Item.REPORT_SHOT);
+        if (r != null) {
+            r.setValue(s(reportShotOn ? R.string.MENU_ON : R.string.MENU_OFF));
+            r.setSubtitle(s(!reportShotOn ? R.string.REPORT_PROBLEM_SHOT_SUB
+                            : reportShot == null ? R.string.REPORT_PROBLEM_SHOT_TAKING : R.string.REPORT_PROBLEM_SHOT_SUB));
+        }
+        boolean shown = reportShotOn && reportPreviewBitmap != null;
+        if (reportPreview != null) {
+            reportPreview.setImageBitmap(shown ? reportPreviewBitmap : null);
+            reportPreview.setVisibility(shown ? View.VISIBLE : View.GONE);
+        }
+        if (reportDraft != null) {
+            reportDraft.feedback = reportText;
+            ProblemReport.setShot(reportDraft, reportShotOn ? reportShot : null);
+        }
+        if (reportSummary != null)
+            reportSummary.setText(reportDraft == null ? s(R.string.REPORT_PROBLEM_PREPARING) : reportDraft.summary());
+        r = rows.get(Item.REPORT_SEND);
+        if (r != null) {
+            r.setDim(!reportReady());
+            r.invalidate();
+        }
+    }
+
+    /** Send applies: a line, the log gathered, and the picture taken when it is ticked. */
+    private boolean reportReady() {
+        return !reportText.isEmpty() && reportDraft != null && (!reportShotOn || reportShot != null);
+    }
+
+    private void askReportText() {
+        int gen = reportGen;
+        host.askReportText(reportText, text -> {
+            if (gen != reportGen)
+                return;
+            reportText = ProblemReport.clean(text);
+            updateReport();
+            if (open && page == Page.REPORT && !reportText.isEmpty())
+                focus(rows.get(Item.REPORT_SHOT));
+        });
+    }
+
+    /** Ticked: the frame is taken now (off the UI thread), and the exact picture that would be sent is shown. */
+    void setReportShot(boolean on) {
+        reportShotOn = on;
+        reportShot = null;
+        reportPreviewBitmap = null;
+        updateReport();
+        if (!on)
+            return;
+        int gen = reportGen;
+        reportWork.execute(() -> {
+            byte[] jpeg;
+            try {
+                jpeg = ProblemReport.jpegFromFile(host.captureFrame());
+            } catch (RuntimeException e) {
+                jpeg = null;
+            }
+            byte[] j = jpeg;
+            android.graphics.Bitmap pv = ProblemReport.preview(j);
+            handler.post(() -> {
+                if (gen != reportGen || !reportShotOn)
+                    return;
+                if (j == null || pv == null) {
+                    reportShotOn = false;
+                    updateReport();
+                    flash(s(R.string.REPORT_PROBLEM_SHOT_NONE), false);
+                    return;
+                }
+                reportShot = j;
+                reportPreviewBitmap = pv;
+                updateReport();
+            });
+        });
+    }
+
+    private void sendReport() {
+        if (reportText.isEmpty()) {
+            flash(s(R.string.REPORT_PROBLEM_NO_TEXT), false);
+            askReportText();
+            return;
+        }
+        if (!reportReady()) {
+            feedback.play(UiFeedback.Cue.ERROR, rows.get(Item.REPORT_SEND));
+            return;
+        }
+        CrashReport r = reportDraft;
+        r.feedback = reportText;
+        ProblemReport.setShot(r, reportShotOn ? reportShot : null);
+        reportGen++;
+        reportDraft = null;
+        reportText = "";
+        reportShotOn = false;
+        reportShot = null;
+        reportPreviewBitmap = null;
+        Log.i(LauncherActivity.TAG, "shell: menu: report a problem: sending" + (r.image != null ? " with a screenshot" : ""));
+        showPage(Page.MAIN, Item.REPORT);
+        flash(s(R.string.REPORT_SENDING), true);
+        reportWork.execute(() -> {
+            boolean ok = r.send(activity);
+            handler.post(() -> flash(s(ok ? R.string.REPORT_SENT : R.string.REPORT_NOT_SENT), ok));
+        });
+    }
+
+    /** The report waiting to be sent on the Report page (tests). */
+    CrashReport reportDraftForTest() {
+        return reportDraft;
     }
 
     // ---- Save states and fast-forward (XBA-182) ----------------------------------------------------------------
@@ -1354,6 +1601,7 @@ final class GameMenu {
     private void saveSlot(int slot) {
         int code = host.saveState(slot);
         Log.i(LauncherActivity.TAG, "shell: menu: save state slot " + slot + ": " + code);
+        GameCrumbs.state(activity, true, slot, code, "menu");
         close();
         if (code == STATE_OK)
             flash(activity.getString(R.string.MENU_STATE_SAVED, slot), true);
@@ -1369,6 +1617,7 @@ final class GameMenu {
         }
         int code = host.loadState(slot);
         Log.i(LauncherActivity.TAG, "shell: menu: load state slot " + slot + ": " + code);
+        GameCrumbs.state(activity, false, slot, code, "menu");
         close();
         if (code == STATE_OK)
             flash(slot == AUTO_SLOT ? s(R.string.MENU_STATE_RESUMED)
@@ -1430,6 +1679,7 @@ final class GameMenu {
             return;
         long t0 = SystemClock.elapsedRealtime();
         int code = host.saveState(AUTO_SLOT);
+        GameCrumbs.state(activity, true, AUTO_SLOT, code, "auto");
         Log.i(LauncherActivity.TAG, "shell: menu: automatic slot (" + why + "): " + code + " in "
               + (SystemClock.elapsedRealtime() - t0) + " ms");
     }
@@ -1453,6 +1703,9 @@ final class GameMenu {
         stateSeq = ev[0];
         int kind = ev[1], slot = ev[2], code = ev[3];
         Log.i(LauncherActivity.TAG, "shell: state event " + kind + " slot " + slot + ": " + code);
+        if (kind == EV_SAVED || kind == EV_LOADED || kind == EV_RESUMED)   // XBA-340
+            GameCrumbs.state(activity, kind == EV_SAVED, kind == EV_RESUMED ? AUTO_SLOT : slot, code,
+                             kind == EV_RESUMED ? "resume" : "hotkey");
         if (kind == EV_SLOT)   // XBA-190: the slot_next / slot_prev hotkeys
             flash(activity.getString(R.string.HK_SLOT_EVENT, slot), true);
         else if (kind == EV_RESUMED)
@@ -1514,6 +1767,7 @@ final class GameMenu {
         boolean on = !host.fastForward();
         host.setFastForward(on);
         Log.i(LauncherActivity.TAG, "shell: menu: fast-forward " + (on ? "on" : "off"));
+        GameCrumbs.fastForward(activity, GameCrumbs.onOff(on), "menu");
         updateValues();
     }
 
@@ -1530,8 +1784,21 @@ final class GameMenu {
                 hotkeys = new Hotkeys();
             }
             combo.setChord(hotkeys.get(Hotkeys.Action.MENU));
+            Console con = Console.ofKey(titleId());
+            chords = new GameCrumbs.Chords(hotkeys, con, rewindOn(con));
         }
         return hotkeys;
+    }
+
+    /** XBA-194: rewind runs (RECOMP_REWIND as the game started: « 1 », « 0 », unset = on but for the Xbox 360). */
+    private static boolean rewindOn(Console con) {
+        String v;
+        try {
+            v = android.system.Os.getenv(RecompConfig.ENV_REWIND);
+        } catch (RuntimeException e) {
+            v = null;
+        }
+        return v == null || v.trim().isEmpty() ? con != Console.X360 : "1".equals(v.trim());
     }
 
     /** The Controls page's hotkey lines: Back, the menu chord, then each hotkey a game of console c has and uses. */
@@ -1584,6 +1851,18 @@ final class GameMenu {
             break;
         case DISC:
             showPage(Page.DISCS, null);
+            break;
+        case REPORT:
+            openReport();
+            break;
+        case REPORT_TEXT:
+            askReportText();
+            break;
+        case REPORT_SHOT:
+            setReportShot(!reportShotOn);
+            break;
+        case REPORT_SEND:
+            sendReport();
             break;
         case SCREENSHOT:
             // Closed first: the player sees the game the picture is of (the BMP is the game's frame alone anyway).
@@ -1697,6 +1976,8 @@ final class GameMenu {
     private void backToLauncher() {
         Log.i(LauncherActivity.TAG, "shell: menu: back to launcher (the game waits)");
         open = false;
+        crumbs.flush(activity);
+        GameCrumbs.menu(activity, false, null);
         stopNav();
         disarmQuit();
         handler.removeCallbacks(sessionTick);
@@ -1716,6 +1997,7 @@ final class GameMenu {
      * Quit and the bottom screen's held Quit both come here.
      */
     void quitNow() {
+        crumbs.flush(activity);
         host.releaseOverlay();
         autoSave("quit");
         host.quit();
@@ -1820,6 +2102,7 @@ final class GameMenu {
             int pos = GameSettings.step(GameSettings.position(cfg, game, o), o, dir);
             GameSettings.setPosition(game, o, pos);
             GameSettings.save(game);
+            crumbs.option(o.keys[0], pos <= 0 ? null : firstValue(o.choices[pos - 1]));
             refresh.run();
             feedback.play(UiFeedback.Cue.MOVE, r);
             Log.i(LauncherActivity.TAG, "shell: menu: " + String.join("+", o.keys) + " " + (pos == 0 ? "as in Settings"
@@ -1916,6 +2199,7 @@ final class GameMenu {
         long now = clock.getAsLong();
         if (restartArmedAt >= 0 && now - restartArmedAt <= QUIT_ARM_MS) {
             Log.i(LauncherActivity.TAG, "shell: menu: restart to apply (confirmed)");
+            crumbs.flush(activity);
             host.releaseOverlay();
             autoSave("restart");
             host.restartGame();
@@ -1979,6 +2263,11 @@ final class GameMenu {
     private void stepConsoleVideo(ConsoleVideo.Setting which, int dir) {
         String v = ConsoleVideo.next(which, ConsoleVideo.gameChoice(activity, titleId(), which), dir);
         ConsoleVideo.setGameChoice(activity, titleId(), which, v);
+        if (which == ConsoleVideo.Setting.UPSCALE)
+            crumbs.option(which.env, v);
+        else
+            crumbs.named("setting", which == ConsoleVideo.Setting.SCALE ? "scale"
+                                    : which == ConsoleVideo.Setting.FILTER ? "filter" : "other", v);
         Log.i(LauncherActivity.TAG, "shell: menu: " + which.env + " " + (v == null ? "as in Settings" : v)
                                     + " for " + titleId() + (ConsoleVideo.isLive(which.env) ? " (live)" : " (restart)"));
         updateValues();
@@ -1993,6 +2282,7 @@ final class GameMenu {
     /** This N64 game's Vulkan driver (VkDrivers.setGameChoice): remembered per game, after « Restart to apply ». */
     private void stepVkDriver(int dir) {
         String v = VkDriverStore.stepGameChoice(VkDrivers.of(activity), titleId(), dir);
+        crumbs.named("renderer", "vk_driver", v == null ? null : "other");   // never the driver's name
         Log.i(LauncherActivity.TAG, "shell: menu: vulkan driver " + (v == null ? "as in Settings" : v)
                                     + " for " + titleId() + " (restart)");
         updateValues();
@@ -2024,6 +2314,7 @@ final class GameMenu {
         int pos = ((languagePos() + dir) % n + n) % n;
         String code = pos == 0 ? null : GameLanguage.CODES[GameLanguage.MENU_ORDER[pos - 1]];
         GameLanguage.setTitleChoice(activity, titleId(), code);
+        crumbs.named("setting", "language", code == null ? null : "other");
         Log.i(LauncherActivity.TAG, "shell: menu: language " + (code == null ? "as in Settings" : code)
                                     + " for " + titleId() + " (restart)");
         updateValues();
@@ -2034,6 +2325,8 @@ final class GameMenu {
     private void stepVideo(GameVideo.Setting which, int dir) {
         Boolean on = GameVideo.next(GameVideo.titleChoice(activity, titleId(), which), dir);
         GameVideo.setTitleChoice(activity, titleId(), which, on);
+        crumbs.named("setting", which == GameVideo.Setting.WIDESCREEN ? "widescreen" : "p480",
+                     on == null ? null : GameCrumbs.onOff(on));
         Log.i(LauncherActivity.TAG, "shell: menu: " + which.env + " "
                                     + (on == null ? "as in Settings" : on ? "on" : "off")
                                     + " for " + titleId() + " (restart)");
