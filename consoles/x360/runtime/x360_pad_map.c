@@ -107,6 +107,11 @@ static const struct {
     /* and single-sampled targets (WP-11): the same frames as with MSAA in the dungeon scene, without the full-surface
      * resolve / reload passes each MSAA target costs when a draw or resolve needs its texture (8 a frame there) */
     {"X360-44500807-", "RECOMP_X360_MSAA", "0"},
+    /* Warhammer: Battle March: lazy resolves too (WP-2). Linux llvmpipe, two battle scenes and menu -> tutorial
+     * battle (921 swaps): the same frames and end states as eager, also from a state saved unflushed; with each
+     * pending resolve's pages protected in the three physical views, lifted code never touched them. Resolve
+     * 37 -> 21 ms/swap in battle */
+    {"X360-4E4D07DF-", "RECOMP_X360_RESOLVE", "lazy"},
 };
 
 void x360_title_env(const char *key, FILE *out)
