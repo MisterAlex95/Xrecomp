@@ -4379,28 +4379,38 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
 cleared:;
     int clear_c = (ctl >> 8) & 1, clear_d = (ctl >> 9) & 1;
     if (clear_c || clear_d) {
-        g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-        g->glEnable(GL_SCISSOR_TEST);
-        g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+        /* a surface the draw FBO has attached (complete, its buffer the one cleared here: the multisampled one when
+         * the surface has one) is cleared there, through its draw buffer: no pass through rfbo (WP-11) */
         if (clear_c && src < 4) { /* the resolved render target (none when the source is depth) */
             float colour[4];
             clear_colour(s->fmt, cp->regs[0x231E], cp->regs[0x231F], colour);
             if (s->rb) {
                 if (s->ms_reload)
                     surface_reload(g, s);
-                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-                g->glEnable(GL_SCISSOR_TEST);
-                g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
-                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
                 s->ms_dirty = 1;
-            } else {
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
             }
-            static const GLenum b0 = GL_COLOR_ATTACHMENT0;
-            g->glDrawBuffers(1, &b0);
+            int slot = -1;
+            for (int i = 0; i < 4; i++)
+                slot = g->cur[i] == si ? i : slot;
+            if (slot < 0 || !g->fbo_checked || (s->rb && !g->cur_ms))
+                slot = -1;
+            if (slot >= 0) {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+            } else {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                if (s->rb)
+                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
+                else
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+                static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+                g->glDrawBuffers(1, &b0);
+            }
+            g->glEnable(GL_SCISSOR_TEST);
+            g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
             g->glColorMask(1, 1, 1, 1);
-            g->glClearBufferfv(0x1800 /* GL_COLOR */, 0, colour);
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            g->glClearBufferfv(0x1800 /* GL_COLOR */, slot >= 0 ? slot : 0, colour);
+            if (slot < 0)
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
             s->written = ++g->write_clock;
             s->dirty_h = y1 > s->dirty_h ? y1 : s->dirty_h;
         }
@@ -4413,19 +4423,28 @@ cleared:;
                     surface_reload(g, ds);
                 ds->ms_dirty = 1;
             }
-            g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+            int attached = g->cur_ds == di && g->fbo_checked && (!ds->rb || g->cur_ms);
+            if (attached) {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+            } else {
+                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                if (ds->rb)
+                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ds->rb);
+                else
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex, 0);
+            }
             g->glEnable(GL_SCISSOR_TEST);
             g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
-            if (ds->rb)
-                g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ds->rb);
-            else
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex, 0);
             g->glDepthMask(1);
             g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
-            g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
-            g->glClearStencil((GLint)(dc & 0xFF));
-            g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+            if (attached) {
+                g->glClearBufferfi(GL_DEPTH_STENCIL, 0, (float)(dc >> 8) / 16777215.0f, (GLint)(dc & 0xFF));
+            } else {
+                g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
+                g->glClearStencil((GLint)(dc & 0xFF));
+                g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+            }
             g->surf[di].written = ++g->write_clock;
             g->surf[di].dirty_h = y1 > g->surf[di].dirty_h ? y1 : g->surf[di].dirty_h;
         }
