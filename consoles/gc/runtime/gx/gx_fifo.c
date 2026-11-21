@@ -386,21 +386,25 @@ void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
     uint32_t base = gx->pi_base & 0x03FFFFE0u, lim = ring_limit(gx->pi_end & 0x03FFFFFFu);
     uint32_t wp = gx->pi_wp & 0x03FFFFFFu;
     bool crossed = false;
-    if ((wp & 3) + size <= 4 && wp + size < lim && wp + size <= gx->ram_size) { /* the common case: no wrap */
+    /* the common case: no wrap, whatever the alignment (vertices mix bytes, shorts and floats: XBA-295) */
+    if (wp + size < lim && wp + size <= gx->ram_size) {
         uint8_t *d = gx->ram + wp;
         if (size == 4) { /* a word (most writes): big-endian at once (XBA-279) */
             d[0] = (uint8_t)(v >> 24);
             d[1] = (uint8_t)(v >> 16);
             d[2] = (uint8_t)(v >> 8);
             d[3] = (uint8_t)v;
+        } else if (size == 1) {
+            d[0] = (uint8_t)v;
         } else {
             for (unsigned i = 0; i < size; i++)
                 d[i] = (uint8_t)(v >> (8 * (size - 1 - i)));
         }
-        wp += size;
-        gx->pi_wp = (gx->pi_wp & 0x20000000u) | wp;
-        if ((wp & 31) == 0 && (gx->cp_cr & 0x10)) {
-            gx->cp_wp = wp;
+        uint32_t nwp = wp + size;
+        gx->pi_wp = (gx->pi_wp & 0x20000000u) | nwp;
+        /* a write is at most 4 bytes: it crossed a 32-byte boundary when the line changed */
+        if (((nwp ^ wp) & ~31u) && (gx->cp_cr & 0x10)) {
+            gx->cp_wp = nwp & ~31u;
             cp_run(gx);
         }
         return;
