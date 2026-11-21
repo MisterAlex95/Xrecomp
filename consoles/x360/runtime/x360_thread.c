@@ -24,6 +24,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "x360_internal.h"
@@ -427,6 +428,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
     xe_cpu *c = &t->cpu;
     x->m.cur = c;
     x->m.slice = X360_SLICE;
+    uint64_t dispatches = 0; /* WP-19: lifted functions entered from here (the perf line's), counted, not timed */
     while (t->state == TH_READY && x->status == X360_RUNNING &&
            (x->m.slice >= 0 || (!(c->msr & 0x8000u) && x->m.slice >= -XE_EE_GRACE))) {
         uint32_t pc = c->pc;
@@ -473,6 +475,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
         }
         x->m.rc_exit = 0;
         fault_pc = pc;
+        dispatches++;
         fn(&x->m);
         if (x->m.rc_exit == XE_RC_EXIT_INTERP) {
             if (x360_interp_one(x))
@@ -492,6 +495,15 @@ static void run_thread(x360_machine *x, x360_thread *t)
             }
         }
     }
+    x->perf.dispatches += dispatches;
+}
+
+/* WP-19: the calling thread's CPU time (the perf line's guest time, read around each scheduler turn) */
+static uint64_t thread_cpu_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
 /* ---- guest faults ---- */
@@ -658,7 +670,10 @@ int x360_run(x360_machine *x, uint64_t insns)
             x->threads[picked].cpu.reserve = 0;
         }
         x->cur = picked;
+        uint64_t c0 = thread_cpu_ns();
         run_thread(x, &x->threads[picked]);
+        x->perf.guest_cpu_ns += thread_cpu_ns() - c0;
+        x->perf.turns++;
     }
     return x->status;
 }
