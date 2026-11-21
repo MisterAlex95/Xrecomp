@@ -234,24 +234,34 @@ final class CoverArt {
         }
     }
 
-    /** Writes an image that decodes (temporary file, then rename); false when it is not one. */
+    /**
+     * Writes an image that decodes (a temporary file of its own in the same folder, then rename, so two writers never
+     * share one); false when it is not one.
+     */
     static boolean store(byte[] data, File f) {
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(data, 0, data.length, o);
         if (o.outWidth <= 0 || o.outHeight <= 0)
             return false;
-        File dir = f.getParentFile();
-        if (dir != null)
-            dir.mkdirs();
-        File tmp = new File(f.getPath() + ".tmp");
+        File dir = f.getAbsoluteFile().getParentFile();
+        dir.mkdirs();
+        File tmp;
+        try {
+            tmp = File.createTempFile(f.getName() + ".", ".tmp", dir);
+        } catch (IOException e) {
+            return false;
+        }
         try (OutputStream out = new FileOutputStream(tmp)) {
             out.write(data);
         } catch (IOException e) {
             tmp.delete();
             return false;
         }
-        return tmp.renameTo(f);
+        if (tmp.renameTo(f))
+            return true;
+        tmp.delete();
+        return false;
     }
 
     /** Keeps a frame of the game as its cover when it has none (the shell, CAPTURE_AFTER_MS into the game). */

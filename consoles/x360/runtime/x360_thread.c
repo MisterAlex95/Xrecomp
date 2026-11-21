@@ -16,6 +16,7 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <sched.h>
+#include <setjmp.h>
 #include <signal.h>
 #if defined(__linux__)
 #include <ucontext.h> /* the host pc of a fault (macOS refuses the header without _XOPEN_SOURCE) */
@@ -533,6 +534,15 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
         uint64_t o = (uint64_t)(a - x->reservation); /* x360_p backwards */
         if (o >= (uint64_t)X360_VIEW_4K + x->m.view4k_skew)
             o -= x->m.view4k_skew;
+        /* WP8: inside an HLE, on the host thread running it: back to x360_hle_call, which stops the machine with the
+         * export's name (hle_fault_stop). Only reads of this machine's fields, pthread_self and siglongjmp here:
+         * async-signal-safe for a synchronous fault on this thread. A fault in lifted code running in parallel on
+         * another host thread (host threads) is not this HLE's and takes the path below. */
+        void *jb = atomic_load_explicit(&x->hle_jmp, memory_order_acquire);
+        if (jb && pthread_equal(pthread_self(), x->hle_host)) {
+            x->hle_fault_addr = (uint32_t)o;
+            siglongjmp(*(sigjmp_buf *)jb, 1);
+        }
         x360_thread *t = x360_cur(x);
         n = snprintf(msg, sizeof msg,
                      "x360: guest access fault at %08X (thread %u, in lifted code entered at %08X, stage %s)\n",

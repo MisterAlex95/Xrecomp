@@ -496,9 +496,52 @@ static void test_gpu(void)
     }
     CHECK(fired >= 9999 && X->nthreads == nthreads && X->kalloc_cur == kfree && X->status == X360_RUNNING,
           "vblanks: %d callbacks, threads %d -> %d", fired, nthreads, X->nthreads);
+    char why_irq[128] = "";
+    /* PM4_INTERRUPT: the callback runs (r3 = 1) as each CPU the mask names, one after the other; what Direct3D's
+     * handler reads with lbz 0x10C(r13) is that CPU. The CPUs still to run are in save states. */
+    uint32_t ip = 4 + 64 + 6;
+    struct { uint32_t mask; int cpus[2]; } irqs[2] = {{0x04, {2, -1}}, {0x05, {0, 2}}};
+    for (int q = 0; q < 2 && irq; q++) {
+        if (irq->state == TH_READY)
+            x360_thread_exit(X, irq, 0);
+        x360_w32(X, ring + 4 * ip, 3u << 30 | (uint32_t)PM4_INTERRUPT << 8);
+        x360_w32(X, ring + 4 * ip + 4, irqs[q].mask);
+        ip += 2;
+        x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, ip);
+        x360_gpu_poll(X);
+        uint8_t *blob1 = NULL;
+        size_t n1 = 0;
+        for (int k = 0; k < 2 && irqs[q].cpus[k] >= 0; k++) {
+            uint32_t got = irq->state == TH_READY ? x360_r8(X, (uint32_t)irq->cpu.gpr[13] + 0x10C) : 0xFF;
+            CHECK(irq->state == TH_READY && irq->cpu.gpr[3] == 1 && got == (uint32_t)irqs[q].cpus[k] &&
+                      x360_r8(X, irq->kthread + 0xBF) == got,
+                  "PM4_INTERRUPT mask %02X: callback %d as CPU %u (want %d)", irqs[q].mask, k, got, irqs[q].cpus[k]);
+            if (q == 1 && k == 0) { /* CPU 2 still to run: saved, run, then loaded again */
+                size_t cap1 = x360_state_size(X);
+                blob1 = malloc(cap1);
+                n1 = blob1 ? x360_state_save(X, NULL, blob1, cap1) : 0;
+            }
+            x360_thread_exit(X, irq, 0);
+            x360_gpu_poll(X);
+        }
+        CHECK(irq->state == TH_DONE, "PM4_INTERRUPT mask %02X: no more callbacks", irqs[q].mask);
+        if (blob1) {
+            CHECK(n1 && x360_state_load(X, NULL, blob1, n1, why_irq, sizeof why_irq) == 0 && irq->state == TH_READY,
+                  "state loaded in CPU 0's callback: %s", why_irq);
+            x360_thread_exit(X, irq, 0);
+            x360_gpu_poll(X);
+            CHECK(irq->state == TH_READY && x360_r8(X, (uint32_t)irq->cpu.gpr[13] + 0x10C) == 2,
+                  "after the load, CPU 2's callback still runs");
+            x360_thread_exit(X, irq, 0);
+            x360_gpu_poll(X);
+            free(blob1);
+        }
+    }
+    /* the ring went on past the fences of the tests below: put them after it */
+    uint32_t rp0 = ip;
     /* Tiled rendering's predicate is in save states: bin select 0 (no bin selected), saved; select 1 again; the
      * state loaded: a predicated fence does not run, the one after it does */
-    uint32_t rp = 4 + 64 + 6;
+    uint32_t rp = rp0;
     x360_w32(X, ring + 4 * rp++, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
     x360_w32(X, ring + 4 * rp++, 0);
     x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
@@ -633,7 +676,8 @@ static void test_more(const char *dir)
     CHECK(XM(X360_xam_XamShowMessageBoxUI, 9, 0, 0, 0, 1, 0, 0, 0, res, ov) == 0x3E5 && x360_r32(X, ov) == 0 &&
               x360_r32(X, res) == 0 && x360_r32(X, x360_handle_obj(X, x360_r32(X, evh)) + 4) == 1,
           "message box through an overlapped");
-    /* the audio driver's client callback runs every frame on a guest context */
+    /* the audio driver's client callback runs every frame on a guest context, given the address of a word that holds
+     * its argument (XAudio2's routine starts with lwz r3,0(r3)) */
     uint32_t cb = x360_kalloc(X, 8), drv = x360_kalloc(X, 4);
     x360_w32(X, cb, 0x82002000u);
     x360_w32(X, cb + 4, 0x1234);
@@ -642,8 +686,21 @@ static void test_more(const char *dir)
     X->time_skip += 60000;
     x360_audio_poll(X);
     x360_audio_client *a = &X->audio[x360_r32(X, drv) & 0xFFFF];
-    CHECK(a->thread >= 0 && X->threads[a->thread].cpu.pc == 0x82002000u && X->threads[a->thread].cpu.gpr[3] == 0x1234,
-          "audio callback context");
+    uint32_t cell = a->thread >= 0 ? (uint32_t)X->threads[a->thread].cpu.gpr[3] : 0;
+    CHECK(a->thread >= 0 && X->threads[a->thread].cpu.pc == 0x82002000u && cell && x360_r32(X, cell) == 0x1234,
+          "audio callback context: r3 %08X holds %08X", cell, cell ? x360_r32(X, cell) : 0);
+    /* registered again (another argument): the slot's word again, no new block */
+    uint32_t kcur = X->kalloc_cur;
+    K(X360_xboxkrnl_XAudioUnregisterRenderDriverClient, 1, x360_r32(X, drv));
+    x360_w32(X, cb + 4, 0x5678);
+    K(X360_xboxkrnl_XAudioRegisterRenderDriverClient, 2, cb, drv);
+    CHECK(X->kalloc_cur == kcur, "registering again allocates nothing (%u bytes)", X->kalloc_cur - kcur);
+    X->time_skip += 60000;
+    x360_audio_poll(X);
+    a = &X->audio[x360_r32(X, drv) & 0xFFFF];
+    CHECK(a->thread >= 0 && X->threads[a->thread].cpu.gpr[3] == cell && x360_r32(X, cell) == 0x5678,
+          "audio client registered again: r3 %08X holds %08X", (uint32_t)X->threads[a->thread].cpu.gpr[3],
+          x360_r32(X, cell));
     CHECK(XM(X360_xam_NetDll_inet_addr, 2, 0, attrs("10.1.2.3") ? x360_r32(X, x360_r32(X, attrs("10.1.2.3") + 4) + 4)
                                                                  : 0) == 0x0A010203u, "inet_addr");
     CHECK(XM(X360_xam_NetDll_socket, 4, 0, 2, 1, 6) == 0xFFFFFFFFu, "no network: sockets fail");
@@ -748,12 +805,38 @@ static void test_xma_loop(void)
     x360_xma_set_backend(NULL);
 }
 
+/* XMA's APU registers are little-endian: register 0x600 (the context array's physical address), kicks and clears */
+static uint32_t xma_array(uint8_t *enabled)
+{
+    uint32_t array = 0;
+    uint8_t used[320], en[320];
+    x360_xma_state(X, &array, used, enabled ? enabled : en, 0);
+    return array;
+}
+
 static void test_xma(void)
 {
     x360_xma_set_backend(NULL); /* these packets are headers only: the silent backend */
+    /* the array exists from x360_create on (no XMA export called yet): XMCORE reads register 0x600 when it starts */
+    uint32_t array = xma_array(NULL);
+    CHECK(array && x360_r32(X, 0x7FEA0000u + 4 * 0x600) == __builtin_bswap32(array),
+          "XMA register 0x600: %08X for the array at %08X", x360_r32(X, 0x7FEA0000u + 4 * 0x600), array);
+    /* a state whose memory has no register 0x600 (made before it) gets it at load */
+    {
+        char why[256] = "";
+        x360_w32(X, 0x7FEA0000u + 4 * 0x600, 0);
+        size_t cap = x360_state_size(X), n = 0;
+        uint8_t *blob = malloc(cap);
+        CHECK(blob && (n = x360_state_save(X, NULL, blob, cap)) > 0 &&
+                  x360_state_load(X, NULL, blob, n, why, sizeof why) == X360_STATE_OK && xma_array(NULL) == array &&
+                  x360_r32(X, 0x7FEA0000u + 4 * 0x600) == __builtin_bswap32(array),
+              "XMA register 0x600 after a state load: %08X (%s)", x360_r32(X, 0x7FEA0000u + 4 * 0x600), why);
+        free(blob);
+    }
     uint32_t pctx = x360_kalloc(X, 4);
     CHECK(K(X360_xboxkrnl_XMACreateContext, 1, pctx) == 0 && x360_r32(X, pctx) >= 0xA0000000u, "XMA context");
     uint32_t ctx = x360_r32(X, pctx);
+    CHECK(x360_v2p(ctx) == array, "XMA context 0 at the array's start: %08X", ctx);
     uint32_t in = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
     uint32_t out = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0x1000);
     for (int p = 0; p < 2; p++) { /* two packets of 3 frames: header frame count 3, metadata 1, no skip */
@@ -801,10 +884,19 @@ static void test_xma(void)
     K(X360_xboxkrnl_XMASetOutputBufferReadOffset, 2, ctx, 17);
     x360_xma_poll(X);
     CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 1, "XMA disabled: nothing decoded");
-    x360_w32(X, 0x7FEA0000u + 4 * 0x650, 1u); /* context 0 */
+    x360_w32(X, 0x7FEA0000u + 4 * 0x650, 0x01000000u); /* bytes 01 00 00 00, the title's stwbrx of 1: context 0 */
     x360_xma_poll(X);
-    CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 0 && x360_r32(X, 0x7FEA0000u + 4 * 0x650) == 0,
-          "XMA kick register");
+    uint8_t en[320];
+    xma_array(en);
+    int nen = 0;
+    for (int i = 0; i < 320; i++)
+        nen += en[i];
+    CHECK(K(X360_xboxkrnl_XMAIsInputBuffer0Valid, 1, ctx) == 0 && x360_r32(X, 0x7FEA0000u + 4 * 0x650) == 0 &&
+              en[0] && nen == 1, "XMA kick register: context 0 only (%d enabled)", nen);
+    x360_w32(X, 0x7FEA0000u + 4 * 0x6A0, 0x01000000u); /* the clear register, as little-endian */
+    x360_xma_poll(X);
+    xma_array(en);
+    CHECK(!en[0] && x360_r32(X, 0x7FEA0000u + 4 * 0x6A0) == 0, "XMA clear register: context 0 disabled");
     K(X360_xboxkrnl_XMAReleaseContext, 1, ctx);
     x360_xma_get_stats(X, &packets, &frames, &blocks, &nctx);
     CHECK(nctx == 0, "XMA context released");
@@ -1153,6 +1245,85 @@ static void test_damaged_states(void)
     free(bad);
 }
 
+/* the audio clients' argument cells in states: a state keeps their block; one whose KERN section is version 1 (made
+ * before them) loads without it, and the next poll makes a new block holding each client's argument */
+static void test_audio_state(void)
+{
+    char why[256] = "";
+    uint32_t cb = x360_kalloc(X, 8), drv = x360_kalloc(X, 4);
+    x360_w32(X, cb, 0x82003000u);
+    x360_w32(X, cb + 4, 0x9ABC);
+    K(X360_xboxkrnl_XAudioRegisterRenderDriverClient, 2, cb, drv);
+    uint32_t k = x360_r32(X, drv) & 0xFFFF, cells = X->audio_cells;
+    CHECK(k < 8 && cells && x360_r32(X, cells + 4 * k) == 0x9ABC, "audio cell %08X", cells + 4 * k);
+    size_t cap = x360_state_size(X), n = 0;
+    uint8_t *blob = malloc(cap), *old = malloc(cap);
+    CHECK(blob && old && (n = x360_state_save(X, NULL, blob, cap)) > 0, "state saved");
+    uint32_t len = 0;
+    uint8_t *kern = blob && n ? state_section(blob, n, "KERN", &len) : NULL;
+    CHECK(kern && kern[-8] == 2 && len >= 4, "KERN is version 2");
+    if (old && kern && len >= 4) {
+        x360_w32(X, cells + 4 * k, 0); /* the state's memory has the cell: it comes back with it */
+        CHECK(x360_state_load(X, NULL, blob, n, why, sizeof why) == X360_STATE_OK && X->audio_cells == cells &&
+                  x360_r32(X, cells + 4 * k) == 0x9ABC, "version 2: the same cells (%s)", why);
+        /* the same state as a version 1 KERN: its last field (the cells) left out */
+        size_t at = (size_t)(kern - blob), end = at + len;
+        memcpy(old, blob, end - 4);
+        memcpy(old + end - 4, blob + end, n - end);
+        uint32_t l1 = len - 4;
+        old[at - 8] = 1;
+        for (int i = 0; i < 4; i++)
+            old[at - 4 + i] = (uint8_t)(l1 >> (8 * i));
+        CHECK(x360_state_load(X, NULL, old, n - 4, why, sizeof why) == X360_STATE_OK && X->audio_cells == 0,
+              "version 1 KERN loads without the cells (%s)", why);
+        X->time_skip += 60000;
+        x360_audio_poll(X);
+        x360_audio_client *a = &X->audio[k];
+        uint32_t r3 = a->thread >= 0 ? (uint32_t)X->threads[a->thread].cpu.gpr[3] : 0;
+        CHECK(X->audio_cells && r3 == X->audio_cells + 4 * k && x360_r32(X, r3) == 0x9ABC,
+              "a new cell at the next poll: r3 %08X holds %08X", r3, r3 ? x360_r32(X, r3) : 0);
+    }
+    K(X360_xboxkrnl_XAudioUnregisterRenderDriverClient, 1, x360_r32(X, drv));
+    free(blob);
+    free(old);
+}
+
+/* the SMT priority hints of a spin-wait (`or 31,31,31`, `or 1,1,1`) end the time slice and charge XE_SPIN_COST
+ * instructions of virtual time once per turn, in interpreted code as in lifted code (xenon_rt.h XE_SPIN_HINT); `or
+ * 2,2,2` and the record form are plain ors */
+static void test_spin_hint(void)
+{
+    static const uint32_t words[] = {
+        0x7FFFFB78u, /* or r31, r31, r31: very low priority */
+        0x7C421378u, /* or r2, r2, r2: normal priority again */
+        0x7FFFFB79u, /* or. r31, r31, r31: sets CR0, no hint */
+        0x7C210B78u, /* or r1, r1, r1: low priority */
+        0x48000000u, /* b . */
+    };
+    uint32_t code = scratch + 0x9000, base = X->image_base, size = X->image_size;
+    for (unsigned k = 0; k < sizeof words / sizeof words[0]; k++)
+        x360_w32(X, code + 4 * k, words[k]);
+    X->image_base = code;
+    X->image_size = sizeof words;
+    x360_thread *t = x360_cur(X);
+    xe_cpu save = t->cpu;
+    t->cpu.pc = code;
+    t->cpu.gpr[31] = 0x80000000u;
+    uint64_t before = X->m.rc_native, stop = X->stop_at;
+    X->stop_at = before + 1;
+    X->m.slice = 1000;
+    int r = x360_interp_run(X, t, 0);
+    uint64_t charged = X->m.rc_native - before;
+    CHECK(r == 1 && charged == 5 + XE_SPIN_COST && X->m.slice < 0,
+          "spin hints: %d, %llu instructions charged, slice %lld", r, (unsigned long long)charged,
+          (long long)X->m.slice);
+    CHECK(t->cpu.gpr[31] == 0x80000000u && (t->cpu.cr >> 28) == 0x8, "or. r31 still sets CR0 (LT): %08X", t->cpu.cr);
+    t->cpu = save;
+    X->stop_at = stop;
+    X->image_base = base;
+    X->image_size = size;
+}
+
 int main(int argc, char **argv)
 {
     char why[256] = "";
@@ -1211,11 +1382,13 @@ int main(int argc, char **argv)
     test_xma();
     test_xma_loop();
     test_crypt();
+    test_spin_hint();
     char dir[] = "/tmp/x360_hle_XXXXXX";
     if (mkdtemp(dir)) {
         test_files(dir);
         test_more(dir);
         rmdir(dir);
+        test_audio_state();
     } else {
         CHECK(0, "mkdtemp");
     }

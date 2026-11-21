@@ -13,7 +13,12 @@
  *   dword 9  output buffer read offset (5 bits, blocks)
  * Titles drive them through the kernel's XMA* exports or straight through the APU registers (0x7FEA0000 + 4 * index:
  * 0x650-0x659 kick, 0x690-0x699 lock, 0x6A0-0x6A9 clear, a bit per context): that page is ordinary memory the
- * scheduler reads between slices, as the GPU's.
+ * scheduler reads between slices, as the GPU's. The APU registers are little-endian (titles use lwbrx / stwbrx):
+ * register 0x600 holds the array's physical address, which XMCORE and XAudio2 read when they start to turn a
+ * context's address into its hardware index ((context - array) / 64), so the array exists from x360_xma_init on and
+ * the register is written again after a state load; in a kick or clear register bit b of the little-endian word is
+ * context 32 * row + b. Register 0x606 (the context the hardware is working on) stays 0: XMCORE waits while it reads
+ * a live context's index ^ 0x200. The lock registers need nothing.
  *
  * Decoding works a 2048-byte packet at a time (an XMA2 packet: a 32-bit header -- frame count (6), first frame's bit
  * offset (15), metadata (3), packets to skip after this one (8) -- then the bit-packed frames, 512 samples per channel
@@ -113,12 +118,26 @@ static x360_xma *xma_of(x360_machine *x)
     return x->xma;
 }
 
+/* the context array, made once, and register 0x600 naming it */
+static int array_publish(x360_machine *x)
+{
+    x360_xma *m = xma_of(x);
+    if (!m)
+        return -1;
+    if (!m->array)
+        m->array = x360_heap_alloc(x, &x->heap_phys, XMA_CONTEXTS * XMA_CONTEXT_BYTES, 0);
+    if (!m->array)
+        return -1;
+    x360_w32(x, APU_MMIO + 4 * 0x600u, __builtin_bswap32(m->array));
+    return 0;
+}
+
 int x360_xma_init(x360_machine *x)
 {
     const char *env = getenv("RECOMP_X360_XMA");
     if (env && !strcmp(env, "silence"))
         s_backend = &k_silence;
-    return xma_of(x) && !x360_commit(x, APU_MMIO, 0x10000) ? 0 : -1;
+    return xma_of(x) && !x360_commit(x, APU_MMIO, 0x10000) ? array_publish(x) : -1;
 }
 
 void x360_xma_free(x360_machine *x)
@@ -298,9 +317,9 @@ void x360_xma_poll(x360_machine *x)
     if (!m || !m->array)
         return;
     /* the APU registers: kicks enable contexts, clears reset them */
-    for (int r = 0; r < 10; r++) {
-        uint32_t kick = x360_r32(x, APU_MMIO + 4 * (0x650u + (uint32_t)r));
-        uint32_t clear = x360_r32(x, APU_MMIO + 4 * (0x6A0u + (uint32_t)r));
+    for (int r = 0; r < 10; r++) { /* little-endian, as the title's stwbrx wrote them */
+        uint32_t kick = __builtin_bswap32(x360_r32(x, APU_MMIO + 4 * (0x650u + (uint32_t)r)));
+        uint32_t clear = __builtin_bswap32(x360_r32(x, APU_MMIO + 4 * (0x6A0u + (uint32_t)r)));
         for (int b = 0; b < 32; b++) {
             int i = r * 32 + b;
             if ((kick >> b) & 1)
@@ -326,10 +345,8 @@ static void k_XMACreateContext(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     x360_xma *m = xma_of(x);
-    if (m && !m->array) {
-        uint32_t a = x360_heap_alloc(x, &x->heap_phys, XMA_CONTEXTS * XMA_CONTEXT_BYTES, 0);
-        m->array = a;
-    }
+    if (m && !m->array)
+        array_publish(x);
     int i = 0;
     while (m && m->array && i < XMA_CONTEXTS && m->used[i])
         i++;
@@ -513,7 +530,9 @@ void x360_xma_get_stats(x360_machine *x, uint64_t *packets, uint64_t *frames, ui
 }
 
 /* state: the context array's place, which contexts are in use and enabled (the contexts themselves are guest
- * memory, in MEM); decoders and pending PCM start again empty after a load */
+ * memory, in MEM); decoders and pending PCM start again empty after a load. x360_xma_loaded, once every section is
+ * in: a state made before the array existed from the start (none, or memory without register 0x600) gets it
+ * again. */
 void x360_xma_state(x360_machine *x, uint32_t *array, uint8_t *used, uint8_t *enabled, int load)
 {
     x360_xma *m = xma_of(x);
@@ -531,7 +550,19 @@ void x360_xma_state(x360_machine *x, uint32_t *array, uint8_t *used, uint8_t *en
         m->used[i] = used[i] & 1, m->enabled[i] = enabled[i] & 1;
     }
     m->ring_r = m->ring_w = 0;
+    memset(m->acc, 0, sizeof m->acc); /* the frame being mixed starts again empty */
     m->acc_clients = 0;
+}
+
+void x360_xma_loaded(x360_machine *x)
+{
+    x360_xma *m = xma_of(x);
+    if (!m)
+        return;
+    x360_heap *h = &x->heap_phys;
+    if (m->array && (m->array >= h->base + h->size || !h->used[(m->array - h->base) / h->page]))
+        m->array = 0; /* not the state's memory (a state without an XMA section): another one */
+    array_publish(x);
 }
 
 /* ---- the audio out: the render driver's frames mixed, folded to stereo, in a ring ---- */

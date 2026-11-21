@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(console_x360_tests C)
 
 # The Xbox 360 runtime's tests (XBA-270): a self-contained project like those under tests/, run by
-# tools/run_c_tests.sh (as console_x360) and by the root build's ctest when XBR_CONSOLE_X360 is ON. Linux only.
+# tools/run_c_tests.sh (as console_x360) and by the root build's ctest when XBR_CONSOLE_X360 is ON. Linux and macOS.
 #
 #   xenos_cp         the PM4 command processor on hand-built packets (xenos_cp_test.c)
 #   xenos_draw       the GLES renderer draws a hand-built PM4 stream, read back (skipped without EGL / GLES 3.0):
@@ -43,11 +43,11 @@ project(console_x360_tests C)
 if(WIN32)
     message(FATAL_ERROR "The console runtimes are POSIX-only")
 endif()
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # macOS (tools/run_c_tests.sh configures every consoles/*/tests there too): one test that skips, nothing built
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT APPLE)
+    # elsewhere (tools/run_c_tests.sh configures every consoles/*/tests there too): one test that skips, nothing built
     enable_testing()
-    add_test(NAME x360_linux_only COMMAND sh -c "echo 'skipped: the Xbox 360 runtime is Linux-only (memfd_create)'; exit 77")
-    set_tests_properties(x360_linux_only PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME x360_unsupported COMMAND sh -c "echo 'skipped: the Xbox 360 runtime needs Linux or macOS'; exit 77")
+    set_tests_properties(x360_unsupported PROPERTIES SKIP_RETURN_CODE 77)
     return()
 endif()
 set(CMAKE_C_STANDARD 11)
@@ -65,13 +65,17 @@ set_tests_properties(xenos_cp PROPERTIES TIMEOUT 60)
 
 add_executable(xenos_texture_hash_test xenos_texture_hash_test.c)
 target_link_libraries(xenos_texture_hash_test PRIVATE x360_core)
-target_link_options(xenos_texture_hash_test PRIVATE -Wl,--allow-multiple-definition)
+if(NOT APPLE) # ld64 takes the test's own xenos_gl.c definitions and never loads the archive's copy
+    target_link_options(xenos_texture_hash_test PRIVATE -Wl,--allow-multiple-definition)
+endif()
 add_test(NAME xenos_texture_hash COMMAND xenos_texture_hash_test)
 set_tests_properties(xenos_texture_hash PROPERTIES TIMEOUT 120)
 
 add_executable(xenos_texel_bounds_test xenos_texel_bounds_test.c)
 target_link_libraries(xenos_texel_bounds_test PRIVATE x360_core)
-target_link_options(xenos_texel_bounds_test PRIVATE -Wl,--allow-multiple-definition)
+if(NOT APPLE) # ld64 takes the test's own xenos_gl.c definitions and never loads the archive's copy
+    target_link_options(xenos_texel_bounds_test PRIVATE -Wl,--allow-multiple-definition)
+endif()
 add_test(NAME xenos_texel_bounds COMMAND xenos_texel_bounds_test)
 set_tests_properties(xenos_texel_bounds PROPERTIES TIMEOUT 60)
 

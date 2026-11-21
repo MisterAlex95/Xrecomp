@@ -259,6 +259,17 @@ public class LauncherActivity extends Activity {
     /** Where a missing theme is baked: a thread of its own (tests run it in place: TestSupport.StockTheme). */
     static final java.util.concurrent.Executor THEME_THREAD = r -> new Thread(r, "xba-theme").start();
     static java.util.concurrent.Executor themeExecutor = THEME_THREAD;
+    /**
+     * Report launcher-lag WP-4: the library polls' model work (the entries, from sources.json, downloads.json, the
+     * queue and each game's pack) runs here, one after the other, never on the main thread; tests run it in place
+     * (TestSupport.StockTheme).
+     */
+    static final java.util.concurrent.Executor LIB_THREAD = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "xba-lib-poll");
+        t.setDaemon(true);
+        return t;
+    });
+    static java.util.concurrent.Executor libExecutor = LIB_THREAD;
 
     // ---- Home ----
     private Widgets.PillButton homePrimary;
@@ -376,6 +387,8 @@ public class LauncherActivity extends Activity {
     /** The library screen's entries and cards, as built. */
     private List<LibraryScreen.Entry> libEntries = new ArrayList<>();
     private final List<GameCard> libCards = new ArrayList<>();
+    /** The library's cards by game key (the grid's and « Recently played »'s): a cover found updates them alone. */
+    private final java.util.Map<String, List<GameCard>> libCardsByKey = new java.util.HashMap<>();
     /** The focused card's title ID on the library ("" for the folder tile). */
     private String focusTid;
     private TextView libCaption;
@@ -601,6 +614,8 @@ public class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        CoverFetcher.setListener(coverListener);
+        onCoversMissed(CoverFetcher.takeUndelivered());
         TitleAppReceiver.listener = () -> runOnUiThread(this::showTitleAppOutcome);
         showTitleAppOutcome();
         AppUpdateReceiver.listener = () -> runOnUiThread(this::showAppUpdateOutcome);
@@ -621,6 +636,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onPause() {
         resumed = false;
+        CoverFetcher.clearListener(coverListener);
         TitleAppReceiver.listener = null;
         AppUpdateReceiver.listener = null;
         poller.removeCallbacks(pollTick);
@@ -674,6 +690,7 @@ public class LauncherActivity extends Activity {
         // next one scans again. A recreation by the system lets it finish (it writes index.json).
         if (isFinishing())
             scanCancel = true;
+        CoverFetcher.clearListener(coverListener);
         if (feedback != null)
             feedback.release();
         super.onDestroy();
@@ -775,6 +792,11 @@ public class LauncherActivity extends Activity {
     /** The library's cards as built (the « Library folder » tile last). */
     List<GameCard> libraryCardsForTest() {
         return libCards;
+    }
+
+    /** The library grid's scroll view (a new one means the library was built again). */
+    ScrollView libraryScrollForTest() {
+        return libScroll;
     }
 
     // ---- Window and stage ----------------------------------------------------------------------------------------
@@ -1112,6 +1134,8 @@ public class LauncherActivity extends Activity {
         libCards.clear();
         libRecentCards.clear();
         libCardEntries.clear();
+        libCardsByKey.clear();
+        heroTile = null;
         libCaption = null;
         libContent = null;
         libScroll = null;
@@ -3060,6 +3084,9 @@ public class LauncherActivity extends Activity {
                                           Theme.TEXT_DIM));
             listRow(list, getString(R.string.SHARE_LAST_GAME_LOG), getString(R.string.SHARE_LAST_GAME_LOG_DETAIL),
                     this::shareLastGameLog);
+            if (CrashReport.available(this))
+                listRow(list, getString(R.string.REPORT_LAST_GAME), getString(R.string.REPORT_LAST_GAME_DETAIL),
+                        this::reportLastGame);
             MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
                                     () -> go(Screen.ABOUT));
             about.setValue(version());
@@ -5177,8 +5204,11 @@ public class LauncherActivity extends Activity {
             Runnable act = directAction;
             directPrimary = pill(buttons, directActionLabel == R.string.PLAY ? Icon.PLAY : null,
                                  getString(directActionLabel), true, act);
-            if (directShareLog)
+            if (directShareLog) {
                 pill(buttons, null, getString(R.string.SHARE_LOG), false, this::shareLog);
+                if (CrashReport.available(this))
+                    pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
+            }
             defaultFocus = directPrimary;
             startAction = act;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5512,6 +5542,8 @@ public class LauncherActivity extends Activity {
                                             getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
                                             true, this::startPrepare);
             pill(buttons, Icon.COPY, getString(R.string.SHARE_LOG), false, this::shareLog);
+            if (!cancelled && CrashReport.available(this))
+                pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
             defaultFocus = retry;
             yAction = this::shareLog;
             addHint("A", R.string.HINT_SELECT, this::clickFocused);
@@ -5644,6 +5676,69 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    // ---- « Send report » (XBA-335) -----------------------------------------------------------------------------
+
+    /** « Send report » beside a failed Prepare: its code, message and prepare.log. */
+    private void reportPrepare() {
+        String tid = prepTid();
+        if (tid == null || !PrepareService.logFile(this, tid).isFile()) {
+            setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+            return;
+        }
+        PrepareProtocol.Status s = readPrepStatus();
+        confirmReport(CrashReport.prepare(this, tid, prepTitle(), s == null ? "" : s.code, s == null ? "" : s.msg,
+                                          PrepareService.logFile(this, tid)));
+    }
+
+    /** « Send a report about the last game » (Settings › Advanced): the dump of « Share the last game's log ». */
+    private void reportLastGame() {
+        if (gameRunning()) {
+            setNote(getString(R.string.SHARE_LAST_GAME_LOG_RUNNING), NOTE_INFO);
+            return;
+        }
+        new Thread(() -> {
+            File f = LogProvider.lastGameLogFile(this);
+            boolean ok = LogProvider.dumpLastGame(this, f);
+            String key = GameStore.sessionTid(this);
+            CrashReport r = ok ? CrashReport.game(this, key, null, f) : null;
+            runOnUiThread(() -> {
+                if (r == null)
+                    setNote(getString(R.string.SHARE_LOG_NONE), NOTE_INFO);
+                else
+                    confirmReport(r);
+            });
+        }, "report-last-game").start();
+    }
+
+    /** The sheet before anything leaves: what the report holds, Send or Cancel. Nothing is sent without Send. */
+    private void confirmReport(CrashReport r) {
+        Widgets.Sheet s = openSheet(R.string.REPORT_TITLE);
+        s.addText(getString(R.string.REPORT_EXPLAIN), 5);
+        TextView sum = s.addText(r.summary(), 6);
+        sum.setTextColor(Theme.TEXT);
+        ((LinearLayout.LayoutParams)sum.getLayoutParams()).topMargin = Theme.S2;
+        sheetRow(getString(R.string.REPORT_SEND), () -> sendReport(r));
+        sheetRow(getString(R.string.CANCEL), () -> restoreFocus(false));
+        sheetReady();
+        reportShown = r;
+        Log.i(TAG, "launcher: report " + r.kind + " offered");
+    }
+
+    private CrashReport reportShown;
+
+    CrashReport reportShownForTest() {
+        return reportShown;
+    }
+
+    private void sendReport(CrashReport r) {
+        setNote(getString(R.string.REPORT_SENDING), NOTE_INFO);
+        new Thread(() -> {
+            boolean ok = r.send(this);
+            runOnUiThread(() -> setNote(getString(ok ? R.string.REPORT_SENT : R.string.REPORT_NOT_SENT),
+                                        ok ? NOTE_OK : NOTE_WARN));
+        }, "report-send").start();
+    }
+
     /** Every PREPARE_POLL_MS while resumed: status.json into the Preparing screen, or into Home's row. */
     private void pollPrepare() {
         if (!resumed)
@@ -5680,14 +5775,12 @@ public class LauncherActivity extends Activity {
                     homeStatus.set(progressLine(s), Theme.OK);
             }
         } else if (screen == Screen.HOME && homeChip != null) {
-            LibraryScreen.Entry e = ++libPolls % LIBRARY_POLL_EVERY == 0 ? currentEntry() : null;
-            if (e != null && e.chip != homeChip)
-                backgroundRefresh(screen);
+            if (++libPolls % LIBRARY_POLL_EVERY == 0)
+                homeChipCheckLater();
         } else if (screen == Screen.LIBRARY && !scanning()) {
             // (not while the search is typed: the field and its keyboard would go)
-            if (++libPolls % LIBRARY_POLL_EVERY == 0 && (libSearch == null || !libSearch.hasFocus())
-                && libraryChanged())
-                backgroundRefresh(screen);
+            if (++libPolls % LIBRARY_POLL_EVERY == 0 && !libSearchTyped())
+                libraryCheckLater();
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
             if (now != homePrep) {
@@ -6041,16 +6134,28 @@ public class LauncherActivity extends Activity {
     }
 
     private LibraryScreen.Env libEnv() {
+        LibraryScreen.Env e = libEnvBase();
+        fillLibEnv(e, index);
+        return e;
+    }
+
+    /** What libEnv takes from the main thread's state (the import running, the packs dropped); the rest is fillLibEnv's. */
+    private LibraryScreen.Env libEnvBase() {
         LibraryScreen.Env e = new LibraryScreen.Env();
+        e.importingTid = worker != null && worker.isAlive() ? importTid : null;
+        e.packDropped = new java.util.HashSet<>(droppedPacks);
+        return e;
+    }
+
+    /** The rest of libEnv: files, processes and the network library, read on any thread (index: the one shown). */
+    private void fillLibEnv(LibraryScreen.Env e, LibraryIndex index) {
         e.toolchain = Toolchain.available(this);
         // Each library folder can be read: All files access for a path, the persisted permission for a tree.
         e.accessible = true;
         e.noAccess = Library.unreadableFolders(this, Environment.isExternalStorageManager());
         e.prepareProcess = prepareProcessAlive();
         e.runningTid = gameRunning() ? launchedTid() : null;
-        e.importingTid = worker != null && worker.isAlive() ? importTid : null;
         e.queue = PrepareProtocol.readQueue(PrepareProtocol.queueFile(getFilesDir()));
-        e.packDropped = droppedPacks;
         e.toolkit = Toolchain.toolkitDigest(this);
         // XBA-319: the network sources' games, unless the player hid them (Options › Network sources)
         e.remote = NetService.showInLibrary(this) ? RemoteLibrary.notLocal(getFilesDir(), index)
@@ -6059,7 +6164,84 @@ public class LauncherActivity extends Activity {
         for (NetDownloads.Job j : NetDownloads.read(getFilesDir()))
             d.put(j.key, j);
         e.downloads = d;
-        return e;
+    }
+
+    /** A copy of the games' list to read on another thread (the records are shared, read only). */
+    private Library.Games gamesSnapshot() {
+        Library.Games g = new Library.Games();
+        g.selected = games.selected;
+        g.unreadable = games.unreadable;
+        g.games.putAll(games.games);
+        return g;
+    }
+
+    /** The search field has the focus (a rebuild would take it and its keyboard away). */
+    private boolean libSearchTyped() {
+        return libSearch != null && libSearch.hasFocus();
+    }
+
+    private boolean libCheckBusy, homeCheckBusy, netPollBusy;
+
+    /**
+     * The library poll (WP-4): its entries worked out on libExecutor, compared there with those shown; only a change
+     * comes back to the main thread, which builds the library again if it still shows the same entries. One at a
+     * time.
+     */
+    private void libraryCheckLater() {
+        if (libCheckBusy)
+            return;
+        libCheckBusy = true;
+        List<LibraryScreen.Entry> shown = libEntries;
+        File files = getFilesDir();
+        Library.Games g = gamesSnapshot();
+        LibraryIndex idx = index;
+        LibraryScreen.Env env = libEnvBase();
+        libExecutor.execute(() -> {
+            boolean changed = false;
+            try {
+                fillLibEnv(env, idx);
+                changed = entriesDiffer(LibraryScreen.entries(files, g, idx, env), shown);
+            } catch (RuntimeException ex) {
+                Log.w(TAG, "launcher: library poll: " + ex);
+            }
+            boolean c = changed;
+            poller.post(() -> {
+                libCheckBusy = false;
+                if (c && !isDestroyed() && libEntries == shown && screen == Screen.LIBRARY && !scanning()
+                    && !libSearchTyped())
+                    backgroundRefresh(screen);
+            });
+        });
+    }
+
+    /** Home's poll (WP-4): the selected game's entry worked out on libExecutor; a new chip builds Home again. */
+    private void homeChipCheckLater() {
+        Library.Record r = games.selected();
+        if (homeCheckBusy || r == null)
+            return;
+        homeCheckBusy = true;
+        String tid = r.titleId;
+        File files = getFilesDir();
+        Library.Games g = gamesSnapshot();
+        LibraryIndex idx = index;
+        LibraryScreen.Env env = libEnvBase();
+        libExecutor.execute(() -> {
+            GameState.Chip chip = null;
+            try {
+                fillLibEnv(env, idx);
+                chip = LibraryScreen.entry(files, tid, g, idx, env).chip;
+            } catch (RuntimeException ex) {
+                Log.w(TAG, "launcher: home poll: " + ex);
+            }
+            GameState.Chip c = chip;
+            poller.post(() -> {
+                homeCheckBusy = false;
+                Library.Record now = games.selected();
+                if (c != null && !isDestroyed() && screen == Screen.HOME && homeChip != null && c != homeChip
+                    && now != null && tid.equals(now.titleId))
+                    backgroundRefresh(screen);
+            });
+        });
     }
 
     /** The selected game as a library entry (its chip), or null. */
@@ -6537,47 +6719,79 @@ public class LauncherActivity extends Activity {
         return scanner != null && scanner.isAlive();
     }
 
-    private Thread coverThread;
+    /** Covers found told to this launcher while it is resumed (CoverFetcher holds no activity). */
+    private final CoverFetcher.Listener coverListener = this::onCoverFound;
+    /** More covers found while away than this: the screen is built again once instead of card by card. */
+    private static final int COVER_UPDATES_MAX = 32;
 
     /**
      * Cover art for the GBA, PS1, N64 and GameCube games that have none (CoverArt: libretro-thumbnails, when « Download cover
-     * art » is on), one game after the other on a worker; each one found shows at once.
+     * art » is on), and for the network library's games: handed to the process' one worker (CoverFetcher), which
+     * sorts out those that want one and looks for them one after the other; each one found shows on its card at once.
      */
     private void fetchCovers(LibraryIndex idx) {
-        if (!CoverArt.downloadOn(this) || !VkDriverIndex.networkAllowed(this)
-            || (coverThread != null && coverThread.isAlive()))
+        if (!CoverArt.downloadOn(this) || !VkDriverIndex.networkAllowed(this))
             return;
-        File files = getFilesDir();
-        long now = System.currentTimeMillis();
-        List<String[]> todo = new ArrayList<>();
+        List<String[]> candidates = new ArrayList<>();
         for (java.util.Map.Entry<String, List<LibraryIndex.Item>> g : idx.games().entrySet()) {
             LibraryIndex.Item i = g.getValue().get(0);
-            if (i.otherConsole() && CoverArt.wanted(files, g.getKey(), now))
-                todo.add(new String[] { g.getKey(), i.name });
+            if (i.otherConsole())
+                candidates.add(new String[] { g.getKey(), i.name });
         }
         for (LibraryScreen.Entry e : libEntries)   // XBA-332: the network library's games, by their file's name
-            if (e.remote != null && CoverArt.wanted(files, e.tid, now))
-                todo.add(new String[] { e.tid, e.remote.name() });
-        if (todo.isEmpty())
+            if (e.remote != null)
+                candidates.add(new String[] { e.tid, e.remote.name() });
+        if (!candidates.isEmpty())
+            CoverFetcher.enqueue(getFilesDir(), candidates);
+    }
+
+    /**
+     * A cover was stored for key: its library cards and Home's art tile show it, nothing else is built again (report
+     * launcher-lag RC1: a rebuild per cover kept the main thread busy for minutes with thousands of games).
+     */
+    private void onCoverFound(String key) {
+        if (isFinishing() || isDestroyed())
             return;
-        Log.i(TAG, "launcher: cover art: looking for " + todo.size() + " game(s)");
-        coverThread = new Thread(() -> {
-            VkDriverIndex.Http http = new VkDriverIndex.UrlHttp();
-            for (String[] t : todo) {
-                if (!CoverArt.fetch(http, files, t[0], t[1]))
-                    continue;
-                runOnUiThread(() -> {
-                    ArtCache.invalidate(t[0]);
-                    if (t[0].equals(artTid))
-                        artTid = null;   // Home's image is read again
-                    if (isFinishing() || isDestroyed())
-                        return;
-                    if (screen == Screen.LIBRARY || screen == Screen.HOME)
-                        refreshKeepingFocus();
-                });
+        ArtCache.invalidate(key);   // the next draw reads it again (the cached art stays shown meanwhile)
+        List<GameCard> cards = libCardsByKey.get(key);
+        if (cards != null)
+            for (GameCard c : cards)
+                c.invalidate();
+        if (key.equals(artTid)) {
+            artTid = null;   // Home's image is read again
+            if (screen == Screen.HOME && heroTile != null) {
+                refreshIdentity();   // set on the tile when it has loaded (identityLoaded), or here if cached
+                if (art != null && heroIdentity)
+                    heroTile.setArt(art, artColor);
             }
-        }, "cover-art");
-        coverThread.start();
+        } else if (screen == Screen.ROM_HOME && romEntry != null && key.equals(romEntry.tid) && heroTile != null) {
+            Widgets.ArtTile tile = heroTile;
+            Bitmap b = ArtCache.get(key, LibraryScreen.artLoader(getFilesDir(), romEntry), ArtCache.px(Theme.ART),
+                                    a -> {
+                                        if (a != null && tile == heroTile)
+                                            tile.setArt(a, artColor);
+                                    });
+            if (b != null)
+                tile.setArt(b, artColor);
+        }
+    }
+
+    /** Covers found while no launcher was resumed: card by card when few, else the screen once. */
+    private void onCoversMissed(List<String> keys) {
+        if (keys.isEmpty())
+            return;
+        if (keys.size() <= COVER_UPDATES_MAX) {
+            for (String k : keys)
+                onCoverFound(k);
+            return;
+        }
+        for (String k : keys) {
+            ArtCache.invalidate(k);
+            if (k.equals(artTid))
+                artTid = null;
+        }
+        if (screen == Screen.LIBRARY || screen == Screen.HOME || screen == Screen.ROM_HOME)
+            refreshKeepingFocus();
     }
 
     private void onScanDone(LibraryScanner.Result r, LibraryIndex before) {
@@ -6842,7 +7056,7 @@ public class LauncherActivity extends Activity {
     }
 
     /** A card of the library for e (the grid's or the « Recently played » row's). */
-    private GameCard libCard(LibraryScreen.Entry e) {
+    private GameCard libCard(LibraryScreen.Entry e, int gridIndex) {
         GameCard c = new GameCard(this);
         boolean remote = RemoteLibrary.isRemoteKey(e.tid);   // XBA-319: the « remote content » art on its console's hue
         c.setGame(e.tid, LibraryScreen.artLoader(getFilesDir(), e), remote ? e.console().id : e.tid, e.title(),
@@ -6863,12 +7077,12 @@ public class LauncherActivity extends Activity {
         onFocus(c, () -> {
             libFocus(e);
             // The first row of cards: back to the top, the Search and Sort pills in sight (not under the title).
-            boolean top = libRecentCards.contains(c) || libRecentCards.isEmpty() && libCards.indexOf(c) >= 0
-                          && libCards.indexOf(c) < libColumns;
+            boolean top = gridIndex < 0 || libRecentCards.isEmpty() && gridIndex < libColumns;
             if (top && libScroll != null)
                 libScroll.post(() -> libScroll.scrollTo(0, 0));
         });
         libCardEntries.put(c, e);
+        libCardsByKey.computeIfAbsent(e.tid, k -> new ArrayList<>(1)).add(c);
         return focusable(c);
     }
 
@@ -6886,6 +7100,7 @@ public class LauncherActivity extends Activity {
             libCardEntries.remove(c);
         libCards.clear();
         libRecentCards.clear();
+        libCardsByKey.clear();
         libContent.removeAllViews();
         LibraryView.State view = libView();
         libShown = LibraryView.apply(libEntries, view);
@@ -6897,7 +7112,7 @@ public class LauncherActivity extends Activity {
         if (!recent.isEmpty()) {
             libContent.addView(Theme.label(this, getString(R.string.LIB_RECENT)), lp(MATCH, WRAP));
             for (LibraryScreen.Entry e : recent) {
-                GameCard c = libCard(e);
+                GameCard c = libCard(e, -1);   // (a card of « Recently played »: the top row)
                 libRecentCards.add(c);
                 if (e.tid.equals(want) && recentWant == null)
                     recentWant = c;
@@ -6908,7 +7123,7 @@ public class LauncherActivity extends Activity {
             libContent.addView(Theme.label(this, getString(R.string.LIB_ALL_GAMES)), p);
         }
         for (LibraryScreen.Entry e : libShown) {
-            GameCard c = libCard(e);
+            GameCard c = libCard(e, libCards.size());
             libCards.add(c);
             if (e.tid.equals(want))
                 focusCard = c;
@@ -7203,16 +7418,62 @@ public class LauncherActivity extends Activity {
      */
     private void netPoll() {
         File dl = LibraryScanner.netDir(this);
-        if (dl == null)
+        if (dl == null || netPollBusy)
             return;
-        for (NetDownloads.Job j : NetDownloads.read(getFilesDir())) {
-            if (!NetDownloads.DONE.equals(j.state) || !j.auto || j.files.isEmpty())
-                continue;
-            File unpacked = NetUnpack.dirOf(dl, j);   // XBA-331: an archive's game is in the folder it unpacked into
-            File f = unpacked != null ? unpacked : NetDownloads.jobFile(dl, j, j.files.get(0).path);
-            LibraryScreen.Entry e = f == null ? null
-                                    : unpacked != null ? entryUnder(LibraryIndex.fileLoc(f) + "/")
-                                    : entryAt(LibraryIndex.fileLoc(f));
+        netPollBusy = true;
+        File files = getFilesDir();
+        Library.Games g = gamesSnapshot();
+        LibraryIndex idx = index;
+        LibraryScreen.Env env = libEnvBase();
+        // WP-4: the jobs read and their games looked for (the library's entries, once) on libExecutor
+        libExecutor.execute(() -> {
+            List<NetDone> done = new ArrayList<>();
+            try {
+                List<LibraryScreen.Entry> entries = null;
+                for (NetDownloads.Job j : NetDownloads.read(files)) {
+                    if (!NetDownloads.DONE.equals(j.state) || !j.auto || j.files.isEmpty())
+                        continue;
+                    File unpacked = NetUnpack.dirOf(dl, j);   // XBA-331: an archive's game is in the folder it unpacked into
+                    File f = unpacked != null ? unpacked : NetDownloads.jobFile(dl, j, j.files.get(0).path);
+                    if (f != null && entries == null) {
+                        fillLibEnv(env, idx);
+                        entries = LibraryScreen.entries(files, g, idx, env);
+                    }
+                    LibraryScreen.Entry e = f == null ? null
+                                            : unpacked != null ? entryUnder(entries, LibraryIndex.fileLoc(f) + "/")
+                                            : entryAt(entries, LibraryIndex.fileLoc(f));
+                    done.add(new NetDone(j, f, e));
+                }
+            } catch (RuntimeException ex) {
+                Log.w(TAG, "launcher: net poll: " + ex);
+            }
+            poller.post(() -> {
+                netPollBusy = false;
+                if (!isDestroyed())
+                    netPollDone(done);
+            });
+        });
+    }
+
+    /** A download done (« auto »), its file, and its game in the library (null: not listed yet). */
+    private static final class NetDone {
+        final NetDownloads.Job job;
+        final File file;
+        final LibraryScreen.Entry entry;
+
+        NetDone(NetDownloads.Job job, File file, LibraryScreen.Entry entry) {
+            this.job = job;
+            this.file = file;
+            this.entry = entry;
+        }
+    }
+
+    /** netPoll's outcome on the main thread: one game per tick goes on (or a scan is started for it). */
+    private void netPollDone(List<NetDone> done) {
+        for (NetDone d : done) {
+            NetDownloads.Job j = d.job;
+            File f = d.file;
+            LibraryScreen.Entry e = d.entry;
             if (e == null) {
                 int scans = netScans.getOrDefault(j.key, 0);
                 if (f != null && scans < 3) {
@@ -7262,16 +7523,16 @@ public class LauncherActivity extends Activity {
     }
 
     /** The first library entry whose active file is below the folder location prefix (ends with « / »), or null. */
-    private LibraryScreen.Entry entryUnder(String prefix) {
-        for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
+    private static LibraryScreen.Entry entryUnder(List<LibraryScreen.Entry> entries, String prefix) {
+        for (LibraryScreen.Entry e : entries)
             if (e.active != null && e.active.loc.startsWith(prefix))
                 return e;
         return null;
     }
 
     /** The library entry whose active file is at loc, or null. */
-    private LibraryScreen.Entry entryAt(String loc) {
-        for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
+    private static LibraryScreen.Entry entryAt(List<LibraryScreen.Entry> entries, String loc) {
+        for (LibraryScreen.Entry e : entries)
             if (e.active != null && loc.equals(e.active.loc))
                 return e;
         return null;
@@ -7681,12 +7942,11 @@ public class LauncherActivity extends Activity {
     }
 
     /** The library's entries changed state (a Prepare moved on, the queue, a game ended): true. */
-    private boolean libraryChanged() {
-        List<LibraryScreen.Entry> now = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
-        if (now.size() != libEntries.size())
+    static boolean entriesDiffer(List<LibraryScreen.Entry> now, List<LibraryScreen.Entry> shown) {
+        if (now.size() != shown.size())
             return true;
         for (int i = 0; i < now.size(); i++) {
-            LibraryScreen.Entry a = now.get(i), b = libEntries.get(i);
+            LibraryScreen.Entry a = now.get(i), b = shown.get(i);
             if (!a.tid.equals(b.tid) || a.chip != b.chip || a.prepared != b.prepared || a.queuePos != b.queuePos
                 || !netState(a).equals(netState(b)))
                 return true;

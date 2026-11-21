@@ -7,7 +7,9 @@
 #ifndef XE_RUNTIME
 #define XE_RUNTIME 1
 #endif
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
 #include "x360_core.h"
@@ -150,7 +152,8 @@ typedef struct x360_kobj {
 } x360_kobj;
 
 typedef struct x360_audio_client {
-    uint32_t callback, arg;  /* XAudioRegisterRenderDriverClient's routine and argument */
+    uint32_t callback, arg;  /* XAudioRegisterRenderDriverClient's routine and argument (the routine is given the
+                              * address of a guest cell holding it: x360_machine.audio_cells) */
     uint64_t next;           /* virtual time of the next frame request */
     int thread;              /* its guest context (x360_callback_run), -1 before the first */
     uint32_t frames_requested, frames_submitted;
@@ -227,6 +230,7 @@ struct x360_machine {
     x360_handle handles[X360_MAX_HANDLES];
     x360_timer timers[X360_MAX_TIMERS];
     x360_audio_client audio[8];
+    uint32_t audio_cells;     /* 8 guest words, client k's argument at + 4k (x360_more.c), 0: not made yet */
     x360_pad_slot pads[4];
     FILE *audio_out;      /* --audio: the submitted render driver frames as WAV (not state) */
     uint32_t audio_bytes;
@@ -255,6 +259,13 @@ struct x360_machine {
     x360_kobj kobj;
     uint8_t hle_lib;          /* the export being answered (x360_hle_refused) */
     uint16_t hle_ordinal;
+    /* WP8: while an HLE runs, the outermost x360_hle_call's sigjmp_buf and the host thread running it (not state).
+     * on_fault jumps back there when that thread touches an unmapped guest address: the machine stops, the process
+     * does not. Set with release after hle_host, read with acquire (host threads: a worker faulting in lifted code
+     * then sees the hle_host that goes with the buffer, never its own stale id). */
+    _Atomic(void *) hle_jmp;
+    pthread_t hle_host;
+    uint32_t hle_fault_addr;  /* the guest address of that fault */
     int hle_conflict;         /* two tables gave one export different functions: the machine is not created */
 };
 
@@ -385,6 +396,7 @@ void x360_hle_refused(x360_machine *x);
 /* x360_more.c: the rest of the surface a shipped title imports */
 void x360_more_register(x360_machine *x);
 void x360_audio_poll(x360_machine *x);
+void x360_audio_cells_write(x360_machine *x); /* after a state load: the clients' argument cells written again */
 void x360_audio_close(x360_machine *x);
 uint64_t x360_audio_next_event(x360_machine *x);
 int x360_set_content_root(x360_machine *x, const char *root, const char *name);
@@ -447,6 +459,7 @@ void x360_xma_free(x360_machine *x);
 void x360_xma_poll(x360_machine *x);
 void x360_xma_register(x360_machine *x);
 void x360_xma_state(x360_machine *x, uint32_t *array, uint8_t *used, uint8_t *enabled, int load);
+void x360_xma_loaded(x360_machine *x); /* after a state load: the array exists and register 0x600 names it */
 void x360_audio_mix_frame(x360_machine *x, int client, const float *planar6);
 void x360_audio_tick(x360_machine *x);
 void x360_pad_set_motors(x360_machine *x, int user, unsigned left, unsigned right);

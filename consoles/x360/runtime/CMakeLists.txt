@@ -4,7 +4,7 @@ project(x360_runtime C)
 # x360_core: the Xbox 360 runtime (XBA-270, epic XBA-229): a 4 GB guest address space with the physical mirrors, the
 # XEX2 loader and import thunks, cooperative guest threads, a minimal xboxkrnl / xam HLE, the small interpreter
 # behind RC_INTERP. The title's code is a pack (x360_tools.recomp's C, built with -DXE_RUNTIME). Plain C11, no host
-# layer yet: Linux headless only (x360_run: memfd_create for the physical mirrors), nothing in the app. See
+# layer yet: Linux and macOS headless (x360_run; the physical mirrors: memfd_create, shm_open on macOS). See
 # consoles/README.md « Xbox 360 ».
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -54,6 +54,11 @@ if(NOT TARGET x360_core)
     endif()
     find_package(Threads REQUIRED) # XBA-283: x360_set_host_threads
     target_link_libraries(x360_core PUBLIC xiso m ${CMAKE_DL_LIBS} Threads::Threads)
+    if(APPLE)
+        # x360_thread.c's weak xbox_log_drain (platform/android_log.h): ld64 refuses an undefined weak reference
+        # unless told it may stay undefined
+        target_link_options(x360_core INTERFACE "LINKER:-U,_xbox_log_drain")
+    endif()
     set_target_properties(x360_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 

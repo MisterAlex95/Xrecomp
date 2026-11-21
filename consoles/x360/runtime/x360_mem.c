@@ -11,7 +11,8 @@
  *   0xA0000000-0xBFFFFFFF  physical memory (512 MB), 64 KB pages view
  *   0xC0000000-0xDFFFFFFF  the same physical memory, 16 MB pages view
  *   0xE0000000-0xFFFFFFFF  the same physical memory, 4 KB pages view
- * The three physical views map one memfd, so a write through one is seen through the others. As on the console, the
+ * The three physical views map one memfd (a POSIX shared memory object, unlinked at once, on macOS: no memfd_create
+ * there), so a write through one is seen through the others. As on the console, the
  * 0xE0000000 view starts one page into physical memory (virtual 0xE0000000 is physical 0x1000; its last page is not
  * mapped): x360_v2p / x360_p2v (x360_internal.h) are the only place that knows it. The physical heap is indexed by
  * physical address and the runtime itself reads physical memory through the 0xA0000000 view. Virtual ranges are
@@ -38,6 +39,7 @@
 #define _GNU_SOURCE
 #endif
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -113,7 +115,19 @@ int x360_mem_init(x360_machine *x, char *why, size_t n)
     x->reservation = b;
     x->reserved = size;
     x->m.mem = b;
+#ifdef __APPLE__
+    {
+        char name[64]; /* unique, gone from the namespace at once: only the descriptor keeps it */
+        snprintf(name, sizeof name, "/x360-physical-%d-%08x", (int)getpid(), (unsigned)arc4random());
+        x->memfd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (x->memfd >= 0) {
+            shm_unlink(name);
+            fcntl(x->memfd, F_SETFD, FD_CLOEXEC);
+        }
+    }
+#else
     x->memfd = memfd_create("x360-physical", MFD_CLOEXEC);
+#endif
     if (x->memfd < 0 || ftruncate(x->memfd, PHYS_SIZE) != 0) {
         snprintf(why, n, "cannot create the physical memory: %s", strerror(errno));
         return -1;

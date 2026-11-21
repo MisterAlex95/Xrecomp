@@ -71,8 +71,8 @@ they are in the session, at nice -8 and put back on the fast cores after a resum
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1`, `XBR_CONSOLE_N64` and `XBR_CONSOLE_GC` are ON by default on Linux,
 macOS and Android, OFF on Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1
-(XBA-168), the N64 (XBA-174) and the GameCube (XBA-259, homebrew DOLs) are. `XBR_CONSOLE_X360` is ON on Linux and
-Android (XBA-280: a title plays with a pack made on a desktop), off on macOS and Windows.
+(XBA-168), the N64 (XBA-174) and the GameCube (XBA-259, homebrew DOLs) are. `XBR_CONSOLE_X360` is ON on Linux,
+macOS and Android (XBA-280: a title plays with a pack made on a desktop), off on Windows.
 
 **GBA core (XBA-152, XBA-153).** Interpreter first (decision of 2026-11-14, XBA-142); the static lifter (below) is an
 acceleration layer. `consoles/gba/runtime/gba_core.h`: an ARM7TDMI interpreter (ARM + Thumb), the memory map, LCD
@@ -1951,9 +1951,9 @@ lines and framebuffer). No BIOS, no game, no decryption: [docs/technical/naomi.m
 **Xbox 360 (XBA-230 spike, XBA-270, epic XBA-229).** An XEX2 title, statically recompiled, runs headless on Linux to
 its `main()` and past it: threads, synchronisation, memory, files on its disc, save data, save states, controllers,
 and its GPU command stream decoded, its shaders translated to GLSL ES and its draws rendered off-screen (first cut).
-`XBR_CONSOLE_X360` is ON on Linux and Android (XBA-280), off on macOS and Windows (`memfd_create` for the physical
-memory views). The player, the eDRAM model, XMA and the app came with XBA-280 (« Xbox 360 player and app »
-below). Tested on titles of our own (assembly and
+`XBR_CONSOLE_X360` is ON on Linux, macOS and Android (XBA-280), off on Windows (the physical memory views:
+`memfd_create`, `shm_open` on macOS). The player, the eDRAM model, XMA and the app came with XBA-280 (« Xbox 360
+player and app » below). Tested on titles of our own (assembly and
 devkitPPC C), never on title data; Alex's own dumps go through `python3 -m x360_tools.bringup` (XBA-270's check list).
 What is there:
 

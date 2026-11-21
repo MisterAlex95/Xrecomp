@@ -8,8 +8,10 @@
  * Registers titles poll get plausible values written into the page (the vertical counter moves with time).
  * Vertical blank: every 1/60 s of virtual time, when the title registered a graphics interrupt callback, the
  * callback runs on a short-lived guest thread (r3 = 0: vblank, r4 = its user data), as an interrupt would;
- * PM4_INTERRUPT packets do the same with r3 = 1. VdSwap puts the front buffer's fetch constant and the swap token in
- * the ring; the front buffer of each swap is recorded (and traced). */
+ * PM4_INTERRUPT packets do the same with r3 = 1, once for each CPU the packet's mask names, as that CPU: the PCR's
+ * (and the KTHREAD's) processor byte says it, since Direct3D's handler clears the bit of the CPU it runs on
+ * (lbz 0x10C(r13)) from the word the ring then waits on. The vertical blank runs as CPU 2. VdSwap puts the front
+ * buffer's fetch constant and the swap token in the ring; the front buffer of each swap is recorded (and traced). */
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,6 +31,7 @@ struct x360_gpu {
     uint64_t next_vblank;
     uint32_t vblanks, last_wptr;
     int irq_pending[2]; /* source 0 (vblank), 1 (command processor) queued while one runs */
+    uint32_t irq_cpus;  /* the CPUs whose source 1 callback is still to run (PM4_INTERRUPT's mask) */
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
@@ -225,9 +228,11 @@ static void phys_write(void *ctx, uint32_t phys, uint32_t v)
 static void cp_interrupt(void *ctx, uint32_t source, uint32_t cpu)
 {
     x360_machine *x = ctx;
-    (void)cpu;
-    if (x->gpu)
+    if (x->gpu) {
         x->gpu->irq_pending[source & 1] = 1;
+        if (source & 1)
+            x->gpu->irq_cpus |= 1u << (cpu % 6);
+    }
 }
 
 static struct x360_gpu *gpu_of(x360_machine *x)
@@ -279,15 +284,27 @@ static void raise_irq(x360_machine *x, struct x360_gpu *g, uint32_t source)
         g->irq_pending[source & 1] = 1;
         return;
     }
-    if (t) {
-        x360_thread_restart(x, t, g->irq_callback, source, g->irq_user);
-        return;
+    /* the CPU it runs as: the lowest one pending for the command processor (the others when this one's handler
+     * ended: one callback per CPU), 2 for the vertical blank (and for a state from before the mask) */
+    uint32_t cpu = 2;
+    if ((source & 1) && g->irq_cpus) {
+        cpu = (uint32_t)__builtin_ctz(g->irq_cpus);
+        g->irq_cpus &= g->irq_cpus - 1;
+        if (g->irq_cpus)
+            g->irq_pending[1] = 1;
     }
-    t = x360_thread_create(x, 0x4000, g->irq_callback, source, g->irq_user, 0);
     if (t) {
+        if (x360_thread_restart(x, t, g->irq_callback, source, g->irq_user))
+            return;
+    } else {
+        t = x360_thread_create(x, 0x4000, g->irq_callback, source, g->irq_user, 0);
+        if (!t)
+            return;
         t->interrupt = 1;
         g->irq_thread = (int)(t - x->threads);
     }
+    x360_w8(x, t->kthread + 0xBF, (uint8_t)cpu);
+    x360_w8(x, t->pcr + 0x10C, (uint8_t)cpu);
 }
 
 void x360_gpu_poll(x360_machine *x)
@@ -323,7 +340,7 @@ void x360_gpu_poll(x360_machine *x)
 
 /* save states (x360_state.c): the command processor and the interrupt state, field by field */
 void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
-                    void (*i32)(void *, int *))
+                    void (*i32)(void *, int *), uint32_t version, int load)
 {
     struct x360_gpu *g = gpu_of(x);
     xenos_cp *cp = &g->cp;
@@ -374,6 +391,11 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
     i32(s, &g->irq_thread);
     if (g->irq_thread >= X360_MAX_THREADS) /* a damaged state: made again at the next interrupt */
         g->irq_thread = -1;
+    if (version >= 2) { /* version 2: the CPUs still to interrupt */
+        u32(s, &g->irq_cpus);
+        g->irq_cpus &= 0x3F;
+    } else if (load)
+        g->irq_cpus = 0;
 }
 
 uint64_t x360_gpu_next_event(x360_machine *x)
