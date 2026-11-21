@@ -48,12 +48,10 @@ void x360_fail(x360_machine *x, const char *fmt, ...)
 
 static uint64_t host_now_100ns(void);
 
-uint64_t x360_now(x360_machine *x)
+/* x360_now's host-threads half (the cooperative half is inline, x360_internal.h) */
+uint64_t x360_now_host(x360_machine *x)
 {
-    if (x->host) /* XBA-283: threads run in parallel, the sum of their instructions is no clock */
-        return host_now_100ns() - x->host_t0 + x->time_skip;
-    /* interpreted instructions are in rc_native too (RC_BLOCK counts an RC_INTERP one, x360_interp_run the rest) */
-    return x->m.rc_native / 320 + x->st.hle_calls * 2 + x->time_skip;
+    return host_now_100ns() - x->host_t0 + x->time_skip;
 }
 
 static void sync_tb(x360_machine *x)
@@ -271,7 +269,7 @@ void x360_wait_alertable(x360_machine *x, x360_thread *t, int kind, const uint32
     t->wait_alertable = alertable != 0;
 }
 
-static int obj_ready(x360_machine *x, x360_thread *t, uint32_t o)
+static inline __attribute__((always_inline)) int obj_ready(x360_machine *x, x360_thread *t, uint32_t o)
 {
     uint8_t type = x360_r8(x, o);
     int32_t state = (int32_t)x360_r32(x, o + 4);
@@ -300,8 +298,9 @@ static void obj_take(x360_machine *x, x360_thread *t, uint32_t o)
     }
 }
 
-/* 1 when the wait of t is over (r3 then holds the status) */
-int x360_wait_check(x360_machine *x, x360_thread *t)
+/* 1 when the wait of t is over (r3 then holds the status). Inline in the scheduler's sweep (every waiting thread,
+ * every turn); x360_wait_check for the others. */
+static inline __attribute__((always_inline)) int wait_check(x360_machine *x, x360_thread *t, uint64_t now)
 {
     uint32_t status = 0xFFFFFFFFu;
     if (t->wait_kind == WAIT_CRITSEC) {
@@ -332,12 +331,14 @@ int x360_wait_check(x360_machine *x, x360_thread *t)
     } else if (t->wait_kind == WAIT_QUEUE) {
         x360_queue_wait_check(x, t, &status);
     }
-    if (status == 0xFFFFFFFFu) { /* nothing satisfied it: an alert or an APC may end the wait, or break into it */
+    /* nothing satisfied it: an alert or an APC may end the wait, or break into it. x360_apc_wait_check does nothing
+     * while an APC runs, or without an alert to take and with no APC queued: not called then (most waits, most turns) */
+    if (status == 0xFFFFFFFFu && !t->apc_stage && ((t->wait_alertable && t->alerted) || t->apc_head)) {
         x360_apc_wait_check(x, t, &status);
         if (t->state != TH_WAIT)
             return 0;
     }
-    if (status == 0xFFFFFFFFu && t->wait_timed && x360_now(x) >= t->wait_deadline)
+    if (status == 0xFFFFFFFFu && t->wait_timed && now >= t->wait_deadline)
         status = t->wait_kind == WAIT_DELAY ? X_STATUS_SUCCESS : X_STATUS_TIMEOUT;
     if (status == 0xFFFFFFFFu)
         return 0;
@@ -347,6 +348,12 @@ int x360_wait_check(x360_machine *x, x360_thread *t)
     x360_queue_unparked(x, t);
     x360_apc_wait_done(x, t, status);
     return 1;
+}
+
+int x360_wait_check(x360_machine *x, x360_thread *t)
+{
+    /* the clock only for a timed wait (with host threads, a clock_gettime); nothing in a wait check moves it */
+    return wait_check(x, t, t->wait_timed ? x360_now(x) : 0);
 }
 
 /* the earliest deadline among waiting threads and armed timers, 0 when none */
@@ -639,12 +646,17 @@ int x360_run(x360_machine *x, uint64_t insns)
             x->status = X360_FRAME;
             break;
         }
-        x360_timers_fire(x);
-        x360_kdpc_poll(x);
+        /* the polls with nothing to do are not called (every turn): no timer due before timer_lb (WP-32), no DPC
+         * queued, no pad script event left */
+        if (!x->timer_lb || x360_now(x) >= x->timer_lb)
+            x360_timers_fire(x);
+        if (x->kobj.dpc_head)
+            x360_kdpc_poll(x);
         x360_gpu_poll(x);
         x360_audio_poll(x);
         x360_xma_poll(x);
-        x360_input_poll(x);
+        if (x->pad_script_at < x->pad_script_n)
+            x360_input_poll(x);
         uint64_t bnow = x->timestamp_bundle ? x360_now(x) : 0;
         if (x->timestamp_bundle && x->bundle_written != bnow + 1) {
             /* KeTimeStampBundle: interrupt time, system time, tick count (ms); WP-32: when the time moved */
@@ -654,11 +666,16 @@ int x360_run(x360_machine *x, uint64_t insns)
             x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(bnow / 10000));
         }
         int picked = x360_kdpc_ready(x); /* a DPC runs ahead of every thread */
-        for (int n = 1; picked < 0 && n <= x->nthreads; n++) {
-            int k = (x->cur + n + x->nthreads) % x->nthreads;
+        /* round robin from the thread after cur: k = (cur + n) mod nthreads, stepped without a division (nthreads
+         * only grows at a thread's creation, which no wait check does) */
+        const int nt = x->nthreads;
+        const uint64_t sweep_now = x360_now(x); /* the same for every wait check of the sweep: none moves the clock */
+        int k = nt > 0 ? (x->cur + nt) % nt : 0;
+        for (int n = 1; picked < 0 && n <= nt; n++) {
+            k = k + 1 == nt ? 0 : k + 1;
             x360_thread *t = &x->threads[k];
             if (t->state == TH_WAIT)
-                x360_wait_check(x, t);
+                wait_check(x, t, sweep_now);
             if (t->state == TH_READY) {
                 picked = k;
                 break;
