@@ -122,7 +122,7 @@ public class CrashReportTest {
     }
 
     /** Header line, item header, payload, as many bytes as the item says: what the server reads. */
-    private static List<Object[]> items(byte[] env) throws Exception {
+    static List<Object[]> items(byte[] env) throws Exception {
         List<Object[]> out = new ArrayList<>();
         int p = indexOf(env, 0);
         JSONObject head = new JSONObject(new String(env, 0, p, StandardCharsets.UTF_8));
