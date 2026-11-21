@@ -1174,7 +1174,8 @@ next event with their exact cycles once the bound fails (the most a fetch can co
 interpreter (bench: 247556 -> 141524 handed instructions over 30 frames). Details: [gba/tools/README.md « Runs of
 opcode fetches »](gba/tools/README.md). The GBA bench goes from 9.06M to 7.36M x86-64 instructions per frame (-19 %;
 the prefetch functions 2.58M -> 2.20M, the interpreter for handed instructions 1.63M -> 0.93M), with the same hashes
-over 600 frames, lockstep with the interpreter and `GBA_RC_VERIFY`. The NDS lifter keeps it off (byte-identical
+over 600 frames, lockstep with the interpreter and `GBA_RC_VERIFY`; `gba_rc_fuzz_prefetch` fuzzes the lifter with the
+buffer on and random ROM wait states. The NDS lifter keeps it off (byte-identical
 output). Every pack of every console is stale (the toolkit digest); `GBA_RECOMP_ABI` and the save state format are
 unchanged.
 
