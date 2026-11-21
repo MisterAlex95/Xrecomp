@@ -10,11 +10,12 @@
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --render: draw with the GLES 3.0 renderer, shaders from SHADER_CACHE (bringup's WORKDIR/shaders),
  * the first --frame-limit N (default 30) swaps written to --frames DIR as PPM, a WxH target (default 1280x720); the
- * log's "render: perf" line gives the GPU's time per swap of the run (x360_render_perf_format). On the Mac,
+ * log's "render: perf" line gives the GPU's time per swap of the run (x360_render_perf_format); X360_READBACK=0 reads
+ * no frame back at the swaps, as a window does (timings, no frames written). On the Mac,
  * X360_ANGLE_DIR=DIR takes ANGLE's libEGL / libGLESv2 from DIR (the Android emulator's lib64/gles_angle).
  * --audio FILE.wav: the audio the title submits (render driver frames, 6 channels, 48 kHz, float; XMA voices
  * silent). --save-state: write a save state when
- * the run stops (budget or end); --load-state: start from one. --pad-script FILE: timed controller states (see
+ * the run stops (budget or end; lazy resolves written to memory first, X360_SAVE_FLUSH=0: not); --load-state: start from one. --pad-script FILE: timed controller states (see
  * load_pad_script). --seconds N: stop after N seconds of the title's virtual time (default 3600; 0: no limit).
  * --strict-imports: stop at the first import without an HLE (by name). Runs until the title ends or N instructions
  * (default 2 billion). --missed: addresses reached without lifted code,
@@ -201,6 +202,8 @@ int main(int argc, char **argv)
         x360_set_audio_out(x, audio_f);
     if (render && x360_set_renderer(x, render, frames, frame_limit, rw, rh, why, sizeof why))
         fprintf(log, "x360_run: no renderer (%s): running without drawing\n", why);
+    else if (render && getenv("X360_READBACK") && !strcmp(getenv("X360_READBACK"), "0"))
+        x360_render_set_readback(x, 0); /* as on a window: no frame read back at each swap (timings; no frames) */
     void *lib = dlopen(pack, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
         fprintf(stderr, "x360_run: %s\n", dlerror());
@@ -236,6 +239,11 @@ int main(int argc, char **argv)
     int st = x360_run(x, insns);
     x360_render_perf_get(x, &perf1);
     if (save_state && (st == X360_BUDGET || st == X360_EXITED)) {
+        /* lazy resolves (RECOMP_X360_RESOLVE=lazy) into memory first; X360_SAVE_FLUSH=0 leaves them out, as a save
+         * taken off the renderer's thread does (checks of how such a state loads) */
+        const char *sf = getenv("X360_SAVE_FLUSH");
+        if (!(sf && !strcmp(sf, "0")))
+            x360_render_flush(x);
         size_t cap = x360_state_size(x);
         uint8_t *blob = malloc(cap);
         size_t n = blob ? x360_state_save(x, NULL, blob, cap) : 0;

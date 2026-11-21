@@ -204,6 +204,10 @@ void x360_render_stats(x360_machine *x, FILE *out)
             (unsigned long long)s.computed_fetches, (unsigned long long)s.memexport_draws,
             (unsigned long long)s.memexport_dwords, (unsigned long long)s.memexport_dropped,
             (unsigned long long)s.memexport_skipped);
+    if (xenos_gl_lazy_resolves(x->gpu->gl))
+        fprintf(out, "render: lazy resolves: %llu deferred, %llu written later, %llu dropped (the CPU wrote first)\n",
+                (unsigned long long)s.resolves_deferred, (unsigned long long)s.resolve_flushes,
+                (unsigned long long)s.resolves_dropped);
     fprintf(out, "render: eDRAM overlaps: %llu carried over, %llu not; multisampled targets: %llu\n",
             (unsigned long long)s.edram_reinterpreted, (unsigned long long)s.edram_stale,
             (unsigned long long)s.msaa_surfaces);
@@ -224,6 +228,12 @@ void x360_render_reset(x360_machine *x)
 {
     if (x->gpu && x->gpu->gl)
         xenos_gl_reset(x->gpu->gl);
+}
+
+void x360_render_flush(x360_machine *x)
+{
+    if (x->gpu && x->gpu->gl)
+        xenos_gl_flush_resolves(x->gpu->gl, &x->gpu->cp);
 }
 
 void x360_render_set_readback(x360_machine *x, int on)

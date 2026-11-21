@@ -84,6 +84,10 @@ int x360_render_scale(x360_machine *x);
 void x360_render_end_frame(x360_machine *x);
 /* After a state load (x360_state_load calls it): the eDRAM is not in states, surfaces start clear. */
 void x360_render_reset(x360_machine *x);
+/* Lazy resolves (RECOMP_X360_RESOLVE=lazy, xenos_gl_flush_resolves): the resolves not yet written to guest memory
+ * written now. On the thread that runs the renderer (its GL context current), before a save state that must hold
+ * them. Nothing to do otherwise. */
+void x360_render_flush(x360_machine *x);
 /* The renderer's last frame (RGBA, top row first) and its counters, or NULL / zeros when it is off. */
 const uint8_t *x360_render_frame(x360_machine *x, int *width, int *height);
 void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint64_t *front_buffer_frames);

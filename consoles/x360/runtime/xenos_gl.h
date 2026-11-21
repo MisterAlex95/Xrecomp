@@ -76,6 +76,11 @@ typedef struct xenos_gl_stats {
     uint64_t resolve_ns;           /* in resolves, all of it: read back, write, host copy, memory hash, clears */
     uint64_t resolve_read_ns;      /* of which reading the picture back (glReadPixels and its conversion) */
     uint64_t resolve_write_ns;     /* of which encoding it and writing it to guest memory */
+    /* WP-2, lazy resolves (RECOMP_X360_RESOLVE=lazy): resolves kept as a host picture only, and the writes done later
+     * (their time goes in resolve_ns / _read_ns / _write_ns too) */
+    uint64_t resolves_deferred;    /* resolves that left guest memory as it was (pending) */
+    uint64_t resolve_flushes;      /* pending resolves written to guest memory afterwards */
+    uint64_t resolves_dropped;     /* pending resolves dropped unwritten: the CPU wrote that memory first */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
@@ -96,6 +101,15 @@ int xenos_gl_scale(const xenos_gl *g);
 /* after a save state loads: the eDRAM is not in states (as the GameCube's EFB), surfaces start clear and the resolve
  * copies go (frames come from memory again until the title resolves) */
 void xenos_gl_reset(xenos_gl *g);
+/* Lazy resolves (WP-2): with RECOMP_X360_RESOLVE=lazy a resolve whose destination keeps a host picture only draws
+ * into that picture; guest memory gets the pixels when the GPU reads that memory another way (a texture that does not
+ * fit the picture, vertices, indices, the front buffer decoded), before a GPU write over it, when the picture is
+ * evicted or resized, 2 frames after its last resolve, and here. CPU reads in between see the memory as it was: the
+ * reason it is a setting (eager, the default, writes at each resolve). On the renderer's thread (GL), before a save
+ * state is taken, for instance. Nothing to do in eager mode. */
+void xenos_gl_flush_resolves(xenos_gl *g, const xenos_cp *cp);
+/* 1 when resolves are lazy */
+int xenos_gl_lazy_resolves(const xenos_gl *g);
 /* hand an attached context back to its owner's drawing: framebuffer 0, blend / depth / stencil / scissor / cull off */
 void xenos_gl_end_frame(xenos_gl *g);
 void xenos_gl_destroy(xenos_gl *g);
