@@ -223,7 +223,8 @@ typedef unsigned int EGLBoolean, EGLenum;
 #define MAX_ATTRS 16
 #define UBO_BLOCK (4096 + 32 + 128 + 48) /* upload_constants: one stage's uniform block */
 #define MAX_SAMPLERS 16
-#define MAX_TEXTURES 128
+#define MAX_TEXTURES 1024    /* WP-24: draw-heavy titles keep more than 128 fetch constants alive */
+#define TEX_BUCKETS 512      /* texture_of's hash of the fetch constant (a power of two) */
 #define MAX_REASONS 32
 
 typedef struct attr {
@@ -283,7 +284,10 @@ typedef struct texture {
     GLenum copy_ifmt;
     uint32_t gen;     /* the copy's generation it was taken from (rt_copy.gen) */
     uint32_t lo, hi;  /* decoded from memory: the physical bytes its levels lie in (lazy resolves flush over them) */
+    int16_t next1;    /* WP-24: 1 + the next entry in its key's bucket (0: none); linked while tex != 0 */
 } texture;
+
+static void tex_unlink(xenos_gl *g, texture *t); /* WP-24 */
 
 /* ---- the eDRAM model ----
  * The 10 MB of eDRAM hold the render targets at tile bases (80 x 16 samples of 32 bits per tile) that RB_COLOR_INFO,
@@ -459,6 +463,7 @@ struct xenos_gl {
     int nmissing;
     xenos_gl_stats st;
     texture textures[MAX_TEXTURES];
+    int16_t tex_bucket[TEX_BUCKETS]; /* WP-24: 1 + the first entry of each bucket (0: none) */
     unsigned tex_clock;
     vb_cached vbc[MAX_VB_CACHE]; /* computed-index vertex buffers already converted */
     unsigned vbc_clock, vbc_draw; /* LRU clock; its value when the current draw started binding them */
@@ -1119,8 +1124,10 @@ static void do_reset(xenos_gl *g)
     g->npending = 0;
     g->frame_copy = 0; /* (frame_tex keeps what it had: the window shows black until the next swap otherwise) */
     for (int i = 0; i < MAX_TEXTURES; i++) {
-        if (g->textures[i].direct) /* the copy's texture, deleted above */
+        if (g->textures[i].direct) { /* the copy's texture, deleted above */
+            tex_unlink(g, &g->textures[i]);
             g->textures[i].tex = 0, g->textures[i].direct = 0;
+        }
         g->textures[i].copy = 0, g->textures[i].hash = 0, g->textures[i].checked = 0, g->textures[i].gen = 0;
     }
     for (int i = 0; i < 4; i++)
@@ -3157,8 +3164,10 @@ static void copy_tex_gone(xenos_gl *g, const rt_copy *rc)
     int idx = 1 + (int)(rc - g->copies);
     for (int i = 0; i < MAX_TEXTURES; i++) {
         texture *t = &g->textures[i];
-        if (t->direct && t->copy == idx)
+        if (t->direct && t->copy == idx) {
+            tex_unlink(g, t);
             memset(t, 0, sizeof *t);
+        }
     }
 }
 
@@ -3240,28 +3249,83 @@ static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w,
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
 }
 
+/* WP-24: texture entries by their key (the fetch constant's six words) */
+static unsigned tex_bucket_of(const uint32_t *key)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 6; i++)
+        h = (h ^ key[i]) * 16777619u;
+    return (h ^ h >> 15) & (TEX_BUCKETS - 1);
+}
+
+static void tex_unlink(xenos_gl *g, texture *t)
+{
+    int idx = (int)(t - g->textures);
+    int16_t *link = &g->tex_bucket[tex_bucket_of(t->key)];
+    for (; *link; link = &g->textures[*link - 1].next1)
+        if (*link - 1 == idx) {
+            *link = t->next1;
+            break;
+        }
+    t->next1 = 0;
+}
+
+static void tex_link(xenos_gl *g, texture *t)
+{
+    int16_t *head = &g->tex_bucket[tex_bucket_of(t->key)];
+    t->next1 = *head;
+    *head = (int16_t)(1 + (t - g->textures));
+}
+
+/* an entry for key fc: the least recently used (or a free one) taken, moved to fc's bucket */
+static texture *tex_take(xenos_gl *g, const uint32_t *fc)
+{
+    texture *victim = &g->textures[0];
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+        texture *c = &g->textures[i];
+        if (!c->tex) {
+            victim = c;
+            break;
+        }
+        if (c->used < victim->used)
+            victim = c;
+    }
+    if (victim->tex)
+        tex_unlink(g, victim);
+    memcpy(victim->key, fc, sizeof victim->key);
+    tex_link(g, victim);
+    return victim;
+}
+
 /* the texture behind fetch constant k as a GL texture of the dimension the shader samples (1: 2D, 2: 3D, 3: cube).
  * A 2D texture a resolve wrote (memory unchanged since) is the resolve's host picture at the internal resolution;
  * any other cached texture is checked against its memory once per frame (and after each resolve, which may have
  * written it), decoded again when that changed. 0 if unsupported. */
-static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, uint32_t want_dim, int no_direct)
+static GLuint texture_of_entry(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, uint32_t want_dim, int no_direct,
+                               texture **entry);
+/* WP-24: and its entry in *entry (NULL with 0) */
+static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, uint32_t want_dim, int no_direct,
+                         texture **entry)
+{
+    *entry = NULL;
+    return texture_of_entry(g, cp, fc, want_dim, no_direct, entry);
+}
+
+static GLuint texture_of_entry(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, uint32_t want_dim, int no_direct,
+                               texture **entry)
 {
     uint32_t dim = (fc[5] >> 9) & 3, gl_dim = dim == 0 ? 1 : dim;
     if ((fc[0] & 3) != 2 || gl_dim != want_dim || !tex_format(fc[1] & 63))
         return 0;
-    texture *t = NULL, *victim = &g->textures[0];
-    for (int i = 0; i < MAX_TEXTURES; i++) {
-        texture *c = &g->textures[i];
-        if (c->tex && !memcmp(c->key, fc, sizeof c->key)) {
-            t = c;
+    texture *t = NULL;
+    for (int16_t e = g->tex_bucket[tex_bucket_of(fc)]; e; e = g->textures[e - 1].next1)
+        if (!memcmp(g->textures[e - 1].key, fc, sizeof t->key)) {
+            t = &g->textures[e - 1];
             break;
         }
-        if (!c->tex || (victim->tex && c->used < victim->used))
-            victim = c;
-    }
     if (t && t->checked == g->epoch) { /* already checked this frame, no resolve since */
         t->used = (int)++g->tex_clock;
-        return t->tex;
+        return *entry = t, t->tex;
     }
     /* a resolve's picture */
     rt_copy *rc = dim == 1 ? copy_at(g, cp, fc[1]) : NULL;
@@ -3274,10 +3338,8 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
             /* WP-18: the picture's own size: its texture sampled in place, no copy (it changes with the copy, as the
              * memory would: a resolve moves the copy's generation and its texture keeps its name; one deleted or
              * replaced takes these entries with it, copy_tex_gone) */
-            if (!t) {
-                t = victim;
-                memcpy(t->key, fc, sizeof t->key);
-            }
+            if (!t)
+                t = tex_take(g, fc);
             if (t->tex && !t->direct)
                 g->glDeleteTextures(1, &t->tex);
             if (!(t->direct && t->copy == idx && t->gen == rc->gen))
@@ -3292,19 +3354,17 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
             t->gen = rc->gen;
             t->checked = g->epoch;
             t->used = (int)++g->tex_clock;
-            return t->tex;
+            return *entry = t, t->tex;
         }
         if ((int)w <= rc->w && (int)h <= rc->th) {
             if (t && !t->direct && t->copy == idx && t->gen == rc->gen) {
                 t->swap_rb = rc->swap_rb;
                 t->checked = g->epoch;
                 t->used = (int)++g->tex_clock;
-                return t->tex;
+                return *entry = t, t->tex;
             }
-            if (!t) {
-                t = victim;
-                memcpy(t->key, fc, sizeof t->key);
-            }
+            if (!t)
+                t = tex_take(g, fc);
             if (t->direct) /* not ours to keep or delete */
                 t->tex = 0, t->direct = 0;
             /* another copy's picture in a texture of this size and format: the blit below overwrites all of it, the
@@ -3334,7 +3394,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
             t->used = (int)++g->tex_clock;
             g->st.copy_textures++;
             g->st.copy_blits++;
-            return t->tex;
+            return *entry = t, t->tex;
         }
     }
     decoded d;
@@ -3352,15 +3412,13 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
         if (d.hash == t->hash) {
             t->checked = g->epoch;
             t->used = (int)++g->tex_clock;
-            return t->tex;
+            return *entry = t, t->tex;
         }
     }
     if (!decode_texture(cp, fc, 0, &d))
         return 0;
-    if (!t) {
-        t = victim;
-        memcpy(t->key, fc, sizeof t->key);
-    }
+    if (!t)
+        t = tex_take(g, fc);
     if (t->tex && !t->direct) /* a texture object keeps its first target and sizes: a new one */
         g->glDeleteTextures(1, &t->tex);
     t->direct = 0;
@@ -3399,7 +3457,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     if (t->levels > 1)
         g->st.mipmapped++;
     free_decoded(&d);
-    return t->tex;
+    return *entry = t, t->tex;
 }
 
 static GLint wrap_mode(uint32_t c)
@@ -3572,9 +3630,11 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
     /* every texture first, then the units: texture_of uploads (and copies resolves) through whatever unit is active,
      * so binding as it goes would leave a sampler's unit on the texture uploaded for the next one */
     GLuint texs[MAX_SAMPLERS];
+    texture *ents[MAX_SAMPLERS];
     for (int i = 0; i < p->nsamplers; i++) {
         uint32_t k = p->sampler_fetch[i];
-        texs[i] = k < 32 ? texture_of(g, cp, &cp->regs[0x4800 + 6 * (k & 31)], p->sampler_dim[i], 0) : 0;
+        ents[i] = NULL;
+        texs[i] = k < 32 ? texture_of(g, cp, &cp->regs[0x4800 + 6 * (k & 31)], p->sampler_dim[i], 0, &ents[i]) : 0;
     }
     /* WP-18: a copy's texture sampled in place carries the sampling state on itself: two units sampling it another
      * way in one draw get a copy of their own for the second; the swap's picture shown from it is taken out first */
@@ -3588,7 +3648,7 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
             const uint32_t *fj = &cp->regs[0x4800 + 6 * (p->sampler_fetch[j] & 31)];
             uint32_t m0 = g->samplers_on ? 0 : 0x7FC00u, m3 = g->samplers_on ? 0x1FFEu : 0x01FFFFFEu;
             if (texs[j] == texs[i] && (((fi[0] ^ fj[0]) & m0) || ((fi[3] ^ fj[3]) & m3) || ((fi[1] ^ fj[1]) & 63))) {
-                texs[i] = texture_of(g, cp, fi, p->sampler_dim[i], 1);
+                texs[i] = texture_of(g, cp, fi, p->sampler_dim[i], 1, &ents[i]);
                 break;
             }
         }
@@ -3604,16 +3664,9 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
             g->st.unsupported_textures++;
             continue;
         }
-        int mipped = 0, copy = 0;
-        uint32_t *cache = NULL;
-        for (int t = 0; t < MAX_TEXTURES; t++)
-            if (g->textures[t].tex == tex) {
-                texture *e = &g->textures[t];
-                mipped = !e->copy && e->levels > 1;
-                copy = e->copy ? (e->swap_rb ? 3 : 1) : 0;
-                cache = e->direct ? &g->copies[e->copy - 1].swz : &e->swz;
-                break;
-            }
+        const texture *e = ents[i]; /* WP-24: texture_of's entry, no search for it */
+        int mipped = !e->copy && e->levels > 1, copy = e->copy ? (e->swap_rb ? 3 : 1) : 0;
+        uint32_t *cache = e->direct ? &g->copies[e->copy - 1].swz : &ents[i]->swz;
         sampler_state(g, i, target, fc, mipped, copy, cache);
     }
     g->glActiveTexture(GL_TEXTURE0);
