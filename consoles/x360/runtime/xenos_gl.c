@@ -378,6 +378,7 @@ struct xenos_gl {
     unsigned copy_clock;
     uint32_t copy_gen;        /* the last rt_copy.gen given */
     int lazy;                 /* WP-2: RECOMP_X360_RESOLVE=lazy, resolves write guest memory only when needed */
+    int keep_noop;            /* WP-9: RECOMP_X360_NOOP_DRAWS=keep, draws that cannot write go through all the same */
     int npending;             /* copies with pending set */
     int in_resolve;           /* resolve() is timing itself (resolve_ns) */
     unsigned swaps;           /* xenos_gl_swap calls (the age of a pending copy) */
@@ -647,6 +648,8 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     const char *resolve_env = getenv("RECOMP_X360_RESOLVE"); /* eager (default) | lazy (WP-2) */
     g->lazy = resolve_env && !strcmp(resolve_env, "lazy");
     fprintf(stderr, "xenos: resolves %s\n", g->lazy ? "lazy (RECOMP_X360_RESOLVE=lazy)" : "eager");
+    const char *noop_env = getenv("RECOMP_X360_NOOP_DRAWS"); /* skip (default) | keep (WP-9) */
+    g->keep_noop = noop_env && !strcmp(noop_env, "keep");
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -4604,6 +4607,26 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
     g->epoch++; /* memory changed under the cached textures: compare them again */
 }
 
+/* WP-9: a draw that cannot change the eDRAM or memory: eDRAM mode colour + depth, RB_COLOR_MASK's nibble 0 for every
+ * colour target the pixel shader writes (and target 0, always bound), RB_DEPTHCONTROL with stencil off and not both z
+ * enable and z write, no memory export. Direct3D issues such dummy draws by the hundred per frame (Adventure Time: 1
+ * point, runs of 24, ~795 of ~868 draws). Nothing else the GPU does here depends on a draw: occlusion and visibility
+ * queries report fixed results (xenos_cp.c), screen extents are faked. Skipped, the draw does not bind its targets,
+ * which would mark them written and make overlapping surfaces stale (rows cleared) for nothing, and it does not fetch
+ * indices or vertices (pending lazy resolves under them are written when something else reads that memory).
+ * RECOMP_X360_NOOP_DRAWS=keep runs them as before. */
+static int cannot_write(const xenos_cp *cp, unsigned outputs, int exports)
+{
+    if ((cp->regs[0x2208] & 7) != 4 || exports)
+        return 0;
+    uint32_t cm = cp->regs[0x2104], dc = cp->regs[0x2200];
+    unsigned targets = (outputs | 1u) & 15u;
+    for (int i = 0; i < 4; i++)
+        if ((targets >> i) & 1 && (cm >> (4 * i)) & 15)
+            return 0;
+    return !(dc & 1) && (dc & 6) != 6;
+}
+
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 {
     g->st.draw_calls++;
@@ -4635,6 +4658,10 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     program *rp = d->prim_type == 8 ? get_program(g, cp, 2) : NULL;
     if (!p || (d->prim_type == 8 && !rp)) {
         g->st.no_shader++;
+        return;
+    }
+    if (!g->keep_noop && cannot_write(cp, (rp ? rp : p)->outputs, p->memexport || (rp && rp->memexport))) {
+        g->st.noop_draws++;
         return;
     }
     /* indices: from the DMA buffer or the packet (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */

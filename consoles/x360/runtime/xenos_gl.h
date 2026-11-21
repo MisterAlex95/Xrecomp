@@ -81,6 +81,7 @@ typedef struct xenos_gl_stats {
     uint64_t resolves_deferred;    /* resolves that left guest memory as it was (pending) */
     uint64_t resolve_flushes;      /* pending resolves written to guest memory afterwards */
     uint64_t resolves_dropped;     /* pending resolves dropped unwritten: the CPU wrote that memory first */
+    uint64_t noop_draws;           /* WP-9: draws skipped because they cannot write (RECOMP_X360_NOOP_DRAWS=keep: 0) */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
