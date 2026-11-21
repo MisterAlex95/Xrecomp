@@ -1334,6 +1334,21 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   A part's cost does not grow with the title. The lift's peak was 3.9 GB at 24 MB of code; XBA-293 brought it to 0.24 GB (0.14 GB at 12 MB) with the same C: decoded
   instructions are no longer kept per guest word (`consoles/x360/tools/x360_tools/discover360.py`).
 
+- **Direct calls (WP-16).** `x360_tools.recomp` lifts a `bl` to a function of the pack as a C call of that function
+  (`RC_CALL` in `consoles/x360/runtime/xenon_rt.h`) rather than a return to the runtime's dispatcher, where the resume
+  table sends the return point back to the caller; when the callee comes back there (and the slice and the budget
+  have not run out) the caller goes on, anything else (a preemption, the interpreter, an HLE call, an exception)
+  unwinds to the dispatcher, which resumes as before. 64 calls deep at most (`XE_CALL_DEPTH`), then the dispatcher.
+  A `bctrl` (virtual call, callback) does the same with the function the runtime's table gives its target
+  (`RC_CALL_IND`); import thunks and `bcl` stay on the dispatcher. Guest state, instruction counts and slices are the same
+  either way (Adventure Time: the same frames and save state both ways); its main thread goes through the dispatcher
+  24 times less often (190,000 to 7,800 times a frame), about 8 % less host CPU on a Mac. The lift needs one more pass
+  over the leaders (no measurable time, +50 MB peak) and the library is 7 % larger.
+  The pack says so (`xe_rc_features` bit 2) and names its CRC `xe_rc_image_crc2`, so an app made before refuses it
+  ("not an x360_tools.recomp pack") instead of running it; this runtime still runs packs made before. The toolkit
+  digest changes with it: the launcher offers « Prepare again » for every x360 pack, which is all a player has to do
+  to get them. `X360_DIRECT_CALLS=0` in the environment of a Prepare (or `--no-direct-calls`) lifts as before.
+
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
 `X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round
 loop on the test titles) and `x360_missed`.

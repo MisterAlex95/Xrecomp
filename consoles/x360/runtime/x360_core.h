@@ -27,7 +27,8 @@ typedef struct x360_pack {
     const uint32_t *helpers; /* XBA-283: the register save / restore helpers' entries (xe_rc_helpers), sorted, or NULL:
                               * interpreted code calls them, they are not functions to lift */
     unsigned nhelpers;
-    unsigned features;       /* xe_rc_features (XBA-283; bit 0: lwarx / stwcx. atomic), 0 for older packs */
+    unsigned features;       /* xe_rc_features (XBA-283; bit 0: lwarx / stwcx. atomic; xenon_rt.h XE_RC_FEAT_*), 0 for older
+                              * packs; x360_bind refuses bits outside XE_RC_FEATS_KNOWN */
     const void *parts;       /* XBA-284: const xe_rc_part[] (xe_rc_resume_parts) in place of resume, or NULL */
     unsigned nparts;
 } x360_pack;

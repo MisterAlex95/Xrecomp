@@ -655,6 +655,78 @@ def test_helper_words_match_xenonrecomp():
         assert got == hexa, (name, got, hexa)
 
 
+def test_direct_calls(tmp_path):
+    """WP-16: a `bl` to a function of the pack calls it from C (RC_CALL) where the resume table maps the return point
+    to the caller; the rest of the C is what the pack without direct calls has, and the table says so (feature bit,
+    xe_rc_image_crc2 for runtimes made before)."""
+    import re
+    img, funcs, _ = build()
+    on, off = tmp_path / "on", tmp_path / "off"
+    s_on = recompile(img, str(on), direct_calls=True)
+    s_off = recompile(img, str(off), direct_calls=False)
+    assert s_on["direct_calls"] == 4 and s_off["direct_calls"] == 0
+    text_on = "".join(p.read_text() for p in sorted(on.glob("x360_rc_[0-9]*.c")))
+    text_off = "".join(p.read_text() for p in sorted(off.glob("x360_rc_[0-9]*.c")))
+    calls = re.findall(r"c->lr = (0x[0-9A-F]{8}u); RC_CALL\((xe_fn_([0-9A-F]{8})), (0x[0-9A-F]{8}u), (0x[0-9A-F]{8}u), "
+                       r"L_([0-9A-F]{8})\);", text_on)
+    assert len(calls) == 4 and "RC_CALL" not in text_off
+    entries = {lo for lo, _ in funcs.values()}
+    for lr, name, t, t_hex, ret, label in calls:
+        assert lr == ret and int(t, 16) == int(t_hex[:-1], 16) and int(t, 16) in entries
+        assert int(label, 16) == int(ret[:-1], 16) and "L_%s:" % label in text_on
+        assert "XE_RC_LOCAL void %s(xe_machine *m_);" % name in text_on
+    # without the call macro, the entry compare and the declarations, the two lifts are the same text
+    norm = re.sub(r"RC_CALL\(xe_fn_[0-9A-F]{8}, (0x[0-9A-F]{8}u), 0x[0-9A-F]{8}u, L_[0-9A-F]{8}\)", r"RC_EXIT(\1)",
+                  text_on)
+    norm = re.sub(r"RC_CALL_IND\(t_, 0x[0-9A-F]{8}u, L_[0-9A-F]{8}\)", "RC_EXIT(t_)", norm)
+    norm = re.sub(r"    if \(c->pc == 0x[0-9A-F]{8}u\) goto L_[0-9A-F]{8};\n", "", norm)
+    norm = re.sub(r"XE_RC_LOCAL void xe_fn_[0-9A-F]{8}\(xe_machine \*m_\);\n(\n)?", "", norm)
+    assert norm == text_off
+    assert text_on.count("goto L_") > text_off.count("goto L_")
+    table_on, table_off = (on / "x360_rc_table.c").read_text(), (off / "x360_rc_table.c").read_text()
+    assert "XE_RC_FEAT_DIRECT_CALLS" in table_on and "xe_rc_image_crc2 = " in table_on
+    assert "XE_RC_FEAT_DIRECT_CALLS" not in table_off and "xe_rc_image_crc = " in table_off
+    assert table_on.replace(" | XE_RC_FEAT_DIRECT_CALLS", "").replace("crc2", "crc") == table_off
+
+
+def test_direct_call_shapes():
+    """WP-16: bl to a function and bctrl are called from C; `bl $+4` (the PC idiom), a return point the resume table
+    gives another function, and no direct calls at all leave every call to the dispatcher."""
+    from tools.ppc import asm as P
+    from tools.ppc.discover import Discovery
+    from .lift360 import TitleLifter
+
+    base = 0x82001000
+    f2 = base + 0x1C
+    words = [P.mtctr(3), P.bctrl(), P.bl(base + 8, f2), P.bl(base + 0xC, base + 0x10), P.mfspr(3, 8),
+             P.bl(base + 0x14, f2), P.blr(), P.blr()]
+
+    class Img:
+        def in_code(self, a):
+            return base <= a < base + 4 * len(words)
+
+        def u32(self, a):
+            return words[(a - base) // 4]
+
+    disc = Discovery(Img(), XenonDecoder(), [base])
+    funcs = {f.entry: f for f in disc.run()}
+    assert set(funcs) == {base, base + 0x10, f2}  # the `bl $+4` target is a function too
+    assert {base + 0x10, base + 0x18} <= set(funcs[base].addrs)
+    owner = {a: base for a in funcs[base].addrs}
+    owner[base + 0x18] = f2  # the last call's return point belongs to another function
+    lifter = TitleLifter(Img(), disc.insn, funcs[base], "xe_fn_%08X" % base, direct=(set(funcs), owner))
+    text = lifter.function()
+    assert "if (c->pc == 0x82001000u) goto L_82001000;" in text
+    assert "{ uint32_t t_ = c->ctr & ~3u; c->lr = 0x82001008u; RC_CALL_IND(t_, 0x82001008u, L_82001008); }" in text
+    assert "c->lr = 0x8200100Cu; RC_CALL(xe_fn_8200101C, 0x8200101Cu, 0x8200100Cu, L_8200100C);" in text
+    assert "c->lr = 0x82001010u; RC_EXIT(0x82001010u);" in text      # bl $+4
+    assert "c->lr = 0x82001018u; RC_EXIT(0x8200101Cu);" in text      # return point not this function's
+    assert lifter.callees == {f2} and lifter.indirect == 1 and len(lifter.direct_rets) == 2
+    plain = TitleLifter(Img(), disc.insn, funcs[base], "xe_fn_%08X" % base).function()
+    assert "RC_CALL" not in plain and "if (c->pc ==" not in plain, plain
+    assert "c->lr = 0x82001008u; RC_EXIT(t_);" in plain
+
+
 def test_resume_table_in_parts(tmp_path):
     """XBA-284: past resume_split points the table is cut into parts by function address; together they hold the
     same entries as the one array, each address once, every part sorted, and the files link into one library."""

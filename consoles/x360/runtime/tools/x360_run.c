@@ -6,7 +6,8 @@
  *            [--stats] [-v]
  *
  * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
- * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
+ * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc or,
+ * with direct calls, xe_rc_image_crc2).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --render: draw with the GLES 3.0 renderer, shaders from SHADER_CACHE (bringup's WORKDIR/shaders),
  * the first --frame-limit N (default 30) swaps written to --frames DIR as PPM, a WxH target (default 1280x720); the

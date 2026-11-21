@@ -473,8 +473,9 @@ int x360_runtime_run(const x360_runtime_opts *o)
     if (!not_pack)
         stage("bind the pack");
     if (not_pack || x360_bind(x, &pk)) {
-        fprintf(stderr, "x360: the pack %s %s\n", o->pack_lib,
-                !lib ? dlerror() : not_pack ? "is not an x360_tools.recomp pack" : "was made from another image");
+        fprintf(stderr, "x360: the pack %s %s%s\n", o->pack_lib,
+                !lib ? dlerror() : not_pack ? "is not an x360_tools.recomp pack" : "cannot be used: ",
+                lib && !not_pack ? x360_error(x) : "");
         x360_destroy(x);
         if (lib)
             dlclose(lib);

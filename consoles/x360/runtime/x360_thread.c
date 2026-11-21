@@ -427,6 +427,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
     xe_cpu *c = &t->cpu;
     x->m.cur = c;
     x->m.slice = X360_SLICE;
+    x->m.rc_depth = 0; /* WP-16: no direct call on the host stack (RC_CALL) */
     while (t->state == TH_READY && x->status == X360_RUNNING &&
            (x->m.slice >= 0 || (!(c->msr & 0x8000u) && x->m.slice >= -XE_EE_GRACE))) {
         uint32_t pc = c->pc;
@@ -606,6 +607,7 @@ int x360_run(x360_machine *x, uint64_t insns)
         return run_host(x, insns);
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
+    x->m.rc_stop = stop; /* WP-16: run_thread's budget, as direct calls (RC_CALL) see it */
     while (x->status == X360_RUNNING) {
         if (x->m.rc_native >= stop || (x->time_limit && x360_now(x) >= x->time_limit)) {
             x->status = X360_BUDGET;
@@ -741,6 +743,10 @@ static void host_run_thread(x360_machine *x, int k)
     lm.view4k_skew = x->m.view4k_skew;
     lm.rt = x;
     lm.cur = c;
+    lm.rc_stop = UINT64_MAX; /* WP-16: the loop below has no budget of its own, as RC_CALL then sees it */
+    lm.rc_fn_tab = x->m.rc_fn_tab;
+    lm.rc_code_lo = x->m.rc_code_lo, lm.rc_code_span = x->m.rc_code_span;
+    lm.rc_thunk_lo = x->m.rc_thunk_lo, lm.rc_thunk_span = x->m.rc_thunk_span;
     while (t->state == TH_READY && x->status == X360_RUNNING && !h->drain) {
         x->cur = k; /* the HLE, the interpreter and the SEH find the running thread here */
         x->m.cur = c;
@@ -849,6 +855,7 @@ static int run_host(x360_machine *x, uint64_t insns)
     pthread_mutex_lock(&h->mu);
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
+    x->m.rc_stop = stop; /* WP-16: run_thread's budget, as direct calls (RC_CALL) see it */
     while (x->status == X360_RUNNING) {
         if (x->m.rc_native >= stop || (x->time_limit && x360_now(x) >= x->time_limit)) {
             x->status = X360_BUDGET;
@@ -1073,6 +1080,11 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
     x->pack_features = pack->features;
+    if (pack->features & ~XE_RC_FEATS_KNOWN) {
+        x360_fail(x, "the pack needs a newer runtime (features %X, this one knows %X): update the app, or Prepare again",
+                  pack->features, XE_RC_FEATS_KNOWN);
+        return -1;
+    }
     if (total && x->m.view4k_skew && !(pack->features & XE_RC_FEAT_VIEW4K)) {
         x360_fail(x, "the pack was built for hosts of 4 KB pages (this one's are %u bytes): build it again, with "
                      "XE_VIEW4K_DYNAMIC=1", (unsigned)x->host_page);
@@ -1092,6 +1104,10 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     for (unsigned p = 0; p < nparts; p++)
         for (unsigned k = 0; k < parts[p].count; k++)
             x->fn_tab[(parts[p].entries[k].entry - x->code_lo) / 4] = parts[p].entries[k].fn;
+    /* WP-16: what a pack's indirect calls look up (xenon_rt.h RC_CALL_IND), as run_thread does */
+    x->m.rc_fn_tab = x->fn_tab;
+    x->m.rc_code_lo = x->code_lo, x->m.rc_code_span = x->code_hi - x->code_lo;
+    x->m.rc_thunk_lo = x->thunk_lo, x->m.rc_thunk_span = x->thunk_hi - x->thunk_lo;
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
     return 0;
@@ -1102,6 +1118,8 @@ int x360_pack_from_lib(void *lib, x360_pack *pk)
     memset(pk, 0, sizeof *pk);
     const unsigned *count = dlsym(lib, "xe_rc_resume_count");
     const uint32_t *crc = dlsym(lib, "xe_rc_image_crc");
+    if (!crc) /* WP-16: a pack an older runtime must refuse names it so (xenon_rt.h XE_RC_FEAT_DIRECT_CALLS) */
+        crc = dlsym(lib, "xe_rc_image_crc2");
     pk->resume = dlsym(lib, "xe_rc_resume");
     if (!pk->resume) { /* XBA-284: a big pack's table in parts */
         const unsigned *np = dlsym(lib, "xe_rc_resume_part_count");
