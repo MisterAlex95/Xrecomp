@@ -1831,25 +1831,46 @@ static uint32_t gpu_read(const xenos_cp *cp, uint32_t phys, uint32_t endian)
     return gpu_swap(__builtin_bswap32(be), endian);
 }
 
-/* A fast hash of n bytes (4 lanes of 8 bytes: ~10x FNV's byte at a time), for "has this memory changed" checks run
- * on every cached texture after each swap and resolve. Not for anything that needs a good distribution. */
+/* A fast hash of n bytes, for "has this memory changed" checks run on every cached texture after each swap and resolve.
+ * Not for anything that needs a good distribution. WP-36: 8 lanes of 8 bytes, each a chain of xor, multiply and
+ * xorshift, in scalar registers (4 lanes left the multiplies' latency showing, and GCC vectorized them into SSE2
+ * pmuludq triples: 5.3 GB/s; ~20 GB/s now, Warhammer hashes ~155 MB a frame). The values are only ever compared with
+ * values of this same function in the same run. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("no-tree-vectorize")))
+#endif
 static uint64_t span_hash(const uint8_t *p, size_t n, uint64_t seed)
 {
     hashed_bytes += n;
     const uint64_t k = 0x9E3779B97F4A7C15ull;
-    uint64_t h[4] = {seed ^ k, seed + k, seed ^ (k >> 1), seed - k};
+    uint64_t h0 = seed ^ k, h1 = seed + k, h2 = seed ^ (k >> 1), h3 = seed - k;
+    uint64_t h4 = seed ^ (k >> 2), h5 = seed + (k >> 1), h6 = seed ^ (k >> 3), h7 = seed - (k >> 1);
     size_t i = 0;
-    for (; i + 32 <= n; i += 32)
-        for (int l = 0; l < 4; l++) {
-            uint64_t w;
-            memcpy(&w, p + i + 8 * l, 8);
-            h[l] = (h[l] ^ w) * 0xFF51AFD7ED558CCDull;
-            h[l] ^= h[l] >> 29;
-        }
+#define SPAN_LANE(h, o)                                                                                               \
+    do {                                                                                                              \
+        uint64_t w;                                                                                                   \
+        memcpy(&w, p + i + (o), 8);                                                                                   \
+        h = (h ^ w) * 0xFF51AFD7ED558CCDull;                                                                          \
+        h ^= h >> 29;                                                                                                 \
+    } while (0)
+    for (; i + 64 <= n; i += 64) {
+        SPAN_LANE(h0, 0);
+        SPAN_LANE(h1, 8);
+        SPAN_LANE(h2, 16);
+        SPAN_LANE(h3, 24);
+        SPAN_LANE(h4, 32);
+        SPAN_LANE(h5, 40);
+        SPAN_LANE(h6, 48);
+        SPAN_LANE(h7, 56);
+    }
+    for (; i + 8 <= n; i += 8)
+        SPAN_LANE(h0, 0);
+#undef SPAN_LANE
     uint64_t r = (uint64_t)n * k;
     for (; i < n; i++)
         r = (r ^ p[i]) * 0x100000001B3ull;
-    for (int l = 0; l < 4; l++)
+    const uint64_t h[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+    for (int l = 0; l < 8; l++)
         r = (r ^ h[l]) * 0xC4CEB9FE1A85EC53ull, r ^= r >> 31;
     return r;
 }
