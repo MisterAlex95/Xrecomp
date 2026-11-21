@@ -147,32 +147,6 @@ static unsigned s_saved_missed;
 static pthread_t s_machine_thread; /* runs the machine and owns the renderer's GL context */
 static int s_machine_thread_set;
 
-/* Per-title defaults: renderer options a title is known to want, by title ID (the key's X360-XXXXXXXX- prefix). Set
- * unless something already did (the environment, recomp.cfg, the pack's env_force): the player can still say
- * otherwise. */
-static const struct {
-    const char *key_prefix, *name, *value;
-} k_title_env[] = {
-    /* Adventure Time: Explore the Dungeon: every resolve is only sampled back by the GPU (its
-     * host picture) and the CPU never reads them: lazy resolves (WP-2), no read-back each frame */
-    {"X360-44500807-", "RECOMP_X360_RESOLVE", "lazy"},
-    /* and single-sampled targets (WP-11): the same frames as with MSAA in the dungeon scene, without the full-surface
-     * resolve / reload passes each MSAA target costs when a draw or resolve needs its texture (8 a frame there) */
-    {"X360-44500807-", "RECOMP_X360_MSAA", "0"},
-};
-
-static void title_env(const char *key)
-{
-    for (size_t i = 0; i < sizeof k_title_env / sizeof k_title_env[0]; i++)
-        if (!strncmp(key, k_title_env[i].key_prefix, strlen(k_title_env[i].key_prefix))) {
-            const char *had = getenv(k_title_env[i].name);
-            if (!had)
-                setenv(k_title_env[i].name, k_title_env[i].value, 0);
-            printf("x360: title default %s=%s%s\n", k_title_env[i].name, k_title_env[i].value,
-                   had ? " not applied (already set)" : "");
-        }
-}
-
 static int cmp_u32(const void *a, const void *b)
 {
     uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
@@ -502,12 +476,13 @@ int x360_runtime_run(const x360_runtime_opts *o)
     if (!not_pack)
         stage("bind the pack");
     if (not_pack || x360_bind(x, &pk)) {
-        fprintf(stderr, "x360: the pack %s %s\n", o->pack_lib,
-                !lib ? dlerror() : not_pack ? "is not an x360_tools.recomp pack" : "was made from another image");
+        fprintf(stderr, "x360: the pack %s %s%s\n", o->pack_lib,
+                !lib ? dlerror() : not_pack ? "is not an x360_tools.recomp pack" : "cannot be used: ",
+                lib && !not_pack ? x360_error(x) : "");
         x360_destroy(x);
         if (lib)
             dlclose(lib);
-        return -1;
+        return X360_RUN_PACK_REFUSED;
     }
     if (getenv("RECOMP_X360_INTERP") && !strcmp(getenv("RECOMP_X360_INTERP"), "0"))
         x360_set_interp(x, 0); /* XBA-283: stop at the first missed address, as before */
@@ -555,7 +530,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
     console_pad_load(&s_pad_map, CONSOLE_PAD_X360, getenv(console_pad_env(CONSOLE_PAD_X360)));
     int upscale = o->upscale > 0 ? o->upscale : env_int("RECOMP_X360_UPSCALE", env_int("RECOMP_UPSCALE", 1));
     upscale = upscale < 1 ? 1 : upscale > 8 ? 8 : upscale;
-    title_env(key);
+    x360_title_env(key, stdout);
     stage("start the renderer");
     /* the renderer on the window's context (this thread runs the machine), or off-screen with frames read back */
     int render = x360_set_renderer_ex(x, cache, NULL, 0, RENDER_W, RENDER_H, upscale, window, why, sizeof why) == 0;

@@ -103,6 +103,63 @@ def test_seeds_and_compile_flags(tmp_path):
     assert "-O1" in flags and "-DXE_RUNTIME=1" in flags and "-ffp-contract=off" in flags
     assert "-I" + os.path.join(ROOT, "consoles", "x360", "runtime") in flags
     assert "-I" + os.path.join(ROOT, "consoles", "gc", "runtime") in flags
+    page = x360.host_page_size()                     # this machine's: the dynamic view unless its pages are 4 KB
+    assert ("-DXE_VIEW4K_DYNAMIC=0" if page == 4096 else "-DXE_VIEW4K_DYNAMIC=1") in flags
+
+
+@pytest.mark.parametrize("page,static", [(4096, True), (16384, False), (65536, False)])
+def test_view4k_by_page_size(page, static):
+    """WP-33: a pack for a device of 4 KB pages leaves view4k_skew out; 16 KB (the Fold8's Android 15+, the Mac) and
+    64 KB keep it; the flag follows the page size given, the Android sysroot's flags too."""
+    flags = x360.compile_flags("1", ROOT, "/gen", page=page)
+    want, other = ("-DXE_VIEW4K_DYNAMIC=0", "-DXE_VIEW4K_DYNAMIC=1")[::1 if static else -1]
+    assert want in flags and other not in flags
+    assert x360.view4k_static(page) is static
+    meta = {"view4k": "static" if static else "dynamic", "host_page": page}
+    for run_on in (4096, 16384):                     # a static pack refused on a device of larger pages only
+        why = x360.view4k_refusal(meta, run_on)
+        assert (why is not None) == (static and run_on > 4096), (page, run_on, why)
+        if why:
+            assert "Prepare it again" in why and str(run_on) in why
+    assert x360.view4k_refusal({}, 16384) is None    # a pack from before WP-33: left to x360_bind
+
+
+def test_host_page_size(monkeypatch):
+    monkeypatch.delenv("X360_HOST_PAGE", raising=False)
+    real = os.sysconf("SC_PAGE_SIZE")
+    assert x360.host_page_size() == real              # the real one, never a constant
+    monkeypatch.setenv("X360_HOST_PAGE", "0x10000")   # raised as the runtime raises it (x360_mem.c)
+    assert x360.host_page_size() == 0x10000
+    monkeypatch.setenv("X360_HOST_PAGE", "1024")      # never lowered
+    assert x360.host_page_size() == real
+    monkeypatch.setenv("X360_HOST_PAGE", "12288")     # not a power of two: ignored
+    assert x360.host_page_size() == real
+    monkeypatch.setattr(x360.os, "sysconf", lambda name: 4096)
+    monkeypatch.delenv("X360_HOST_PAGE")
+    assert x360.host_page_size() == 4096
+    assert "-DXE_VIEW4K_DYNAMIC=0" in x360.compile_flags("1", ROOT, "/gen")
+    monkeypatch.setattr(x360.os, "sysconf", lambda name: 16384)
+    assert "-DXE_VIEW4K_DYNAMIC=1" in x360.compile_flags("1", ROOT, "/gen")
+
+
+def test_static_pack_refused_on_larger_pages(tmp_path, monkeypatch):
+    """A pack prepared on a device of 4 KB pages, restored on one of 16 KB (a backup): check() says Prepare again, so
+    the next Prepare builds it again instead of « pack up to date »."""
+    monkeypatch.delenv("X360_HOST_PAGE", raising=False)
+    monkeypatch.setattr(x360.os, "sysconf", lambda name: 4096)
+    d = tmp_path / "x360-K"
+    d.mkdir()
+    lib = d / "libtitle.so"
+    lib.write_bytes(b"\x7fELF lifted")
+    (d / "default.xex").write_bytes(b"XEX2")
+    meta = x360.make_meta(str(lib), "K", "t", "s" * 64, "default.xex", "abi", x360.pack.SHELL_ABI, "c", "t" * 64,
+                          "clang -O1", 0)
+    assert meta["view4k"] == "static" and meta["host_page"] == 4096
+    (d / "pack.json").write_text(json.dumps(meta))
+    assert x360.check(str(d), "K", "s" * 64, "abi") is None
+    monkeypatch.setattr(x360.os, "sysconf", lambda name: 16384)
+    why = x360.check(str(d), "K", "s" * 64, "abi")
+    assert why and "4 KB" in why and "16384" in why and "Prepare it again" in why
 
 
 def test_shaders_translated_once(tmp_path):
@@ -143,6 +200,8 @@ def test_desktop_pack(tmp_path):
     assert meta["console"] == "x360" and meta["title_key"] == key and meta["entry"] == "xe_rc_resume"
     assert (final / "default.xex").read_bytes() == (work / "plain.xex").read_bytes()
     assert x360.check(str(final), key, meta["source_sha256"], x360.gba.host_abi()) is None
+    page = x360.host_page_size()
+    assert meta["host_page"] == page and meta["view4k"] == ("static" if page == 4096 else "dynamic")
 
     # A run met code the pack lacks and two shaders: the next Prepare lifts the address and translates the shaders.
     from x360_tools.xenos_asm import alu_words, export, program

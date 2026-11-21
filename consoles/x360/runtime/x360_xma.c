@@ -55,6 +55,7 @@ typedef struct x360_xma {
     uint32_t array;                   /* physical address of the context array (0: not made yet) */
     uint8_t used[XMA_CONTEXTS];
     uint8_t enabled[XMA_CONTEXTS];
+    int live_end;                     /* WP-32: one past the last context in use and enabled (0: none; not state) */
     void *dec[XMA_CONTEXTS];          /* the backend's decoder per context (not state) */
     int16_t *pending[XMA_CONTEXTS];   /* PCM decoded but not yet written to the output ring (not state) */
     uint32_t npending[XMA_CONTEXTS];  /* in samples (all channels) */
@@ -229,6 +230,16 @@ static void decoder_finish(x360_xma *m, int i)
     m->starved[i] = 0;
 }
 
+/* WP-32: live_end again, after a change of used / enabled (rare: the poll walks contexts up to it every turn) */
+static void live_recount(x360_xma *m)
+{
+    int e = 0;
+    for (int i = 0; i < XMA_CONTEXTS; i++)
+        if (m->used[i] && m->enabled[i])
+            e = i + 1;
+    m->live_end = e;
+}
+
 /* decode what context i can: packets of its current input buffer while the output ring has room */
 static void xma_work(x360_machine *x, int i)
 {
@@ -317,9 +328,13 @@ void x360_xma_poll(x360_machine *x)
     if (!m || !m->array)
         return;
     /* the APU registers: kicks enable contexts, clears reset them */
+    int changed = 0;
     for (int r = 0; r < 10; r++) { /* little-endian, as the title's stwbrx wrote them */
         uint32_t kick = __builtin_bswap32(x360_r32(x, APU_MMIO + 4 * (0x650u + (uint32_t)r)));
         uint32_t clear = __builtin_bswap32(x360_r32(x, APU_MMIO + 4 * (0x6A0u + (uint32_t)r)));
+        if (!(kick | clear))
+            continue; /* WP-32: nearly every word of nearly every turn */
+        changed = 1;
         for (int b = 0; b < 32; b++) {
             int i = r * 32 + b;
             if ((kick >> b) & 1)
@@ -334,7 +349,9 @@ void x360_xma_poll(x360_machine *x)
         if (clear)
             x360_w32(x, APU_MMIO + 4 * (0x6A0u + (uint32_t)r), 0);
     }
-    for (int i = 0; i < XMA_CONTEXTS; i++)
+    if (changed)
+        live_recount(m);
+    for (int i = 0; i < m->live_end; i++)
         if (m->used[i] && m->enabled[i])
             xma_work(x, i);
 }
@@ -357,6 +374,7 @@ static void k_XMACreateContext(x360_machine *x, x360_thread *t, xe_cpu *c)
         return;
     }
     m->used[i] = 1, m->enabled[i] = 0;
+    live_recount(m);
     for (int dw = 0; dw < 16; dw++)
         wr(x, i, dw, 0);
     if (A(0))
@@ -370,6 +388,7 @@ static void k_XMAReleaseContext(x360_machine *x, x360_thread *t, xe_cpu *c)
     int i = ctx_index(x, A(0));
     if (i >= 0) {
         x->xma->used[i] = 0, x->xma->enabled[i] = 0;
+        live_recount(x->xma);
         drop_decoder(x->xma, i);
     }
     RET(0);
@@ -419,6 +438,7 @@ static void k_XMAEnableContext(x360_machine *x, x360_thread *t, xe_cpu *c)
     if (i >= 0) {
         x->xma->enabled[i] = 1;
         x->xma->kicks++;
+        live_recount(x->xma);
         xma_work(x, i);
     }
     RET(0);
@@ -428,8 +448,10 @@ static void k_XMADisableContext(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     int i = ctx_index(x, A(0));
-    if (i >= 0)
+    if (i >= 0) {
         x->xma->enabled[i] = 0;
+        live_recount(x->xma);
+    }
     RET(0);
 }
 
@@ -549,6 +571,7 @@ void x360_xma_state(x360_machine *x, uint32_t *array, uint8_t *used, uint8_t *en
         drop_decoder(m, i);
         m->used[i] = used[i] & 1, m->enabled[i] = enabled[i] & 1;
     }
+    live_recount(m);
     m->ring_r = m->ring_w = 0;
     memset(m->acc, 0, sizeof m->acc); /* the frame being mixed starts again empty */
     m->acc_clients = 0;

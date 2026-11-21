@@ -1322,8 +1322,23 @@ interpreter (XBA-283) only runs the code a pack does not hold.
 - **Steps.** 1: the XEX is written plain to `<work>/plain.xex`; the key is `X360-<title id>-<CRC32>` and the identity
   is the plain XEX's SHA-256. 2: `<work>/discovered.txt` (the runtime's misses; since XBA-282 the file only grows) is
   merged with the earlier seeds. 3: `x360_tools.recomp`. 4: the shared compile driver at -O1, `-DXE_RUNTIME=1
-  -ffp-contract=off`. 5: `libtitle.so`, `pack.json` (`console` x360, `entry` xe_rc_resume), `default.xex` and
+  -ffp-contract=off`, `-DXE_VIEW4K_DYNAMIC=0` or `1` (below). 5: `libtitle.so`, `pack.json` (`console` x360, `entry` xe_rc_resume), `default.xex` and
   `shaders/`.
+- **The 4 KB view (WP-33).** The 360 maps a 4 KB-page view of physical memory at `0xE0000000` with a 0x1000 offset.
+  A host whose pages are larger (16 KB: Apple silicon, Android 15+ devices built for 16 KB pages; 64 KB) cannot map it
+  there, so the runtime moves it 0x1000 higher (`view4k_skew`, `x360_mem.c`) and every guest memory access of the
+  lifted code checks for it (`xe_ptr`, `xenon_rt.h`, with `XE_VIEW4K_DYNAMIC=1`). Where the pages are 4 KB nothing
+  moves, so Prepare compiles the pack with `-DXE_VIEW4K_DYNAMIC=0`: one comparison and one addition less per access
+  (about 19 % fewer instructions in Adventure Time's hottest file). The page size is the real one of the machine that
+  runs the Prepare, `os.sysconf("SC_PAGE_SIZE")` (`x360.host_page_size`, raised by `X360_HOST_PAGE` as the runtime's):
+  on Android the Prepare runs on the device that plays the pack, on a desktop on the machine that runs it, so no
+  setting is passed. `pack.json` records it (`"view4k": "static"` or `"dynamic"`, `"host_page"`). A static pack on a
+  device of larger pages (a backup restored on another phone) is refused twice over: `x360.check` returns « prepared
+  for a device with 4 KB memory pages (this one's are N bytes): Prepare it again », so the next Prepare builds it
+  again instead of « pack up to date », and `x360_bind` refuses to load it (« the pack was prepared for a device with
+  4 KB memory pages ... Prepare it again on this device »); the runtime then returns `X360_RUN_PACK_REFUSED` and the
+  shell goes back to the launcher with « this Xbox 360 game's pack was prepared for another device or app version:
+  Prepare it again on its page, then Play ». A device's page size: `adb shell getconf PAGE_SIZE`.
 - **Shaders.** They are known only once a run has met them. The runtime dumps the microcode of every shader it meets
   to `<work>/shaders/*.bin`. Prepare translates the new ones to GLSL ES (xenos_glsl) into `<work>/glsl/` and copies
   them into the pack's `shaders/`. A shader that does not translate stays there as its `.bin` and is not tried again.
@@ -1371,6 +1386,21 @@ interpreter (XBA-283) only runs the code a pack does not hold.
 
   A part's cost does not grow with the title. The lift's peak was 3.9 GB at 24 MB of code; XBA-293 brought it to 0.24 GB (0.14 GB at 12 MB) with the same C: decoded
   instructions are no longer kept per guest word (`consoles/x360/tools/x360_tools/discover360.py`).
+
+- **Direct calls (WP-16).** `x360_tools.recomp` lifts a `bl` to a function of the pack as a C call of that function
+  (`RC_CALL` in `consoles/x360/runtime/xenon_rt.h`) rather than a return to the runtime's dispatcher, where the resume
+  table sends the return point back to the caller; when the callee comes back there (and the slice and the budget
+  have not run out) the caller goes on, anything else (a preemption, the interpreter, an HLE call, an exception)
+  unwinds to the dispatcher, which resumes as before. 64 calls deep at most (`XE_CALL_DEPTH`), then the dispatcher.
+  A `bctrl` (virtual call, callback) does the same with the function the runtime's table gives its target
+  (`RC_CALL_IND`); import thunks and `bcl` stay on the dispatcher. Guest state, instruction counts and slices are the same
+  either way (Adventure Time: the same frames and save state both ways); its main thread goes through the dispatcher
+  24 times less often (190,000 to 7,800 times a frame), about 8 % less host CPU on a Mac. The lift needs one more pass
+  over the leaders (no measurable time, +50 MB peak) and the library is 7 % larger.
+  The pack says so (`xe_rc_features` bit 2) and names its CRC `xe_rc_image_crc2`, so an app made before refuses it
+  ("not an x360_tools.recomp pack") instead of running it; this runtime still runs packs made before. The toolkit
+  digest changes with it: the launcher offers « Prepare again » for every x360 pack, which is all a player has to do
+  to get them. `X360_DIRECT_CALLS=0` in the environment of a Prepare (or `--no-direct-calls`) lifts as before.
 
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
 `X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round

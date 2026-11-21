@@ -15,7 +15,8 @@ The same five steps and progress lines as a GameCube pack (tools/prepare/gc.py, 
   3 lift      `python -m x360_tools.recomp <work>/plain.xex <work>/gen --no-comments --discovered seeds`
               (consoles/x360/tools)
   4 compile   every generated C file with -I consoles/x360/runtime -I consoles/gc/runtime -ffp-contract=off
-              -DXE_RUNTIME=1 (bringup's flags), by the shared compile driver (compile.py)
+              -DXE_RUNTIME=1 (bringup's flags), by the shared compile driver (compile.py); -DXE_VIEW4K_DYNAMIC=0
+              where the pages of the machine that will run the pack are 4 KB, 1 elsewhere (WP-33, view4k below)
   5 pack      libtitle.so, pack.json ("console": "x360"), default.xex (the plain title the runtime loads), cover.png
               (the title image of the XEX's XDBF resource, when it has one: the app's cover art) and
               shaders/: every shader microcode the runs met (<work>/shaders/*.bin, x360_runtime's dump) translated to
@@ -24,6 +25,15 @@ The same five steps and progress lines as a GameCube pack (tools/prepare/gc.py, 
 Shaders are only known once a run met them: the first pack has none (draws are skipped, reported), each run dumps the
 shaders it meets, and the next Prepare translates them. The launcher counts the shaders the runs met that the pack
 lacks (Pack.java) and offers Prepare again, as it does for new code: the self-healing loop of the other consoles.
+
+view4k (WP-33, xenon_rt.h XE_VIEW4K_DYNAMIC): a host whose pages are larger than 4 KB cannot map the 360's 4 KB view
+where the 360 has it, so the runtime moves it (view4k_skew, x360_mem.c) and every guest memory access of the lifted code
+checks for it (a comparison and an addition). Where the pages are 4 KB nothing moves: the pack is compiled without the
+check (about a fifth fewer instructions in the hot code). The page size is the real one of the machine running this
+Prepare (os.sysconf, as the runtime's sysconf(_SC_PAGESIZE); X360_HOST_PAGE raises it, as the runtime's): on Android
+the Prepare runs on the device that plays the pack, on a desktop on the machine that runs it. pack.json says which
+("view4k": "static" / "dynamic", "host_page"); check() refuses a static pack on a machine of larger pages (a backup
+restored on another device), so a Prepare builds it again, and so does x360_bind ("Prepare it again").
 """
 
 import errno
@@ -286,7 +296,19 @@ def make_meta(lib_path, key, title, source_sha256, boot, abi, shell_abi, toolkit
                          cc_text, discovered, now)
     meta["console"] = CONSOLE
     meta["entry"] = ENTRY
+    page = host_page_size()     # the page size compile_flags saw (the same process, the same machine)
+    meta["view4k"] = "static" if view4k_static(page) else "dynamic"
+    meta["host_page"] = page
     return meta
+
+
+def view4k_refusal(meta, page=None):
+    """None when this machine can run a pack of this pack.json's view4k, else why not (WP-33). A pack without the
+    field (before WP-33) is not judged here: x360_bind still refuses one that cannot follow the machine."""
+    page = host_page_size() if page is None else page
+    if meta.get("view4k") == "static" and not view4k_static(page):
+        return ("prepared for a device with 4 KB memory pages (this one's are %d bytes): Prepare it again" % page)
+    return None
 
 
 def read(pack_dir):
@@ -315,6 +337,9 @@ def check(pack_dir, key, source_sha256, abi, shell_abi=pack.SHELL_ABI, verify_ha
         return "%s missing or of the wrong size" % meta["lib"]
     if not os.path.isfile(os.path.join(pack_dir, PACK_XEX)):
         return "no %s" % PACK_XEX
+    why = view4k_refusal(meta)
+    if why:
+        return why
     if verify_hash and pack.sha256_file(lib) != meta["lib_sha256"]:
         return "%s sha256 mismatch" % meta["lib"]
     return None
@@ -326,11 +351,42 @@ def lifted_opt(opt):
     return "0" if opt == "0" else "1"
 
 
+def host_page_size():
+    """The page size of this machine, the one that will run the pack (the Prepare runs there: on Android on the device
+    itself), as x360_mem.c's host_page_size reads it: sysconf, raised (never lowered) by X360_HOST_PAGE."""
+    try:
+        page = int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, ValueError, OSError):
+        import mmap
+        page = mmap.PAGESIZE
+    if page <= 0:
+        page = 0x1000
+    e = os.environ.get("X360_HOST_PAGE", "")
+    if e:
+        try:
+            v = int(e, 0)
+        except ValueError:
+            v = 0
+        if page <= v <= 0x10000 and not v & (v - 1):
+            page = v
+    return page
+
+
+def view4k_static(page):
+    """WP-33: the pack may leave out view4k_skew (XE_VIEW4K_DYNAMIC=0) where the host's pages are 4 KB (or smaller):
+    the runtime's view does not move there (x360_mem.c: skew 0 up to 4 KB pages)."""
+    return page <= 0x1000
+
+
+def view4k_flag(page):
+    return "-DXE_VIEW4K_DYNAMIC=%d" % (0 if view4k_static(page) else 1)
+
+
 def lifted_cflags(opt):
     return gba.lifted_cflags(opt) + ["-ffp-contract=off", "-DXE_RUNTIME=1"]
 
 
-def compile_flags(opt, root, gen, sysroot=None, include_dirs=()):
+def compile_flags(opt, root, gen, sysroot=None, include_dirs=(), page=None):
     flags = []
     if sysroot:
         flags += ["--target=" + cc.TARGET, "--sysroot=" + sysroot]
@@ -338,6 +394,7 @@ def compile_flags(opt, root, gen, sysroot=None, include_dirs=()):
         if rd:
             flags.append("-resource-dir=" + rd)
     flags += lifted_cflags(opt) + ["-g0", "-fPIC", "-std=gnu11", "-w", "-DNDEBUG"]
+    flags.append(view4k_flag(host_page_size() if page is None else page))
     for d in [gen, runtime_dir(root), gc.runtime_dir(root)] + list(include_dirs):
         flags.append("-I" + d)
     return flags

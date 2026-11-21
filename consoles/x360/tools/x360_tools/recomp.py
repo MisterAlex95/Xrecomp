@@ -12,7 +12,13 @@ runs the host cc on every file (-fsyntax-only), which is the check a title can g
 does not know and what the lifter does not lift: the coverage of the Xenon layer on a real title.
 
 Stats (stats.json): functions, instructions lifted, instructions handed to RC_INTERP by mnemonic (`unlifted`),
-invalid words reached.
+invalid words reached, direct calls.
+
+Direct calls (WP-16): a `bl` to a function of the pack calls its C function straight from the caller (xenon_rt.h
+RC_CALL, lift360.py TitleLifter.direct_call) instead of leaving to the runtime's dispatcher, and a `bctrl` looks its
+target up in the runtime's table from C (RC_CALL_IND), where the resume table maps the return point to the caller. Such a pack sets XE_RC_FEAT_DIRECT_CALLS and names its CRC xe_rc_image_crc2 (a
+runtime made before refuses it). --no-direct-calls or X360_DIRECT_CALLS=0: every call through the dispatcher, the C
+of before byte for byte.
 """
 
 import argparse
@@ -115,9 +121,15 @@ def write_resume_parts(outdir, resume, base, part_bytes, table):
     return files
 
 
+def direct_calls_default():
+    """WP-16: direct calls unless X360_DIRECT_CALLS=0 (Prepare runs this module with its own arguments: the switch is
+    the environment's, for comparisons)."""
+    return os.environ.get("X360_DIRECT_CALLS", "1") != "0"
+
+
 def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comments=True, omit=(),
               split_bytes=SPLIT_BYTES, bucket_bytes=BUCKET_BYTES, resume_split=RESUME_SPLIT,
-              resume_part_bytes=RESUME_PART_BYTES):
+              resume_part_bytes=RESUME_PART_BYTES, direct_calls=None):
     if img.image is None:
         raise XexError("no image to recompile: %s" % img.image_note)
     view = CodeView(img)
@@ -137,6 +149,24 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     funcs = disc.run()
     if omit:  # XBA-283 tests: functions left out of the pack on purpose (the runtime interprets them)
         funcs = [f for f in funcs if f.entry not in omit]
+    if direct_calls is None:
+        direct_calls = direct_calls_default()
+    direct = None
+    if direct_calls:
+        # WP-16: a `bl` calls its target's function from C when the target is a function of the pack and the resume
+        # table will map the return point to the caller (lift360.py TitleLifter.direct_call): the table first, from
+        # the leaders alone, built as below (an address several functions hold goes to the first, entries to their own)
+        owner = {}
+        for f in funcs:
+            for a in TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=False, helpers=helpers,
+                                 tables=disc.jt.tables).leaders:
+                owner.setdefault(a, f.entry)
+            f.release()
+        for f in funcs:
+            owner[f.entry] = f.entry
+        direct = ({f.entry for f in funcs}, owner)
+    direct_rets = []
+    indirect = 0
     resume = {}
     os.makedirs(outdir, exist_ok=True)
     for fn in os.listdir(outdir):  # an earlier lift's files (XBA-283 renamed them: no duplicate functions at link)
@@ -156,16 +186,19 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     for f in funcs:
         buckets.setdefault((f.entry - img.base) // bucket_bytes, []).append(f)
     for b, group in buckets.items():
-        out, size, sub = [head], 0, 0
+        out, size, sub, callees = [head], 0, 0, set()
         for n, f in enumerate(group):
             lifter = TitleLifter(view, disc.insn, f, fn_name(f.entry), comments=comments, helpers=helpers,
-                                 tables=disc.jt.tables)
+                                 tables=disc.jt.tables, direct=direct)
             text = lifter.function()
             out.append(text)
             out.append("\n")
             size += len(text) + 1
             fallbacks += lifter.fallbacks
             inlined += lifter.inlined
+            callees |= lifter.callees
+            direct_rets += lifter.direct_rets
+            indirect += lifter.indirect
             for a in lifter.leaders:
                 resume.setdefault(a, f.entry)
             for a in f.packed:
@@ -176,11 +209,14 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
                         invalid += 1
             f.release()
             if n + 1 == len(group) or size >= split_bytes or len(out) // 2 >= per_file:
+                if callees:  # WP-16: the functions this file calls directly (xenon_rt.h XE_RC_LOCAL)
+                    out[0] = head + "".join("XE_RC_LOCAL void %s(xe_machine *m_);\n" % fn_name(e)
+                                            for e in sorted(callees)) + "\n"
                 path = os.path.join(outdir, "x360_rc_%05d_%d.c" % (b, sub))
                 with open(path, "w") as fh:
                     fh.write("".join(out))
                 files.append(path)
-                out, size, sub = [head], 0, sub + 1
+                out, size, sub, callees = [head], 0, sub + 1, set()
     table = ['/* Entry -> lifted function (XBA-230). */\n#include "xenon_rt.h"\n\n']
     for f in funcs:
         table.append("void %s(xe_machine *m_);\n" % fn_name(f.entry))
@@ -192,6 +228,10 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     # the runtime's dispatcher looks a PC up here (XBA-270); an entry always maps to its own function
     for f in funcs:
         resume[f.entry] = f.entry
+    for ret, caller in direct_rets:  # WP-16: the table the leaders gave is the one the runtime gets (cannot differ)
+        if resume.get(ret) != caller:
+            raise RuntimeError("direct call returning to %08X: the resume table maps it to %s, not to %08X"
+                               % (ret, resume.get(ret), caller))
     if len(resume) <= resume_split:
         table.append("\nconst xe_rc_entry xe_rc_resume[] = {\n")
         for a in sorted(resume):
@@ -207,9 +247,12 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
     # XBA-283: bit 0, lwarx / stwcx. through RC_LWARX / RC_STWCX (atomic: x360_run --host-threads needs it)
     # bit 1 (XE_RC_FEAT_VIEW4K), when the pack is built so (xenon_rt.h, XE_VIEW4K_DYNAMIC): its accesses follow the
     # 0xE0000000 view where the host's pages moved it
-    table.append("const unsigned xe_rc_features = 1u | XE_RC_PACK_FEATURES;\n")
-    table.append("const uint32_t xe_rc_image_crc = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
-                 % (image_crc(img), img.base))
+    # bit 2 (XE_RC_FEAT_DIRECT_CALLS, WP-16): the functions call each other from C (RC_CALL); such a pack names its CRC
+    # xe_rc_image_crc2, which a runtime made before does not look for: it refuses the pack instead of running it
+    table.append("const unsigned xe_rc_features = 1u | XE_RC_PACK_FEATURES%s;\n"
+                 % (" | XE_RC_FEAT_DIRECT_CALLS" if direct else ""))
+    table.append("const uint32_t xe_rc_image_crc%s = 0x%08Xu;\nconst uint32_t xe_rc_image_base = 0x%08Xu;\n"
+                 % ("2" if direct else "", image_crc(img), img.base))
     path = os.path.join(outdir, "x360_rc_table.c")
     with open(path, "w") as fh:
         fh.write("".join(table))
@@ -222,7 +265,8 @@ def recompile(img, outdir, extra_seeds=(), use_pdata=True, per_file=400, comment
              "helpers": sorted({"%s@%08X" % (h.kind, h.start) for h, _ in helpers.values()}),
              "helper_calls_inlined": inlined, "jump_tables": st["jump_tables"],
              "jump_table_targets": st["jump_table_targets"], "unresolved_bctr": st["unresolved_bctr"],
-             "resume_points": len(resume)}
+             "resume_points": len(resume), "direct_calls": len(direct_rets) - indirect,
+             "direct_indirect_calls": indirect}
     with open(os.path.join(outdir, "stats.json"), "w") as fh:
         json.dump(stats, fh, indent=1)
     return stats
@@ -319,6 +363,9 @@ def main(argv=None):
                     help="resume points past which the table is cut into parts (default %(default)s)")
     ap.add_argument("--resume-part-bytes", type=lambda v: int(v, 0), default=RESUME_PART_BYTES,
                     help="guest code per resume table part (default %(default)s)")
+    ap.add_argument("--no-direct-calls", action="store_true",
+                    help="every call leaves to the runtime's dispatcher (the shape before WP-16; also "
+                         "X360_DIRECT_CALLS=0)")
     ap.add_argument("--omit", action="append", default=[],
                     help="tests: a file of hex function entries to leave out of the pack (or one hex address)")
     a = ap.parse_args(argv)
@@ -350,13 +397,15 @@ def main(argv=None):
             omit |= read_addrs(o) if os.path.exists(o) else {int(o, 16)}
         s = recompile(img, a.outdir, extra_seeds=seeds, use_pdata=not a.no_pdata, comments=not a.no_comments,
                       omit=omit, split_bytes=a.split_bytes, bucket_bytes=a.bucket_bytes,
-                      resume_split=a.resume_split, resume_part_bytes=a.resume_part_bytes)
+                      resume_split=a.resume_split, resume_part_bytes=a.resume_part_bytes,
+                      direct_calls=False if a.no_direct_calls else None)
         print("recomp: %(functions)d functions, %(instructions)d instructions, %(interp_fallback_insns)d handed to "
               "RC_INTERP, %(invalid_words)d invalid words" % s)
         print("  not lifted: %s" % ", ".join("%s %d" % kv for kv in list(s["unlifted"].items())[:30]))
         print("  save / restore helpers: %d found, %d calls inlined; jump tables: %d (%d targets), %d bctr "
-              "unresolved; %d resume points" % (len(s["helpers"]), s["helper_calls_inlined"], s["jump_tables"],
-                                                s["jump_table_targets"], s["unresolved_bctr"], s["resume_points"]))
+              "unresolved; %d resume points; %d direct calls (+%d bctrl)"
+              % (len(s["helpers"]), s["helper_calls_inlined"], s["jump_tables"], s["jump_table_targets"],
+                 s["unresolved_bctr"], s["resume_points"], s["direct_calls"], s["direct_indirect_calls"]))
         if a.compile:
             compile_check([os.path.join(a.outdir, p) for p in s["files"]])
             print("  every file compiles (cc -fsyntax-only)")

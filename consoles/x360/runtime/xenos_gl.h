@@ -93,12 +93,20 @@ typedef struct xenos_gl_stats {
     /* WP-10: rectangle lists (rect_draws) whose capture was read back and the fourth corner made on the CPU
      * (RECOMP_X360_RECTS=cpu); the others had it made on the GPU */
     uint64_t rect_lists_read_back;
+    /* WP-17 (RECOMP_X360_TILER): attachment sets invalidated before being overwritten whole (magenta: cleared) */
+    uint64_t tiler_invalidated;
+    uint64_t pending_clears;       /* WP-17: resolve clears left for the next pass that binds their surface */
+    uint64_t copy_blits;           /* WP-18: of copy_textures, those copied into a texture of their own (smaller than
+                                    * the picture, or RECOMP_X360_COPY_TEXTURES=blit); the others sample it in place */
     /* WP-19, the perf line */
     uint64_t loads;                /* attachments loaded at the start of a pass (not cleared whole nor invalidated
                                     * by its first operation: what a tiler reads back from memory), process-wide */
     int gpu_timer;                 /* 1: the GPU's time is measured (EXT_disjoint_timer_query) */
     uint64_t gpu_time_ns;          /* GPU time from swap to swap (GL_TIME_ELAPSED_EXT), of gpu_time_frames frames */
     uint64_t gpu_time_frames;
+    uint64_t msaa_views;           /* WP-28: rectangle lists through an MSAA view drawn into its 1x stand-in surfaces */
+    int rect_selftest;             /* WP-29: of 3 vertices, those the start-up check of rectangle lists' transform
+                                    * feedback capture got back (3: "rect lists OK") */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

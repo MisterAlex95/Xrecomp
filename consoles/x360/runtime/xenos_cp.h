@@ -83,6 +83,10 @@ typedef struct xenos_cp {
     uint32_t rptr_writeback; /* physical address the read pointer is written back to (0: none) */
     uint32_t counter;        /* CP_PROG_COUNTER-like event counter */
     int stalled;             /* a WAIT_REG_MEM did not hold: the ring stops there until the next update */
+    /* WP-31/32: that wait as it was read (where: buffer base, size and position in dwords; its 6 dwords), for
+     * xenos_cp_stall_may_end; wait_known 0 when not recorded (host state: a state load clears it) */
+    uint32_t wait_base, wait_size_dw, wait_pos, wait_pkt[6];
+    int wait_known;
     xenos_ib ib[XENOS_IB_DEPTH]; /* the indirect buffers that wait stopped, outermost first: resumed before the ring */
     uint32_t ib_depth;
     uint32_t last_swap_fb, last_swap_w, last_swap_h;
@@ -119,6 +123,10 @@ void xenos_cp_init(xenos_cp *cp);
 void xenos_cp_ring_init(xenos_cp *cp, uint32_t base_phys, uint32_t size_log2);
 /* the CPU moved the write pointer: run the packets up to it (returns the number of packets run) */
 uint32_t xenos_cp_set_wptr(xenos_cp *cp, uint32_t wptr);
+/* WP-31/32: 0 when the stalled ring's retry (xenos_cp_set_wptr with the same write pointer) would stop at the same
+ * wait again without doing anything: the wait's packet is unchanged in memory and its condition still does not hold.
+ * 1 otherwise (not stalled, the wait not recorded, its packet changed, or it holds now). Reads only. */
+int xenos_cp_stall_may_end(xenos_cp *cp);
 /* run ndwords of packets at a physical address (an indirect buffer; also used by tests) */
 uint32_t xenos_cp_execute(xenos_cp *cp, uint32_t phys, uint32_t ndwords);
 void xenos_cp_write_reg(xenos_cp *cp, uint32_t index, uint32_t value);

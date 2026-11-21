@@ -428,6 +428,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
     xe_cpu *c = &t->cpu;
     x->m.cur = c;
     x->m.slice = X360_SLICE;
+    x->m.rc_depth = 0; /* WP-16: no direct call on the host stack (RC_CALL) */
     uint64_t dispatches = 0; /* WP-19: lifted functions entered from here (the perf line's), counted, not timed */
     /* WP-20: the dispatcher's fast path, a pc with lifted code that is no import thunk, tested first; the special
      * return addresses (outside the image) and the thunks only behind that one test. What lifted code cannot change
@@ -507,7 +508,7 @@ static void run_thread(x360_machine *x, x360_thread *t)
     x->perf.dispatches += dispatches;
 }
 
-/* WP-19: the calling thread's CPU time (the perf line's guest time, read around each scheduler turn) */
+/* WP-19: the calling thread's CPU time (the perf line's guest time, read at x360_run's entry and exit: WP-31) */
 static uint64_t thread_cpu_ns(void)
 {
     struct timespec ts;
@@ -625,8 +626,10 @@ int x360_run(x360_machine *x, uint64_t insns)
     x360_install_fault_handler(x);
     if (x->host)
         return run_host(x, insns);
+    uint64_t c0 = thread_cpu_ns(), gpu0 = x360_gpu_cpu_ns(x);
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
+    x->m.rc_stop = stop; /* WP-16: run_thread's budget, as direct calls (RC_CALL) see it */
     while (x->status == X360_RUNNING) {
         if (x->m.rc_native >= stop || (x->time_limit && x360_now(x) >= x->time_limit)) {
             x->status = X360_BUDGET;
@@ -642,11 +645,13 @@ int x360_run(x360_machine *x, uint64_t insns)
         x360_audio_poll(x);
         x360_xma_poll(x);
         x360_input_poll(x);
-        if (x->timestamp_bundle) { /* KeTimeStampBundle: interrupt time, system time, tick count (ms) */
-            uint64_t now = x360_now(x);
-            x360_w64(x, x->timestamp_bundle, now);
-            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + now);
-            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(now / 10000));
+        uint64_t bnow = x->timestamp_bundle ? x360_now(x) : 0;
+        if (x->timestamp_bundle && x->bundle_written != bnow + 1) {
+            /* KeTimeStampBundle: interrupt time, system time, tick count (ms); WP-32: when the time moved */
+            x->bundle_written = bnow + 1;
+            x360_w64(x, x->timestamp_bundle, bnow);
+            x360_w64(x, x->timestamp_bundle + 8, X360_EPOCH + bnow);
+            x360_w32(x, x->timestamp_bundle + 16, (uint32_t)(bnow / 10000));
         }
         int picked = x360_kdpc_ready(x); /* a DPC runs ahead of every thread */
         for (int n = 1; picked < 0 && n <= x->nthreads; n++) {
@@ -679,11 +684,12 @@ int x360_run(x360_machine *x, uint64_t insns)
             x->threads[picked].cpu.reserve = 0;
         }
         x->cur = picked;
-        uint64_t c0 = thread_cpu_ns();
         run_thread(x, &x->threads[picked]);
-        x->perf.guest_cpu_ns += thread_cpu_ns() - c0;
         x->perf.turns++;
     }
+    /* WP-31: the guest time once per call, not around every turn (two clock reads a turn were ~1.1 ms a swap) */
+    uint64_t cpu = thread_cpu_ns() - c0, gpu = x360_gpu_cpu_ns(x) - gpu0;
+    x->perf.guest_cpu_ns += cpu > gpu ? cpu - gpu : 0;
     return x->status;
 }
 
@@ -765,6 +771,10 @@ static void host_run_thread(x360_machine *x, int k)
     lm.view4k_skew = x->m.view4k_skew;
     lm.rt = x;
     lm.cur = c;
+    lm.rc_stop = UINT64_MAX; /* WP-16: the loop below has no budget of its own, as RC_CALL then sees it */
+    lm.rc_fn_tab = x->m.rc_fn_tab;
+    lm.rc_code_lo = x->m.rc_code_lo, lm.rc_code_span = x->m.rc_code_span;
+    lm.rc_thunk_lo = x->m.rc_thunk_lo, lm.rc_thunk_span = x->m.rc_thunk_span;
     while (t->state == TH_READY && x->status == X360_RUNNING && !h->drain) {
         x->cur = k; /* the HLE, the interpreter and the SEH find the running thread here */
         x->m.cur = c;
@@ -873,6 +883,7 @@ static int run_host(x360_machine *x, uint64_t insns)
     pthread_mutex_lock(&h->mu);
     uint64_t stop = x->m.rc_native + insns;
     x->stop_at = stop;
+    x->m.rc_stop = stop; /* WP-16: run_thread's budget, as direct calls (RC_CALL) see it */
     while (x->status == X360_RUNNING) {
         if (x->m.rc_native >= stop || (x->time_limit && x360_now(x) >= x->time_limit)) {
             x->status = X360_BUDGET;
@@ -1097,9 +1108,16 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
     x->pack_features = pack->features;
+    if (pack->features & ~XE_RC_FEATS_KNOWN) {
+        x360_fail(x, "the pack needs a newer runtime (features %X, this one knows %X): update the app, or Prepare again",
+                  pack->features, XE_RC_FEATS_KNOWN);
+        return -1;
+    }
     if (total && x->m.view4k_skew && !(pack->features & XE_RC_FEAT_VIEW4K)) {
-        x360_fail(x, "the pack was built for hosts of 4 KB pages (this one's are %u bytes): build it again, with "
-                     "XE_VIEW4K_DYNAMIC=1", (unsigned)x->host_page);
+        /* WP-33: Prepare builds a pack without view4k_skew where the device's pages are 4 KB; a pack restored or
+         * copied onto a device of larger pages lands here */
+        x360_fail(x, "the pack was prepared for a device with 4 KB memory pages (this one's are %u bytes): Prepare it "
+                     "again on this device (XE_VIEW4K_DYNAMIC=1)", (unsigned)x->host_page);
         return -1;
     }
     if (!total) { /* XBA-283: nothing lifted, the interpreter runs it all (tests) */
@@ -1116,6 +1134,10 @@ int x360_bind(x360_machine *x, const x360_pack *pack)
     for (unsigned p = 0; p < nparts; p++)
         for (unsigned k = 0; k < parts[p].count; k++)
             x->fn_tab[(parts[p].entries[k].entry - x->code_lo) / 4] = parts[p].entries[k].fn;
+    /* WP-16: what a pack's indirect calls look up (xenon_rt.h RC_CALL_IND), as run_thread does */
+    x->m.rc_fn_tab = x->fn_tab;
+    x->m.rc_code_lo = x->code_lo, x->m.rc_code_span = x->code_hi - x->code_lo;
+    x->m.rc_thunk_lo = x->thunk_lo, x->m.rc_thunk_span = x->thunk_hi - x->thunk_lo;
     x->helpers = pack->helpers;
     x->nhelpers = pack->helpers ? pack->nhelpers : 0;
     return 0;
@@ -1126,6 +1148,8 @@ int x360_pack_from_lib(void *lib, x360_pack *pk)
     memset(pk, 0, sizeof *pk);
     const unsigned *count = dlsym(lib, "xe_rc_resume_count");
     const uint32_t *crc = dlsym(lib, "xe_rc_image_crc");
+    if (!crc) /* WP-16: a pack an older runtime must refuse names it so (xenon_rt.h XE_RC_FEAT_DIRECT_CALLS) */
+        crc = dlsym(lib, "xe_rc_image_crc2");
     pk->resume = dlsym(lib, "xe_rc_resume");
     if (!pk->resume) { /* XBA-284: a big pack's table in parts */
         const unsigned *np = dlsym(lib, "xe_rc_resume_part_count");

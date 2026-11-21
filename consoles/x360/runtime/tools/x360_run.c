@@ -6,14 +6,16 @@
  *            [--stats] [-v]
  *
  * TITLE.xex: an unencrypted XEX2, compression none or basic (python3 -m tools.xex FILE --plain OUT makes one).
- * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
+ * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc or,
+ * with direct calls, xe_rc_image_crc2).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --render: draw with the GLES 3.0 renderer, shaders from SHADER_CACHE (bringup's WORKDIR/shaders),
  * the first --frame-limit N (default 30) swaps written to --frames DIR as PPM, a WxH target (default 1280x720); the
  * log's "render: perf" line gives the GPU's time per swap of the run (x360_render_perf_format), "render: perf2" the
  * guest's (x360_render_perf_format_guest; swaps per second of virtual time); X360_READBACK=0 reads
  * no frame back at the swaps, as a window does (timings, no frames written). On the Mac,
- * X360_ANGLE_DIR=DIR takes ANGLE's libEGL / libGLESv2 from DIR (the Android emulator's lib64/gles_angle).
+ * X360_ANGLE_DIR=DIR takes ANGLE's libEGL / libGLESv2 from DIR (the Android emulator's lib64/gles_angle). The title's
+ * defaults apply as in the app (x360_title_env, printed on stderr), each unless the environment already sets it.
  * --audio FILE.wav: the audio the title submits (render driver frames, 6 channels, 48 kHz, float; XMA voices
  * silent). --save-state: write a save state when
  * the run stops (budget or end; lazy resolves written to memory first, X360_SAVE_FLUSH=0: not); --load-state: start from one. --pad-script FILE: timed controller states (see
@@ -30,6 +32,7 @@
 #include <string.h>
 
 #include "x360_core.h"
+#include "x360_runtime.h" /* x360_runtime_key, x360_title_env (x360_pad_map.c) */
 
 static uint8_t *read_file(const char *path, size_t *size)
 {
@@ -162,6 +165,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "x360_run: cannot read %s\n", path);
         return 2;
     }
+    /* WP-25: the title's defaults as the app applies them (x360_title_env: lazy resolves, no MSAA for Adventure Time),
+     * unless the environment already says otherwise (RECOMP_X360_RESOLVE=eager RECOMP_X360_MSAA=1: the old harness) */
+    char key[48];
+    if (!x360_runtime_key(data, size, key, sizeof key))
+        x360_title_env(key, stderr);
     char why[256] = "";
     x360_machine *x = x360_create(data, size, why, sizeof why);
     free(data);

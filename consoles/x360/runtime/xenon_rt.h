@@ -60,6 +60,16 @@ typedef struct xe_machine {
     /* after every older field: what xe_ptr adds to an address in the 0xE0000000 view (x360_mem.c: 0 where the host
      * maps 4 KB pages, 0x1000 where its pages are larger). Code built with XE_VIEW4K_DYNAMIC reads it. */
     uint32_t view4k_skew;
+    /* WP-16, after every older field: what the direct calls of a pack (XE_RC_FEAT_DIRECT_CALLS, RC_CALL) read: the
+     * run's instruction budget (rc_native at which the dispatcher stops, x360_run; ~0 where there is none) and how
+     * many direct calls deep the running lifted code is (0 at the dispatcher) */
+    uint64_t rc_stop;
+    uint32_t rc_depth;
+    /* and for the indirect ones (RC_CALL_IND, bcctrl): the runtime's PC -> lifted function table over
+     * [rc_code_lo, rc_code_lo + rc_code_span) (x360_bind's fn_tab), and the import thunks' range, which the dispatcher
+     * tests first (x360_thunk_at) */
+    void (**rc_fn_tab)(struct xe_machine *m);
+    uint32_t rc_code_lo, rc_code_span, rc_thunk_lo, rc_thunk_span;
 } xe_machine;
 
 /* XE_VIEW4K_DYNAMIC: 1, xe_ptr reads view4k_skew and the code runs on a host of any page size; 0, it does not (one
@@ -77,6 +87,19 @@ typedef struct xe_machine {
 #endif
 #define XE_RC_FEAT_VIEW4K 2u /* xe_rc_features: the pack's memory accesses go through view4k_skew */
 #define XE_RC_PACK_FEATURES (XE_VIEW4K_DYNAMIC ? XE_RC_FEAT_VIEW4K : 0u) /* what this build of a pack adds to them */
+/* WP-16: the pack's lifted functions call each other straight from C (RC_CALL) and read xe_machine's rc_stop and
+ * rc_depth. A runtime made before has neither and ignores feature bits it does not know, so such a pack also names its
+ * CRC xe_rc_image_crc2 instead of xe_rc_image_crc: an older runtime does not find it and refuses the pack ("not an
+ * x360_tools.recomp pack"); this one reads either, and refuses a pack with a feature bit it does not know. */
+#define XE_RC_FEAT_DIRECT_CALLS 4u
+#define XE_RC_FEATS_KNOWN (1u | XE_RC_FEAT_VIEW4K | XE_RC_FEAT_DIRECT_CALLS) /* what this runtime can run */
+/* the declaration recomp.py gives a function another one calls directly: hidden, so the call is a plain branch (no
+ * PLT; nothing looks the functions up by name, the tables hold their addresses) */
+#if defined(__GNUC__) && !defined(_WIN32)
+#define XE_RC_LOCAL __attribute__((visibility("hidden")))
+#else
+#define XE_RC_LOCAL
+#endif
 
 enum {
     XE_RC_EXIT_NORMAL = 0,      /* PC says where execution continues */
@@ -399,6 +422,59 @@ static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 #else
 #define XE_SPIN_HINT() (m_->rc_native += XE_SPIN_COST)
 #endif
+#endif
+/* WP-16: `bl T` to a function of the pack (x360_tools/lift360.py; the lifter has set LR to ret_): call T's function
+ * fn_ from C instead of leaving to the dispatcher, then go on at lbl_ (ret_'s label in this function) when the callee
+ * came back there, exactly where the dispatcher would have run this function from ret_ next (lift360.py only emits it
+ * where the resume table maps ret_ to this function): PC == ret_, no RC_INTERP / not-covered exit, the slice not run
+ * out and the budget not reached (run_thread's checks between two lifted functions; the HLE, SEH and APC return
+ * addresses are never ret_). Anything else (a preemption at a block, an exit to the interpreter, a jump elsewhere: a
+ * thunk, a tail call, an exception handler) returns up the chain to the dispatcher with PC as the callee left it, which
+ * resumes there through the resume table as before. The call itself is made only where run_thread would make it too:
+ * the slice not run out (a thread past it with MSR[EE] clear goes through the dispatcher), the budget not reached, and
+ * fewer than XE_CALL_DEPTH direct calls on the host stack (deeper ones, recursion, leave to the dispatcher). The
+ * guest's state, instruction count and slices are the same either way: only the host's route differs. */
+#ifndef XE_CALL_DEPTH
+#define XE_CALL_DEPTH 64
+#endif
+#ifdef XE_RUNTIME
+#define RC_CALL(fn_, t_, ret_, lbl_)                                                                                   \
+    do {                                                                                                               \
+        if (m_->rc_depth < XE_CALL_DEPTH && m_->slice >= 0 && m_->rc_native < m_->rc_stop) {                           \
+            c->pc = (t_);                                                                                              \
+            m_->rc_depth++;                                                                                            \
+            fn_(m_);                                                                                                   \
+            m_->rc_depth--;                                                                                            \
+            if (c->pc == (ret_) && !m_->rc_exit && m_->slice >= 0 && m_->rc_native < m_->rc_stop)                      \
+                goto lbl_;                                                                                             \
+            return;                                                                                                    \
+        }                                                                                                              \
+        RC_EXIT(t_);                                                                                                   \
+    } while (0)
+/* `bctrl` (a call through a pointer: virtual functions, callbacks): the same, the function found as run_thread finds
+ * it (fn_tab at the target, which must be in the code range, 4-byte aligned and not an import thunk; the dispatcher's
+ * special return addresses are outside the code range); a target the table does not hold leaves to the dispatcher
+ * (thunk, interpreter). The lifter has set LR to ret_. */
+#define RC_CALL_IND(t_, ret_, lbl_)                                                                                    \
+    do {                                                                                                               \
+        uint32_t it_ = (t_);                                                                                           \
+        void (*if_)(xe_machine *);                                                                                     \
+        if (it_ - m_->rc_code_lo < m_->rc_code_span && !(it_ & 3u) && it_ - m_->rc_thunk_lo >= m_->rc_thunk_span &&    \
+            (if_ = m_->rc_fn_tab[(it_ - m_->rc_code_lo) >> 2]) != 0 && m_->rc_depth < XE_CALL_DEPTH &&                 \
+            m_->slice >= 0 && m_->rc_native < m_->rc_stop) {                                                           \
+            c->pc = it_;                                                                                               \
+            m_->rc_depth++;                                                                                            \
+            if_(m_);                                                                                                   \
+            m_->rc_depth--;                                                                                            \
+            if (c->pc == (ret_) && !m_->rc_exit && m_->slice >= 0 && m_->rc_native < m_->rc_stop)                      \
+                goto lbl_;                                                                                             \
+            return;                                                                                                    \
+        }                                                                                                              \
+        RC_EXIT(it_);                                                                                                  \
+    } while (0)
+#else
+#define RC_CALL(fn_, t_, ret_, lbl_) RC_EXIT(t_) /* the tests' harness: no slice, its own dispatcher */
+#define RC_CALL_IND(t_, ret_, lbl_) RC_EXIT(t_)
 #endif
 #define RC_CHECK(next_) ((void)0)
 #define RC_FPCHECK(pc_) ((void)0)

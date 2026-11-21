@@ -647,6 +647,8 @@ static int state_load(x360_machine *x, const char *key, const uint8_t *data, siz
         }
     }
     free(before);
+    x->timer_lb = 0;       /* WP-32: timers loaded (KERN, KOBJ): the earliest due time is found again */
+    x->bundle_written = 0; /* and KeTimeStampBundle written at the next turn */
     x->m.cur = x->cur >= 0 ? &x->threads[x->cur].cpu : NULL;
     x360_render_reset(x); /* the eDRAM is not in states: the renderer's surfaces start clear */
     if (x->audio_cells)

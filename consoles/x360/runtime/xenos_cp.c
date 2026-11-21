@@ -38,6 +38,7 @@ void xenos_cp_ring_init(xenos_cp *cp, uint32_t base_phys, uint32_t size_log2)
     cp->rb_size = size_log2 < 28 ? 1u << (size_log2 + 3) : 1u << 31; /* bytes (Xenia: 1 << (size_log2 + 3)) */
     cp->rptr = cp->wptr = 0;
     cp->stalled = 0;
+    cp->wait_known = 0;
     cp->ib_depth = 0;
 }
 
@@ -294,7 +295,7 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
     }
     case PM4_WAIT_REG_MEM: {
         uint32_t info = rd(cp, r), addr = rd(cp, r), ref = rd(cp, r), mask = rd(cp, r);
-        rd(cp, r); /* wait interval */
+        uint32_t interval = rd(cp, r); /* wait interval */
         uint32_t v = info & 0x10 ? mem_read(cp, addr) : addr < XENOS_REGS ? cp->regs[addr] : 0;
         int ok = compare(info, v & mask, ref);
         TRACE("wait %s %08X & %08X vs %08X: %s\n", info & 0x10 ? "memory" : "register", addr, mask, ref,
@@ -302,6 +303,12 @@ static int packet(xenos_cp *cp, reader *r, int in_ring, int depth)
         if (!ok && in_ring) {
             r->pos = start;
             cp->stalled = 1;
+            if (count == 5) { /* recorded for xenos_cp_stall_may_end */
+                cp->wait_base = r->base, cp->wait_size_dw = r->size_dw, cp->wait_pos = start;
+                cp->wait_pkt[0] = h, cp->wait_pkt[1] = info, cp->wait_pkt[2] = addr;
+                cp->wait_pkt[3] = ref, cp->wait_pkt[4] = mask, cp->wait_pkt[5] = interval;
+                cp->wait_known = 1;
+            }
             cp->packets--; /* retried: counted when it holds */
             cp->op_count[op]--;
             return 1;
@@ -543,6 +550,22 @@ static uint32_t packet_words(xenos_cp *cp, reader *r)
     return 1;
 }
 
+int xenos_cp_stall_may_end(xenos_cp *cp)
+{
+    if (!cp->stalled || !cp->wait_known || !cp->wait_size_dw)
+        return 1;
+    /* the retry reads the packet again: the same 6 dwords at the same place, or it may do something else */
+    reader r = {cp->wait_base, cp->wait_size_dw, cp->wait_pos};
+    for (int k = 0; k < 6; k++)
+        if (rd(cp, &r) != cp->wait_pkt[k])
+            return 1;
+    uint32_t h = cp->wait_pkt[0], info = cp->wait_pkt[1], addr = cp->wait_pkt[2];
+    if ((h & 1) && !(cp->bin_select & cp->bin_mask))
+        return 1; /* predicated and no longer selected: skipped */
+    uint32_t v = info & 0x10 ? mem_read(cp, addr) : addr < XENOS_REGS ? cp->regs[addr] : 0;
+    return compare(info, v & cp->wait_pkt[4], cp->wait_pkt[3]);
+}
+
 uint32_t xenos_cp_set_wptr(xenos_cp *cp, uint32_t wptr)
 {
     if (cp->rb_size < 4) /* none yet, or a damaged state: a ring of no dwords */
@@ -550,6 +573,7 @@ uint32_t xenos_cp_set_wptr(xenos_cp *cp, uint32_t wptr)
     uint32_t size_dw = cp->rb_size / 4, n = 0;
     cp->wptr = wptr % size_dw;
     cp->stalled = 0;
+    cp->wait_known = 0;
     reader r = {cp->rb_base, size_dw, cp->rptr};
     /* indirect buffers a wait stopped: the innermost first, then those that called it */
     while (cp->ib_depth && !cp->stalled) {
