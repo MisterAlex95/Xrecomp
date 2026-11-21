@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "gc_internal.h"
+#include "gx/gx_internal.h"
 
 enum { XL_OK = 0, XL_MISS, XL_PROT, XL_NOEXEC };
 enum { ACC_READ = 0, ACC_WRITE = 1, ACC_FETCH = 2 };
@@ -241,7 +242,7 @@ void gc_store(gc_machine *m, uint32_t ea, uint32_t v, unsigned size, uint32_t pc
         else
             goto walk;
         if ((pa & 0xFFFF8000u) == 0x0C008000u)
-            gx_fifo_write(m->gx, v, size);
+            gx_fifo_write_inline(m->gx, v, size); /* the write-gather pipe's common case in line */
         else
             gc_phys_write(m, pa, v, size);
         return;

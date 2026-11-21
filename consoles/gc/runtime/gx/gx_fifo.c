@@ -150,10 +150,14 @@ static void tlut_load(gx_state *gx)
     uint32_t v = gx->bp[BP_LOADTLUT1];
     uint32_t dst = (v & 0x3FFu) << 9;
     uint32_t bytes = BITS(v, 10, 11) * 32u;
-    for (uint32_t i = 0; i < bytes; i++) {
-        uint32_t s = src + i, d = (0x80000u + dst + i) & (GX_TMEM_SIZE - 1);
-        gx->tmem[d] = s < gx->ram_size ? gx->ram[s] : 0;
-    }
+    uint32_t d0 = (0x80000u + dst) & (GX_TMEM_SIZE - 1);
+    if (src <= gx->ram_size && bytes <= gx->ram_size - src && bytes <= GX_TMEM_SIZE - d0)
+        memcpy(gx->tmem + d0, gx->ram + src, bytes); /* the common case: inside MEM1, no wrap in TMEM */
+    else
+        for (uint32_t i = 0; i < bytes; i++) {
+            uint32_t s = src + i, d = (0x80000u + dst + i) & (GX_TMEM_SIZE - 1);
+            gx->tmem[d] = s < gx->ram_size ? gx->ram[s] : 0;
+        }
     if (gx->trace)
         gx_log(gx, "TLUT load %08X -> TMEM %05X, %u bytes: %02X%02X %02X%02X ...", src, 0x80000u + dst, bytes,
                gx->tmem[(0x80000u + dst) & (GX_TMEM_SIZE - 1)], gx->tmem[(0x80001u + dst) & (GX_TMEM_SIZE - 1)],
@@ -269,41 +273,7 @@ static size_t parse(gx_state *gx, const uint8_t *p, size_t n)
     while (at < n) {
         uint8_t op = p[at];
         size_t left = n - at;
-        if (op == 0x00 || op == 0x48 || op == 0x44) { /* NOP, invalidate vertex cache, metrics */
-            at++;
-            continue;
-        }
-        if (op == 0x08) {
-            if (left < 6)
-                break;
-            load_cp(gx, p[at + 1], gx_be32(p + at + 2));
-            at += 6;
-        } else if (op == 0x10) {
-            if (left < 5)
-                break;
-            uint32_t h = gx_be32(p + at + 1);
-            uint32_t cnt = BITS(h, 16, 4) + 1, addr = h & 0xFFFF;
-            if (left < 5 + 4 * (size_t)cnt)
-                break;
-            for (uint32_t i = 0; i < cnt; i++)
-                load_xf(gx, addr + i, gx_be32(p + at + 5 + 4 * i));
-            at += 5 + 4 * (size_t)cnt;
-        } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {
-            if (left < 5)
-                break;
-            indexed_xf_load(gx, op, gx_be32(p + at + 1));
-            at += 5;
-        } else if (op == 0x40) {
-            if (left < 9)
-                break;
-            call_dl(gx, gx_be32(p + at + 1), gx_be32(p + at + 5));
-            at += 9;
-        } else if (op == 0x61) {
-            if (left < 5)
-                break;
-            load_bp(gx, gx_be32(p + at + 1));
-            at += 5;
-        } else if (op >= 0x80 && op < 0xC0) {
+        if (op >= 0x80 && op < 0xC0) { /* a draw */
             if (left < 3)
                 break;
             unsigned vat = op & 7, prim = (op >> 3) & 7, cnt = gx_be16(p + at + 1);
@@ -320,11 +290,63 @@ static size_t parse(gx_state *gx, const uint8_t *p, size_t n)
                 gx->stats.draws++;
             }
             at += 3 + vs * cnt;
-        } else {
+            continue;
+        }
+        switch (op) {
+        case 0x00: /* NOP: GXFlush pads to a line with them, a run at once */
+            do
+                at++;
+            while (at < n && !p[at]);
+            continue;
+        case 0x48: /* invalidate vertex cache, metrics */
+        case 0x44:
+            at++;
+            continue;
+        case 0x61:
+            if (left < 5)
+                return at;
+            load_bp(gx, gx_be32(p + at + 1));
+            at += 5;
+            continue;
+        case 0x08:
+            if (left < 6)
+                return at;
+            load_cp(gx, p[at + 1], gx_be32(p + at + 2));
+            at += 6;
+            continue;
+        case 0x10: {
+            if (left < 5)
+                return at;
+            uint32_t h = gx_be32(p + at + 1);
+            uint32_t cnt = BITS(h, 16, 4) + 1, addr = h & 0xFFFF;
+            if (left < 5 + 4 * (size_t)cnt)
+                return at;
+            for (uint32_t i = 0; i < cnt; i++)
+                load_xf(gx, addr + i, gx_be32(p + at + 5 + 4 * i));
+            at += 5 + 4 * (size_t)cnt;
+            continue;
+        }
+        case 0x20:
+        case 0x28:
+        case 0x30:
+        case 0x38:
+            if (left < 5)
+                return at;
+            indexed_xf_load(gx, op, gx_be32(p + at + 1));
+            at += 5;
+            continue;
+        case 0x40:
+            if (left < 9)
+                return at;
+            call_dl(gx, gx_be32(p + at + 1), gx_be32(p + at + 5));
+            at += 9;
+            continue;
+        default:
             gx->stats.unknown_cmds++;
             if (gx->verbose || gx->stats.unknown_cmds <= 4)
                 gx_log(gx, "unknown command %02X skipped", op);
             at++;
+            continue;
         }
     }
     return at;
@@ -333,6 +355,27 @@ static size_t parse(gx_state *gx, const uint8_t *p, size_t n)
 /* Feeds bytes from the FIFO into the staging buffer and parses what is complete. */
 static void cmd_feed(gx_state *gx, const uint8_t *p, size_t n)
 {
+    if (!gx->cmd_len) { /* nothing staged: parse in place, stage only a command cut at the end */
+        gx->stats.fifo_bytes += n;
+        size_t used = parse(gx, p, n);
+        p += used;
+        n -= used;
+        if (!n)
+            return;
+        if (n > gx->cmd_cap) {
+            size_t cap = gx->cmd_cap;
+            while (n > cap)
+                cap *= 2;
+            uint8_t *c = realloc(gx->cmd, cap);
+            if (!c)
+                return;
+            gx->cmd = c;
+            gx->cmd_cap = cap;
+        }
+        memcpy(gx->cmd, p, n);
+        gx->cmd_len = n;
+        return;
+    }
     if (gx->cmd_len + n > gx->cmd_cap) {
         size_t cap = gx->cmd_cap;
         while (gx->cmd_len + n > cap)
@@ -381,37 +424,17 @@ static void cp_run(gx_state *gx)
     gx->cp_dist = 0;
 }
 
-void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
+void gx_cp_run(gx_state *gx)
+{
+    cp_run(gx);
+}
+
+/* A write that wraps the FIFO or runs past MEM1: byte by byte. */
+void gx_fifo_write_wrap(gx_state *gx, uint32_t v, unsigned size)
 {
     uint32_t base = gx->pi_base & 0x03FFFFE0u, lim = ring_limit(gx->pi_end & 0x03FFFFFFu);
     uint32_t wp = gx->pi_wp & 0x03FFFFFFu;
     bool crossed = false;
-    /* The common case: no wrap, and within one 32-byte line, so that only the last byte can reach a line's end (a
-     * word after a command byte is unaligned: it stays here too) */
-    if ((wp & 31) + size <= 32 && wp + size < lim && wp + size <= gx->ram_size) {
-        uint8_t *d = gx->ram + wp;
-        if (size == 4) { /* a word (most writes): big-endian at once (XBA-279) */
-            d[0] = (uint8_t)(v >> 24);
-            d[1] = (uint8_t)(v >> 16);
-            d[2] = (uint8_t)(v >> 8);
-            d[3] = (uint8_t)v;
-        } else if (size == 2) { /* vertex data mixes in shorts and bytes */
-            d[0] = (uint8_t)(v >> 8);
-            d[1] = (uint8_t)v;
-        } else if (size == 1) {
-            d[0] = (uint8_t)v;
-        } else {
-            for (unsigned i = 0; i < size; i++)
-                d[i] = (uint8_t)(v >> (8 * (size - 1 - i)));
-        }
-        wp += size;
-        gx->pi_wp = (gx->pi_wp & 0x20000000u) | wp;
-        if ((wp & 31) == 0 && (gx->cp_cr & 0x10)) {
-            gx->cp_wp = wp;
-            cp_run(gx);
-        }
-        return;
-    }
     for (unsigned i = 0; i < size; i++) {
         if (wp < gx->ram_size)
             gx->ram[wp] = (uint8_t)(v >> (8 * (size - 1 - i)));
@@ -428,6 +451,11 @@ void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
         gx->cp_wp = wp & ~31u;
         cp_run(gx);
     }
+}
+
+void gx_fifo_write(gx_state *gx, uint32_t v, unsigned size)
+{
+    gx_fifo_write_inline(gx, v, size);
 }
 
 uint32_t gx_pi_read(gx_state *gx, unsigned idx)
