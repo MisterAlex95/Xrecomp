@@ -3198,7 +3198,9 @@ connection's address, as for any request; the client does not put it in an item)
 - *A run's end.* The game runs in the package's main process; on each resume the launcher reads that process's newest
   `ApplicationExitInfo` records. A run is one launch (`GameStore.lastPlayed`); its end is the newest exit record after
   it (a quick reboot's first process is not a run of its own). No record yet: the run is not over, nothing is
-  written. Each end is counted once (`files/telemetry/counted` keeps the last exit's timestamp). Status: native crash
+  written. Each end is counted once (`files/telemetry/counted` keeps the last exit's timestamp) and each launch once
+  (`files/telemetry/launch`): an end with no new launch before it (a library check's games, a game process the
+  system started again) is not a run. Status: native crash
   or Java exception → `crashed`; exit with status 0, stopped by the user, or ended by the launcher itself
   (`endRunningGame` notes the pid and its launch, since starting another game replaces `lastPlayed`) → `exited`;
   anything else (not responding, killed for memory, another signal, a failing exit) → `abnormal`.
@@ -3232,6 +3234,8 @@ Check on the device (Alex):
 7. Turn the option off: the note says the install id and waiting reports are deleted; crash a game: nothing is sent.
 8. From the launcher, start a game, go back to the launcher (Home), pick another game and play: the first run
    counts as `exited`, not `abnormal` (Rustrak's release health, abnormal count unchanged).
+9. With the option on, the Privacy sheet (and the bubble) in English and French: the whole text and the three rows
+   show, nothing cut (the JVM render `ui-privacy-<en|fr>-<720|1080|4x3|1x1>` checks the same).
 
 ## Library check (XBA-130)
 

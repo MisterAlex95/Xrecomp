@@ -35,6 +35,7 @@ final class AutoReports {
     /** What waits at most, per folder, and for how long. */
     static final int KEEP_MAX = 10;
     static final long KEEP_MS = 7L * 24 * 3600_000L;
+    static final int PREPARE_SEEN = 32;
     static final String EXITED = "exited", CRASHED = "crashed", ABNORMAL = "abnormal";
 
     private AutoReports() {}
@@ -148,7 +149,7 @@ final class AutoReports {
             write(f(c, "counted"), String.valueOf(System.currentTimeMillis()));
             return null;
         }
-        long counted = parse(m), last = GameStore.lastPlayed(c);
+        long counted = parse(m), last = GameStore.lastPlayed(c), launchCounted = parse(read(f(c, "launch")));
         String[] ended = String.valueOf(read(f(c, "ended-pid"))).split("\t");
         long endedPid = ended.length == 2 ? parse(ended[0]) : -1, endedStart = ended.length == 2 ? parse(ended[1]) : 0;
         List<Exit> all = exits.list(c);
@@ -159,8 +160,8 @@ final class AutoReports {
             if (x.time <= counted)
                 continue;
             long start = x.pid == endedPid && endedStart > 0 ? endedStart : last > 0 && x.time >= last ? last : 0;
-            if (start <= 0 || start > x.time)
-                continue;   // a process whose launch is unknown
+            if (start <= 0 || start > x.time || start <= launchCounted)
+                continue;   // a process whose launch is unknown (a library check's) or already counted
             Exit prev = runs.get(start);
             if (prev == null || x.time > prev.time)
                 runs.put(start, x);
@@ -192,6 +193,7 @@ final class AutoReports {
             }
         }
         write(f(c, "counted"), String.valueOf(newest));
+        write(f(c, "launch"), String.valueOf(runs.lastKey()));   // a launch is one run, whatever ends after
         if (on) {
             prune(c);
             schedule(c);
@@ -208,9 +210,13 @@ final class AutoReports {
         if (tid == null || s == null)
             return false;
         String id = tid + "@" + s.updatedAt;
-        if (id.equals(read(f(c, "prepare-seen"))))
+        List<String> seen = new ArrayList<>(Arrays.asList(String.valueOf(read(f(c, "prepare-seen"))).split("\n")));
+        if (seen.contains(id))
             return false;
-        write(f(c, "prepare-seen"), id);
+        seen.removeIf(x -> x.startsWith(tid + "@") || x.isEmpty() || x.equals("null"));
+        seen.add(id);   // one per title, the last PREPARE_SEEN titles
+        write(f(c, "prepare-seen"), String.join("\n", seen.subList(Math.max(0, seen.size() - PREPARE_SEEN),
+                                                                   seen.size())));
         if (enabled(c) && s.updatedAt >= parse(read(f(c, "since")))) {
             outbox(c, s.updatedAt + "-prepare", CrashReport.prepare(c, tid, title, s.code, s.msg, log));
             prune(c);

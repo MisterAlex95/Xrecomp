@@ -310,7 +310,7 @@
     <string name="AUTO_REPORTS_RESET_DONE">A new random install id is used from now on.</string>
     <string name="AUTO_REPORTS_ON">Reports leave by themselves, on Wi-Fi.</string>
     <string name="AUTO_REPORTS_OFF">Nothing leaves unless you choose Send. The install id and the waiting reports are deleted.</string>
-    <string name="AUTO_REPORTS_WHAT">When a game crashes or a Prepare fails, its report goes to the XRecomp developers by itself, on Wi-Fi. Off (the default), nothing leaves unless you choose Send.\n\nWhat is sent: for a crash or a failed Prepare, the same report as Send (how it ended, the game\'s name and ID, the log without folders, addresses or links, the device model, Android and app versions). For each game run: a random run id, a random install id, how it ended, how long it lasted and the app version. Nothing else: no game data, no account, no device id. Turning this off deletes the install id and what still waits.</string>
+    <string name="AUTO_REPORTS_WHAT">Off (the default), nothing leaves without Send. On, a crash or a failed Prepare sends its report by itself, on Wi-Fi, as Send would: no folders, addresses, links or game data. Each game run also sends two random ids (run, install), how it ended, how long it lasted and the app version. Nothing else: no account, no device id.</string>
     <string name="CHIP_NEEDS_PREPARE">Needs preparing</string>
     <string name="CHIP_PREPARING">Preparing</string>
     <string name="CHIP_PREPARE_FAILED">Prepare failed</string>

@@ -84,7 +84,7 @@
     <string name="TIP_AT_ONCE_T">Ce jeu tourne dans l\'interpréteur : il se lance tout de suite. Préparer le traduit en code natif (quelques minutes) : plus fluide, plus économe en batterie. Vous pouvez jouer pendant ce temps.</string>
     <string name="TIP_AUTO_REPORTS_H">Aider à corriger les plantages</string>
     <string name="TIP_AUTO_REPORTS_T">Quelque chose s\'est mal passé. XRecomp peut envoyer ce genre de rapport de lui-même, en Wi-Fi : sa fin et le journal, aucune donnée de jeu, aucun compte. Désactivé sauf si vous l\'activez ; Réglages › Avancé › Confidentialité le change à tout moment.</string>
-    <string name="TIP_AUTO_REPORTS_ON">Envoyer les rapports automatiquement</string>
+    <string name="TIP_AUTO_REPORTS_ON">Les envoyer automatiquement</string>
     <string name="TIP_NOT_NOW">Pas maintenant</string>
 
     <!-- Les schémas de l'aide (Schema) -->

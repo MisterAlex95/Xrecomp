@@ -199,6 +199,11 @@ public class AutoReportsTest {
         assertEquals(1, posted.size());
         assertNull(AutoReports.collect(c, false));
         assertEquals(1, posted.size());
+        // A newer end without a new launch (a library check's game, a process the system restarted): not a run.
+        exits.add(0, new AutoReports.Exit(80, t + 50_000, "native crash", 0));
+        assertNull(AutoReports.collect(c, false));
+        assertEquals(0, AutoReports.pending(c));
+        assertEquals(0, dumps);
     }
 
     @Test
@@ -309,6 +314,15 @@ public class AutoReportsTest {
         s.updatedAt = now() + 1000;
         assertTrue(AutoReports.prepareFailed(c, "4D530004", "Halo", s, log));
         assertFalse(AutoReports.prepareFailed(c, "4D530004", "Halo", s, log));   // the screen rebuilt
+        assertEquals(1, AutoReports.pending(c));
+        PrepareProtocol.Status other = new PrepareProtocol.Status();
+        other.state = PrepareProtocol.FAILED;
+        other.updatedAt = s.updatedAt + 1;
+        assertTrue(AutoReports.prepareFailed(c, "n64-mario", "Mario", other, null));
+        assertFalse(AutoReports.prepareFailed(c, "4D530004", "Halo", s, log));   // two titles seen in turn
+        assertFalse(AutoReports.prepareFailed(c, "n64-mario", "Mario", other, null));
+        assertEquals(2, AutoReports.pending(c));
+        assertTrue(new File(new File(Telemetry.dir(c), "outbox"), other.updatedAt + "-prepare.envelope").delete());
         assertEquals(1, AutoReports.pending(c));
         AutoReports.flush(c);
         assertEquals(1, posted.size());
