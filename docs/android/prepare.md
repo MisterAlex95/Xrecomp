@@ -1402,6 +1402,20 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   digest changes with it: the launcher offers « Prepare again » for every x360 pack, which is all a player has to do
   to get them. `X360_DIRECT_CALLS=0` in the environment of a Prepare (or `--no-direct-calls`) lifts as before.
 
+- **VMX helpers (CPU night 2).** The vector helpers lifted code calls (`consoles/x360/runtime/xenon_vmx.h`,
+  `xenon_ops.h`, the vector loads and stores of `xenon_rt.h`) took over half of the host CPU in Warhammer's movie
+  decoder: every lane-wise op went through per-element shift-and-mask accessors, out of line at -O1. They now work on
+  host-order lanes (`xe_v128` gains `u16[8]` / `u8[16]` members; size, alignment and save states unchanged), the
+  hottest as GCC / clang vector ops (SSE2 / NEON inline), the permutes, merges, packs, byte conversions and
+  lvlx / lvrx / stvlx / stvrx / lve / stve address elements in place on little-endian hosts, and the small ones are
+  `always_inline` (`XV_HOT`). Same results and VSCR: ctest `x360_vmx_ref` compares them with the plain C
+  (`-DXV_SCALAR`) on random and edge inputs. Warhammer, headless x86-64 (with the MmQueryStatistics fix of the same
+  night): 15.1 -> 4.9 s of host CPU for its first 20 billion instructions (guest 31 -> 10 ms per swap), the same
+  stats, logs and save state byte for byte after 150 billion with the pad script; the pack compiles in about the same
+  time (gcc -O1, within the noise of a loaded host). Nothing changes in the pack's interface (old packs run as
+  before, at the old speed); the toolkit digest changes with the headers, so the launcher offers « Prepare again »,
+  which is what brings the gain.
+
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
 `X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round
 loop on the test titles) and `x360_missed`.

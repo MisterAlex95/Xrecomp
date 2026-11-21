@@ -11,6 +11,8 @@ project(console_x360_tests C)
 #                    same at an internal resolution of 2 and as without EXT_float_blend
 #   x360_render      the renderer through the machine: a ring, VdSwap, a front buffer frame, a save state loaded
 #   x360_pad_map     the title key and a host pad as a 360 controller (x360_runtime.h's pure helpers; XBA-280)
+#   x360_vmx_ref     the VMX helpers as packs build them (host-order lanes, vector ops) equal the same helpers as plain
+#                    C (-DXV_SCALAR) on random and edge vectors, VSCR[SAT] included (the interpreter shares them)
 #   x360_window      the renderer on a window's context (xenos_gl_attach at scale 2, the frame texture presented,
 #                    the drawable captured): needs a display (xvfb-run -a ctest -R x360_window), 77 without
 #   x360_play        the test title played by x360_play headless, frame by frame, to its end (run_play.sh;
@@ -62,6 +64,15 @@ target_link_libraries(xenos_cp_test PRIVATE x360_core)
 target_compile_options(xenos_cp_test PRIVATE -Wall -Wextra)
 add_test(NAME xenos_cp COMMAND xenos_cp_test)
 set_tests_properties(xenos_cp PROPERTIES TIMEOUT 60)
+
+# the VMX helpers as packs build them against the same helpers as plain C (-DXV_SCALAR in x360_vmx_ref_scalar.c)
+add_executable(x360_vmx_ref_test x360_vmx_ref_test.c x360_vmx_ref_scalar.c)
+target_include_directories(x360_vmx_ref_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime
+                                                     ${CMAKE_CURRENT_SOURCE_DIR}/../../gc/runtime)
+target_compile_options(x360_vmx_ref_test PRIVATE -Wall -Wextra -Wno-unused-function -ffp-contract=off)
+target_link_libraries(x360_vmx_ref_test PRIVATE m)
+add_test(NAME x360_vmx_ref COMMAND x360_vmx_ref_test)
+set_tests_properties(x360_vmx_ref PROPERTIES TIMEOUT 120)
 
 add_executable(xenos_texture_hash_test xenos_texture_hash_test.c)
 target_link_libraries(xenos_texture_hash_test PRIVATE x360_core)
