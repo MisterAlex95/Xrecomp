@@ -212,7 +212,8 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat))                                              \
     X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))                            \
     X(void, glGetInternalformativ, (GLenum, GLenum, GLenum, GLsizei, GLint *))                                        \
-    X(void, glUniform3i, (GLint, GLint, GLint, GLint))
+    X(void, glUniform3i, (GLint, GLint, GLint, GLint))                                                               \
+    X(void, glInvalidateFramebuffer, (GLenum, GLsizei, const GLenum *))
 
 #define MAX_ATTRS 16
 #define UBO_BLOCK (4096 + 32 + 128 + 48) /* upload_constants: one stage's uniform block */
@@ -399,6 +400,7 @@ struct xenos_gl {
     int keep_noop;            /* WP-9: RECOMP_X360_NOOP_DRAWS=keep, draws that cannot write go through all the same */
     int rects_gpu;            /* WP-10: rectangle lists' fourth corner made on the GPU (RECOMP_X360_RECTS=cpu: not) */
     int copy_hash_full;       /* WP-12: RECOMP_X360_COPY_HASH=full, every check of a copy's memory hashes all of it */
+    int tiler;                /* WP-17: TILER_OFF (RECOMP_X360_TILER=0), TILER_ON (default), TILER_MAGENTA (=magenta) */
     int npending;             /* copies with pending set */
     int in_resolve;           /* resolve() is timing itself (resolve_ns) */
     unsigned swaps;           /* xenos_gl_swap calls (the age of a pending copy) */
@@ -607,6 +609,47 @@ static void fail(char *why, size_t n, const char *msg)
         snprintf(why, n, "%s", msg);
 }
 
+/* WP-17, what a tiling GPU (the phones') loads into its tile memory at the start of a pass and stores at its end: the
+ * contents of an attachment that is about to be overwritten whole are invalidated first (glInvalidateFramebuffer,
+ * GLES 3.0), so the driver neither loads them nor keeps them. Only where the overwrite is known on the CPU: a blit
+ * over all of its destination, a clear of a whole surface. (A draw's coverage would need its vertex shader run on the
+ * CPU: Direct3D's clear rectangles here cover 1072 rows through a 4x MSAA view of the tiles and an 8-row strip through
+ * the 1x one, never a whole attachment by themselves.) RECOMP_X360_TILER=0 turns WP-17 off; RECOMP_X360_TILER=magenta
+ * clears to magenta (depth 0, stencil 0x5A) where it would invalidate: a frame that changes shows a wrong proof, the
+ * only way to check one where the driver keeps the contents anyway (ANGLE on the Mac). */
+enum { TILER_OFF, TILER_ON, TILER_MAGENTA };
+
+/* the attachments of the bound draw framebuffer about to be overwritten whole: colour draw buffers in `colour` (bit n:
+ * draw buffer n, which is GL_COLOR_ATTACHMENTn in every framebuffer here), the depth / stencil one with `ds` */
+static void tiler_discard(xenos_gl *g, unsigned colour, int ds)
+{
+    if (g->tiler == TILER_OFF || (!colour && !ds))
+        return;
+    if (g->tiler == TILER_MAGENTA) {
+        static const GLfloat magenta[4] = {1, 0, 1, 1};
+        g->glDisable(GL_SCISSOR_TEST);
+        g->glColorMask(1, 1, 1, 1);
+        for (int i = 0; i < 4; i++)
+            if ((colour >> i) & 1)
+                g->glClearBufferfv(0x1800 /* GL_COLOR */, i, magenta);
+        if (ds) {
+            g->glDepthMask(1);
+            g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+            g->glClearBufferfi(GL_DEPTH_STENCIL, 0, 0.0f, 0x5A);
+        }
+    } else {
+        GLenum att[5];
+        int n = 0;
+        for (int i = 0; i < 4; i++)
+            if ((colour >> i) & 1)
+                att[n++] = GL_COLOR_ATTACHMENT0 + (GLenum)i;
+        if (ds)
+            att[n++] = GL_DEPTH_STENCIL_ATTACHMENT;
+        g->glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, n, att);
+    }
+    g->st.tiler_invalidated++;
+}
+
 /* the GLES entry points: from libGLESv2 or eglGetProcAddress; 0 when one is missing */
 static int load_gl(xenos_gl *g, char *why, size_t why_n)
 {
@@ -774,6 +817,13 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     if (!g->rects_gpu && !(rects_env && !strcmp(rects_env, "cpu")))
         fprintf(g->log, "xenos_gl: rectangle lists read back (uniform block size %d, offset alignment %d)\n", ublock,
                 ualign);
+    const char *tiler_env = getenv("RECOMP_X360_TILER"); /* on (default) | 0 | magenta (WP-17) */
+    g->tiler = !tiler_env || !*tiler_env ? TILER_ON : !strcmp(tiler_env, "0") ? TILER_OFF
+             : !strcmp(tiler_env, "magenta")                       ? TILER_MAGENTA
+                                                                   : TILER_ON;
+    if (g->tiler != TILER_ON)
+        fprintf(stderr, "xenos: tiler passes %s (RECOMP_X360_TILER=%s)\n",
+                g->tiler == TILER_OFF ? "as before" : "magenta where invalidated", tiler_env);
     const char *hash_env = getenv("RECOMP_X360_COPY_HASH"); /* sparse (default) | full (WP-12) */
     g->copy_hash_full = hash_env && !strcmp(hash_env, "full");
     if (g->copy_hash_full)
@@ -3045,9 +3095,9 @@ static int copy_fits(const rt_copy *rc, const uint32_t *fc)
     return fmt == rc->fmt && (endian == rc->endian || fmt == 2);
 }
 
-/* copy a w x h guest-pixel region at (sx, sy) of texture `src` into (0, 0) of texture `dst` (both at the internal
- * resolution, compatible formats) */
-static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w, int h, int dx, int dy)
+/* copy a w x h guest-pixel region at (sx, sy) of texture `src` into (dx, dy) of texture `dst` (both at the internal
+ * resolution, compatible formats); `whole`: the region is all of dst (its old contents invalidated, WP-17) */
+static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w, int h, int dx, int dy, int whole)
 {
     int s = g->scale;
     g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
@@ -3058,6 +3108,8 @@ static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w,
     static const GLenum b0 = GL_COLOR_ATTACHMENT0;
     g->glDrawBuffers(1, &b0);
     g->glDisable(GL_SCISSOR_TEST);
+    if (whole)
+        tiler_discard(g, 1, 0);
     g->glBlitFramebuffer(sx * s, sy * s, (sx + w) * s, (sy + h) * s, dx * s, dy * s, (dx + w) * s, (dy + h) * s,
                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
     g->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
@@ -3122,7 +3174,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
                 t->tex = new_texture(g, rc->ifmt, tf, tt, hw, hh);
                 t->copy_w = hw, t->copy_h = hh, t->copy_ifmt = rc->ifmt;
             }
-            blit_tex(g, rc->tex, t->tex, 0, 0, (int)w, (int)h, 0, 0);
+            blit_tex(g, rc->tex, t->tex, 0, 0, (int)w, (int)h, 0, 0, 1);
             t->copy = 1 + (int)(rc - g->copies);
             t->swap_rb = rc->swap_rb;
             t->hash = rc->hash;
@@ -3875,7 +3927,8 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
         else if (!in_old)
             flush_copy(g, cp, rc);
     }
-    blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0);
+    blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0,
+             !x0 && !y0 && x1 == rc->w && y1 == rc->h);
     if (fresh)
         copy_rehash(g, cp, rc); /* of the memory as it is: a CPU write still shows */
     if (!rc->pending) {
@@ -4568,7 +4621,7 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                 rc->bytes = pitch_aligned * height_aligned * (uint32_t)bpp;
                 int cw = x1 < rc->w ? x1 - x0 : rc->w - x0, ch = y1 < rc->h ? y1 - y0 : rc->h - y0;
                 if (cw > 0 && ch > 0)
-                    blit_tex(g, s->tex, rc->tex, x0, y0, cw, ch, x0, y0);
+                    blit_tex(g, s->tex, rc->tex, x0, y0, cw, ch, x0, y0, !x0 && !y0 && cw == rc->w && ch == rc->h);
                 copy_rehash(g, cp, rc);
                 rc->used = ++g->copy_clock;
                 rc->gen = ++g->copy_gen;
@@ -5211,6 +5264,7 @@ static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
     g->glDisable(GL_CULL_FACE);
     g->glDisable(GL_SCISSOR_TEST);
     g->glColorMask(1, 1, 1, 1);
+    tiler_discard(g, 1, 0); /* the triangle covers all of frame_tex (frame_texture: fw x fh) */
     g->glViewport(0, 0, fw * k, fh * k);
     g->glUseProgram(g->aprog);
     g->glActiveTexture(GL_TEXTURE0);
@@ -5304,7 +5358,7 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
     if (src) {
         frame_texture(g, fw, fh, src_fmt);
         if (src_fmt != GL_SRGB8_ALPHA8 || !frame_encode(g, src, fw, fh))
-            blit_tex(g, src, g->frame_tex, 0, 0, fw, fh, 0, 0);
+            blit_tex(g, src, g->frame_tex, 0, 0, fw, fh, 0, 0, 1);
         g->glBindTexture(GL_TEXTURE_2D, g->frame_tex);
         for (int c = 0; c < 4; c++) {
             uint32_t sel = (swizzle >> (3 * c)) & 7;
