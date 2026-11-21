@@ -38,6 +38,7 @@ restored on another device), so a Prepare builds it again, and so does x360_bind
 
 import errno
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -178,6 +179,52 @@ def plain(raw):
             raise NoKey(img.image_note or "encrypted")
         raise ValueError("XEX: %s" % img.image_note)
     return plain_xex(raw, img), img
+
+
+PLAIN_ID = "plain.json"     # next to plain.xex: the source XEX it was written from (sha256), and its own sha256
+
+
+def xex_code_digest():
+    """sha256 over tools/xex's Python: the code that turns a source XEX into plain bytes (plain_cached's key, not the
+    whole toolkit digest: an app update that changed no line there keeps the decrypted XEX)."""
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "xex")
+    h = hashlib.sha256()
+    for fn in sorted(os.listdir(d)):
+        if fn.endswith(".py") and not fn.startswith("test_"):
+            with open(os.path.join(d, fn), "rb") as f:
+                h.update(fn.encode() + b"\0" + f.read() + b"\0")
+    return h.hexdigest()
+
+
+def plain_cached(raw, path, writer):
+    """plain(raw), written to path, plus whether raw was encrypted: (plain bytes, parsed image, encrypted).
+
+    Decrypting is the step's whole cost (pure-Python AES: 15 MB of XEX takes 15-20 s on a desktop core, about three
+    times that on a phone) and every Prepare of the title did it again, the self-healing loop's included. So
+    path's sidecar (PLAIN_ID) names the source XEX it came from and the code that wrote it (writer:
+    xex_code_digest()): when both are the same and path still has the bytes the sidecar names, they are read back and
+    parsed (plain: no key, no AES) instead."""
+    src = hashlib.sha256(raw).hexdigest()
+    idp = os.path.join(os.path.dirname(path), PLAIN_ID)
+    try:
+        with open(idp) as f:
+            meta = json.load(f)
+        if meta.get("source_sha256") == src and meta.get("writer") == writer:
+            with open(path, "rb") as f:
+                data = f.read()
+            if hashlib.sha256(data).hexdigest() == meta.get("plain_sha256"):
+                _x360_tools()
+                from tools.xex.xex import parse_xex
+                img = parse_xex(data)
+                if img.image is not None:
+                    return data, img, bool(meta.get("encrypted"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    data, img = plain(raw)
+    gc._write_if_changed(path, data)
+    pack.write_json_atomic(idp, {"source_sha256": src, "writer": writer,
+                                 "plain_sha256": hashlib.sha256(data).hexdigest(), "encrypted": bool(img.encryption)})
+    return data, img, bool(img.encryption)
 
 
 # ── The title image (cover art) ─────────────────────────────────
@@ -413,9 +460,6 @@ class Run(gc.Run):
             key = title_key(raw)
             if not key:
                 raise ValueError("the XEX has no execution info: no title key")
-            data, img = plain(raw)
-        except NoKey as e:
-            raise cc.StepError("NO_KEY", "%s: %s" % (os.path.basename(self.source), e))
         except (FileNotFoundError, PermissionError) as e:
             raise cc.StepError("NO_DISC", "%s: %s" % (self.source, e.strerror or e))
         except (OSError, ValueError) as e:
@@ -424,7 +468,6 @@ class Run(gc.Run):
         base = os.path.basename(self.source)
         self.title = os.path.splitext(base)[0] or base
         self.name = "%s-%s" % (CONSOLE, self.key)
-        self.rom_sha = hashlib.sha256(data).hexdigest()
         self.boot = PACK_XEX
         self.work = os.path.abspath(a.work or os.path.join(gba.data_home(), "work", self.name))
         self.packs = os.path.abspath(a.pack_dir or os.path.join(gba.data_home(), "packs"))
@@ -435,14 +478,22 @@ class Run(gc.Run):
         self.log = os.path.join(self.work, "prepare.log")
         self.stamp_path = os.path.join(self.work, "stamp.json")
         self.rom = os.path.join(self.work, XEX_COPY)
-        gc._write_if_changed(self.rom, data)
+        from tools.prepare import toolkit
+        from tools.xex import aes
+        self.toolkit_sha = toolkit.digest()
+        aes.PYTHON = self.py               # a large image is decrypted in parts by this interpreter (tools/xex/aes.py)
+        try:
+            data, img, encrypted = plain_cached(raw, self.rom, xex_code_digest())
+        except NoKey as e:
+            raise cc.StepError("NO_KEY", "%s: %s" % (os.path.basename(self.source), e))
+        except (OSError, ValueError) as e:
+            raise cc.StepError("BAD_DISC", "%s: %s" % (self.source, getattr(e, "strerror", None) or e))
+        self.rom_sha = hashlib.sha256(data).hexdigest()
         cover = title_image(img)          # the cover art the app shows (CoverArt.load: <pack>/cover.png)
         if cover:
             gc._write_if_changed(os.path.join(self.work, COVER), cover)
         self.rels, self.rels_sha = [], ""
-        from tools.prepare import toolkit
         self.toolkit = self.m.toolkit_version()
-        self.toolkit_sha = toolkit.digest()
         self.stamp = {} if a.force else self.m.read_stamp(self.stamp_path)
         if self.stamp.get("source") != self.rom_sha or self.stamp.get("toolkit_sha256") != self.toolkit_sha:
             self.stamp = {}
@@ -453,7 +504,7 @@ class Run(gc.Run):
         self.steps.skipped = [k for k in ("lift", "link") if self.stamp.get(k)]
         self.rep.progress(1, 100, "%s (Xbox 360, key %s, image %d KB, %s)"
                           % (self.title, self.key, img.image_size // 1024,
-                             "encrypted, opened with your key" if img.encryption else "not encrypted"))
+                             "encrypted, opened with your key" if encrypted else "not encrypted"))
 
     def analyse(self):
         seeds = os.path.join(self.work, SEEDS)

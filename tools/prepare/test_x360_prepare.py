@@ -86,6 +86,31 @@ def test_encrypted_needs_the_key(tmp_path, monkeypatch):
     assert x360.title_key(data) == x360.title_key(raw)      # the plain rewrite keeps the execution info
 
 
+def test_plain_cached(tmp_path, monkeypatch):
+    """The plain XEX is decrypted once per source and tools/xex code: later Prepares read plain.xex back (no key, no
+    AES) while its sidecar names this source, this code and the bytes plain.xex still has."""
+    raw = hello("normal", KEY)
+    (tmp_path / "k.key").write_bytes(KEY)
+    monkeypatch.setenv("XEX_KEY_FILE", str(tmp_path / "k.key"))
+    out = str(tmp_path / "plain.xex")
+    data, img, enc = x360.plain_cached(raw, out, "tk1")
+    assert enc and open(out, "rb").read() == data
+    calls = []
+    real = x360.plain
+    monkeypatch.setattr(x360, "plain", lambda r: calls.append(1) or real(r))
+    monkeypatch.delenv("XEX_KEY_FILE")              # the cache needs no key
+    d2, img2, enc2 = x360.plain_cached(raw, out, "tk1")
+    assert (d2, enc2, calls) == (data, True, []) and img2.image == img.image and img2.resources == img.resources
+    monkeypatch.setenv("XEX_KEY_FILE", str(tmp_path / "k.key"))
+    assert x360.plain_cached(raw, out, "tk2")[0] == data and calls == [1]       # other tools/xex: decrypted again
+    with open(out, "r+b") as f:                     # plain.xex changed behind the sidecar's back: decrypted again
+        f.seek(len(data) - 1)
+        f.write(bytes([data[-1] ^ 1]))
+    assert x360.plain_cached(raw, out, "tk2")[0] == data and calls == [1, 1]
+    other = hello("none", None)                     # another source XEX
+    assert x360.plain_cached(other, out, "tk2")[0] == real(other)[0] and calls == [1, 1, 1]
+
+
 def test_disc_image(tmp_path):
     raw = hello("none", None)
     d = make_disc(tmp_path, raw)
