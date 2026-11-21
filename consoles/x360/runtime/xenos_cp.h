@@ -97,6 +97,9 @@ typedef struct xenos_cp {
      * readable at any physical address; the renderer then reads textures, vertices and hashes there directly rather
      * than through read32 a dword at a time (x360_gpu.c: the 0xA0000000 view, mapped whole) */
     const uint8_t *mem;
+    /* optional: the same memory, writable (the same pointer as mem where the runtime gives both). Resolves then store
+     * their texels there directly rather than a dword at a time through write32 (xenos_gl.c: gpu_store). */
+    uint8_t *wmem;
     /* a renderer (xenos_gl.c): each draw initiator and each swap, with the state as it stands (optional) */
     void *render_ctx;
     void (*draw_hook)(void *render_ctx, const struct xenos_cp *cp, const xenos_draw *d);

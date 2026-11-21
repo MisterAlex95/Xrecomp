@@ -71,6 +71,14 @@ endif()
 add_test(NAME xenos_texture_hash COMMAND xenos_texture_hash_test)
 set_tests_properties(xenos_texture_hash PROPERTIES TIMEOUT 120)
 
+add_executable(xenos_resolve_write_test xenos_resolve_write_test.c)
+target_link_libraries(xenos_resolve_write_test PRIVATE x360_core)
+if(NOT APPLE) # ld64 takes the test's own xenos_gl.c definitions and never loads the archive's copy
+    target_link_options(xenos_resolve_write_test PRIVATE -Wl,--allow-multiple-definition)
+endif()
+add_test(NAME xenos_resolve_write COMMAND xenos_resolve_write_test)
+set_tests_properties(xenos_resolve_write PROPERTIES TIMEOUT 120)
+
 add_executable(xenos_texel_bounds_test xenos_texel_bounds_test.c)
 target_link_libraries(xenos_texel_bounds_test PRIVATE x360_core)
 if(NOT APPLE) # ld64 takes the test's own xenos_gl.c definitions and never loads the archive's copy
