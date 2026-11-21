@@ -123,6 +123,7 @@ static int f_inf(uint32_t u) { return (u & 0x7FFFFFFFu) == 0x7F800000u; }
 static int f_zero(uint32_t u) { return (u & 0x7FFFFFFFu) == 0; }
 static int f_big(uint32_t u) { return ((u >> 23) & 0xFF) >= 127 + 60 && !f_inf(u) && !f_nan(u); }
 
+#define XV_REF_FLOAT_DIGEST 0x6ACA0947u
 #define O_QNAN 0x7FC00000u /* AltiVec PEM 3.2.5.5: the NaN an operation makes */
 #define NOTNAN 1u /* the oracle's "no NaN here" (1 is not a NaN's bit pattern) */
 
@@ -349,8 +350,12 @@ static void float_checks(const xv_ref_set *F, const xv_ref_set *R, long *checks)
                     printf("FAIL %s (%s): %08X, want %08X\n", cases[i].what, s ? "plain C" : "fast", r.u32[k],
                            cases[i].want);
         }
-    fails += ffails;
     printf("x360_vmx_ref: float digest %08X\n", fdigest);
+    /* the digest of every host, compiler and -O level so far (run_vmx_ref_matrix.sh): another means a float helper
+     * depends on the build (or this test's draws changed: then the matrix again and the new value here) */
+    if (fdigest != XV_REF_FLOAT_DIGEST && ++ffails)
+        printf("FAIL float digest %08X, expected %08X\n", fdigest, XV_REF_FLOAT_DIGEST);
+    fails += ffails;
 }
 
 int main(void)

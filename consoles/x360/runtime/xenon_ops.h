@@ -343,7 +343,8 @@ static inline float xv_f(uint32_t u)
  * maps them; Xenia itself keeps the host's NaNs), i.e. precedence vA, vD, vB and vA, vB, vD. vmsum3fp128 /
  * vmsum4fp128 (no text either): our definition, the two-operand rule at each multiply and each add of
  * ((a0 b0 + a1 b1) + a2 b2) + a3 b3, which comes to the first NaN in a0, b0, a1, b1 ... unless a product makes one
- * first (inf * 0). */
+ * first (inf * 0). Not taken from Xenia: its dot products (x64 DOT_PRODUCT_V128, dpps) give the QNaN whenever the sum
+ * overflows, which nothing here can check against a console. */
 
 #define XV_QNAN 0x7FC00000u
 
