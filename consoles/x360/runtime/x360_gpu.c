@@ -53,6 +53,7 @@ typedef struct gpu_link {
     uint32_t taken;    /* run side: the number of the last post it ran to (post >> 32 when there is nothing to do) */
     uint32_t stalled;  /* run side: it stopped at an unmet wait; the post side posts again at its next poll */
     uint32_t irq;      /* run side sets, post side takes: LINK_IRQ_* */
+    uint64_t swaps;    /* run side: cp.swaps after its last run (the post side counts swaps where it sees them) */
 } gpu_link;
 
 struct x360_gpu {
@@ -66,6 +67,10 @@ struct x360_gpu {
     uint32_t irq_cpus;  /* the CPUs whose source 1 callback is still to run (PM4_INTERRUPT's mask) */
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
+    /* WP-19 (host state): swaps seen by x360_gpu_poll, those that came more than 20 ms of virtual time after the one
+     * before, and the virtual time of the last (0: none since the start or a state load). Post side (the virtual
+     * clock is the guest's): counted from link.swaps, swaps_seen being its value at the last poll. */
+    uint64_t host_swaps, long_swaps, last_swap_vt, swaps_seen;
     gpu_link link;  /* the seam */
     /* the thread the run half belongs to (the renderer's GL context): the one that attached the renderer, else the
      * first to run packets. x360_gpu_drain elsewhere (an app's menu or auto-save thread) leaves posted work posted. */
@@ -85,6 +90,8 @@ struct x360_gpu {
     uint64_t cp_ns;       /* wall time running the ring's packets (draws and resolves included): the perf line's gpu */
     uint64_t cp_cpu_ns;   /* the same span in the thread's CPU time (WP-15): the rest of cp_ns is waiting (the GPU) */
 };
+
+#define LONG_SWAP_100NS 200000u /* 20 ms */
 
 static uint64_t mono_ns(void)
 {
@@ -319,11 +326,13 @@ void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint
 void x360_render_perf_get(x360_machine *x, x360_render_perf *out)
 {
     memset(out, 0, sizeof *out);
+    out->guest_cpu_ns = x->perf.guest_cpu_ns, out->dispatches = x->perf.dispatches, out->turns = x->perf.turns;
     if (!x->gpu)
         return;
     out->gpu_ns = x->gpu->cp_ns;
     out->cpu_ns = x->gpu->cp_cpu_ns;
     out->swaps = x->gpu->cp.swaps;
+    out->guest_swaps = x->gpu->host_swaps, out->long_swaps = x->gpu->long_swaps;
     if (!x->gpu->gl)
         return;
     xenos_gl_stats s;
@@ -333,6 +342,8 @@ void x360_render_perf_get(x360_machine *x, x360_render_perf *out)
     out->vertices = s.vertices_fetched;
     out->noop_draws = s.noop_draws, out->rect_draws = s.rect_draws, out->passes = s.passes;
     out->hashed = s.hashed_bytes;
+    out->loads = s.loads, out->gpu_timer = s.gpu_timer;
+    out->gpu_time_ns = s.gpu_time_ns, out->gpu_time_frames = s.gpu_time_frames;
 }
 
 int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
@@ -348,6 +359,22 @@ int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf 
                     (double)D(read_ns) * ms, (double)D(write_ns) * ms, (double)(draws > noop ? draws - noop : 0) * k,
                     (double)noop * k, (double)D(rect_draws) * k, (double)D(passes) * k, (double)D(resolves) * k,
                     (double)D(pixels) * k / 1e6, (double)D(vertices) * k / 1e3, (double)D(hashed) * k / 1e6, unit);
+#undef D
+}
+
+int x360_render_perf_format_guest(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
+                                  double seconds, const char *unit, char *out, size_t n)
+{
+#define D(f) (now->f >= since->f ? now->f - since->f : 0)
+    double k = frames ? 1.0 / (double)frames : 0.0;
+    char gt[32] = "n/a";
+    if (now->gpu_timer && D(gpu_time_frames))
+        snprintf(gt, sizeof gt, "%.1f ms", (double)D(gpu_time_ns) / (double)D(gpu_time_frames) / 1e6);
+    return snprintf(out, n, "guest %.1f ms (%.0f k dispatches, %.0f turns), swaps %.1f/s (%llu > 20 ms), gpu-time %s, "
+                    "loads %.1f per %s",
+                    (double)D(guest_cpu_ns) * k / 1e6, (double)D(dispatches) * k / 1e3, (double)D(turns) * k,
+                    seconds > 0 ? (double)D(guest_swaps) / seconds : 0.0, (unsigned long long)D(long_swaps), gt,
+                    (double)D(loads) * k, unit);
 #undef D
 }
 
@@ -513,6 +540,8 @@ static void link_sync(struct x360_gpu *g, int loaded)
     uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
     uint32_t seq = (uint32_t)(post >> 32), size_dw = g->cp.rb_size / 4;
     __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
+    __atomic_store_n(&g->link.swaps, g->cp.swaps, __ATOMIC_RELAXED); /* a load sets cp.swaps: not swaps seen */
+    g->swaps_seen = g->cp.swaps;
     if (loaded && g->ring && size_dw && g->cp.wptr != g->last_wptr % size_dw)
         __atomic_store_n(&g->link.post, (uint64_t)(seq + 1) << 32 | g->last_wptr, __ATOMIC_RELEASE);
     else
@@ -539,6 +568,7 @@ int x360_gpu_run(x360_machine *x)
     g->cp_ns += mono_ns() - t0;
     g->cp_cpu_ns += thread_cpu_ns() - c0;
     __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
+    __atomic_store_n(&g->link.swaps, g->cp.swaps, __ATOMIC_RELAXED);
     __atomic_store_n(&g->link.taken, (uint32_t)(post >> 32), __ATOMIC_RELEASE); /* drain waits on this one */
     return 1;
 }
@@ -568,6 +598,14 @@ static void gpu_post(x360_machine *x, struct x360_gpu *g, uint64_t now)
 /* Post half, second part: the run half's interrupts, then the vertical blank, then raise_irq for what is queued */
 static void gpu_post_irq(x360_machine *x, struct x360_gpu *g, uint64_t now)
 {
+    uint64_t sw = __atomic_load_n(&g->link.swaps, __ATOMIC_RELAXED);
+    if (sw != g->swaps_seen) { /* the clock does not move inside the ring: one swap time for all of them */
+        g->host_swaps += sw - g->swaps_seen;
+        if (g->last_swap_vt && now - g->last_swap_vt > LONG_SWAP_100NS)
+            g->long_swaps++;
+        g->last_swap_vt = now;
+        g->swaps_seen = sw;
+    }
     gpu_take_irq(g);
     if (g->irq_callback && now >= g->next_vblank) {
         g->next_vblank = now + VBLANK_100NS - (now - g->next_vblank) % VBLANK_100NS;
@@ -646,6 +684,8 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
     xenos_cp *cp = &g->cp;
     /* no gpu_hold: x360_state_save / state_load drained at their start (where a drain can run); a drain here, between
      * sections, would run posted work against a half-loaded machine */
+    if (load)
+        g->last_swap_vt = 0; /* the clock jumps: the next swap's interval is not one */
     for (uint32_t k = 0; k < XENOS_REGS; k++)
         u32(s, &cp->regs[k]);
     u32(s, &cp->rb_base);

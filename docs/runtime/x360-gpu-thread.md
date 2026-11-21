@@ -84,6 +84,7 @@ or the guest side touched run-half state, and how it goes now.
 | `x360_state_save` / `state_load` | MEM must hold the run half's stores | | `x360_gpu_drain(x, 0)` at entry (rewind uses the same calls) |
 | `x360_render_flush` (`state_save_op` on the machine thread, `x360_run --save-state`) | lazy resolves into memory | GL | `x360_gpu_drain(x, 1)`: nothing on a thread other than the run half's |
 | `x360_render_reset` (end of a state load) | renderer starts over | GL | already a flag (`reset_pending`) the renderer acts on at its next draw / swap / flush |
+| WP-19 swap counters (`host_swaps`, `long_swaps`, `last_swap_vt`) | swaps per second and swaps > 20 ms of virtual time | post state | the run half publishes `cp.swaps` in `link.swaps`; the post side counts the difference at its poll with the guest's clock (stage 1: the same poll as before); a load resets `last_swap_vt` and re-bases the count (`link_sync`) |
 | `x360_gpu_stats`, `x360_render_perf_get`, `x360_gpu_opcode_histogram` | counters | run state read | read as they stand (racy in stage 2: make them relaxed atomics, or read after a drain) |
 
 Nothing in the run half reads `x360_now`, a guest thread, or the kernel. The renderer's own GL entry points called by

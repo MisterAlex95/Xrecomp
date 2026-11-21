@@ -255,6 +255,12 @@ struct x360_machine {
     FILE *dbg, *log;
     int verbose;
     x360_stats st;
+    /* WP-19, the perf line's guest figures, running totals (host state: not in save states; the cooperative mode
+     * only): lifted functions entered by the dispatcher (run_thread), scheduler turns (a thread run until its slice
+     * ends, it blocks or it ends), and the thread CPU time of those turns (lifted code, HLE calls, the interpreter) */
+    struct {
+        uint64_t dispatches, turns, guest_cpu_ns;
+    } perf;
     x360_hle_fn hle[2][4096]; /* every export with an HLE, by library and ordinal (x360_kernel_init; not state) */
     x360_kobj kobj;
     uint8_t hle_lib;          /* the export being answered (x360_hle_refused) */

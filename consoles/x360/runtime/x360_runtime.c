@@ -451,6 +451,7 @@ static void stage(const char *what)
 typedef struct gpu_perf {
     x360_machine *x;
     x360_render_perf line, run; /* the totals when the line's window and the run started */
+    char guest[256];            /* WP-19: the second line of the same window ("x360: perf2 ...", logged after it) */
 } gpu_perf;
 
 static void gpu_perf_extra(void *ctx, const struct host_perf_figures *f, int run, char *out, size_t n)
@@ -458,7 +459,9 @@ static void gpu_perf_extra(void *ctx, const struct host_perf_figures *f, int run
     gpu_perf *gp = ctx;
     x360_render_perf now;
     x360_render_perf_get(gp->x, &now);
-    x360_render_perf_format(&now, run ? &gp->run : &gp->line, f->guest_frames, "frame", out, n);
+    const x360_render_perf *since = run ? &gp->run : &gp->line;
+    x360_render_perf_format(&now, since, f->guest_frames, "frame", out, n);
+    x360_render_perf_format_guest(&now, since, f->guest_frames, f->seconds, "frame", gp->guest, sizeof gp->guest);
     if (!run)
         gp->line = now;
 }
@@ -764,7 +767,8 @@ int x360_runtime_run(const x360_runtime_opts *o)
             host_perf_stage(&hp, ST_PRESENT, now_ns() - tp);
             host_perf_shown(&hp, 1);
         }
-        host_perf_log_due(&hp, now_ns());
+        if (host_perf_log_due(&hp, now_ns()))
+            printf("x360: perf2 %s\n", gp.guest), fflush(stdout);
         if (stopped || (o->frames && frames >= o->frames))
             break;
         recomp_perf_hint_frame((int64_t)(now_ns() - work_t0), (int64_t)FRAME_NS);
@@ -790,6 +794,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
 
     recomp_perf_hint_end();
     host_perf_log_run(&hp, now_ns(), NULL);
+    printf("x360: perf2 over the run: %s\n", gp.guest), fflush(stdout);
     recomp_states_detach();
     recomp_ff_hold(0);
     recomp_rewinder_free(&rw);
