@@ -37,6 +37,8 @@
  *   frames 21-23: a linear 4x4 cube texture (one colour per face, faces 4 KB apart) sampled through tfetchCube's
  *            (S, T, face) coordinates at the centres of faces 4 (+Z: cyan) and 1 (-X: green), and a linear 4x4x4
  *            3D texture (one colour per slice) at depth 0.625 (slice 2: blue).
+ * Then WP-26's window offset (a picture drawn and resolved as two tiles: scissor and resolve rectangle moved, the
+ * right tile resolved into the left one's picture), eagerly and with lazy resolves.
  * At the end (renderers of their own): WP-2's lazy resolves; WP-10's rectangle lists, 20 in one list (two passes of
  * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
@@ -210,6 +212,99 @@ static const uint8_t *px(xenos_gl *g, int x, int y)
     int w, h;
     const uint8_t *f = xenos_gl_frame(g, &w, &h);
     return f + 4 * ((size_t)y * w + x);
+}
+
+/* a screen-space quad (VTE off: positions are pixels) from (x0, y0) to (x1, y1) of one colour at z, vertices at `at`,
+ * drawn with the colour pixel shader (ps) as a strip */
+static void screen_quad(uint32_t at, float x0, float y0, float x1, float y1, float z, float r, float g, float b,
+                        const uint32_t *ps, uint32_t nps)
+{
+    static uint32_t im[2 + 1024];
+    vertex_z(at, x0, y0, z, r, g, b), vertex_z(at + 32, x1, y0, z, r, g, b);
+    vertex_z(at + 64, x0, y1, z, r, g, b), vertex_z(at + 96, x1, y1, z, r, g, b);
+    im[0] = 1, im[1] = nps;
+    memcpy(im + 2, ps, 4 * nps);
+    type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);
+    reg(0x4800, at | 3u), reg(0x4801, 2u | (32u << 2));
+    uint32_t strip = 6u | 2u << 6 | 4u << 16;
+    type3(PM4_DRAW_INDX_2, &strip, 1);
+}
+
+/* a resolve of render target 0's rectangle (x0, y0)-(x1, y1) to a tiled 8_8_8_8 at dst (pitch 64, 64 rows), no clear;
+ * its three corners at `at` */
+static void resolve_rect(uint32_t at, float x0, float y0, float x1, float y1, uint32_t dst)
+{
+    const float v[6] = {x0, y0, x1, y0, x1, y1};
+    for (int i = 0; i < 6; i++)
+        w32(at + 4 * (uint32_t)i, fbits(v[i]));
+    reg(0x4800, at | 3u), reg(0x4801, 2u | (6u << 2));
+    reg(0x2208, 6), reg(0x2318, 0), reg(0x2319, dst), reg(0x231A, 64u | 64u << 16), reg(0x231B, 2u | 6u << 7);
+    uint32_t rect = 8u | 2u << 6 | 3u << 16;
+    type3(PM4_DRAW_INDX_2, &rect, 1);
+    reg(0x2208, 4);
+}
+
+/* WP-26, PA_SC_WINDOW_OFFSET: a 64-wide picture drawn as two 32-wide tiles on one surface (pitch 32, tile 0), the way
+ * a 1080p title draws 1920 as 2 x 960. Left tile: green over everything, resolved (0,0)-(32,64) to dst. Right tile:
+ * the window offset -32 (PA_SU_SC_MODE_CNTL bit 16 on), the window scissor 40..64 (in window coordinates: 8..32 on the
+ * surface), a red quad over all the window; resolved from (32,0)-(64,64) (window coordinates) into dst + one
+ * 32x32 block (Direct3D moves the base by the left tile's blocks). Memory: x 0..39 green, 40..63 red. Lazy: both
+ * resolves into dst's one host picture (one pending rectangle: written once). */
+static void window_offset_tiles(xenos_gl *g, xenos_cp *cp, const uint32_t *ps, uint32_t nps, int lazy)
+{
+    enum { DST = 0xE4000, VQ = 0xE8000, RQ = 0xE8800 };
+    for (uint32_t i = 0; i < 64 * 64 * 4; i += 4)
+        w32(DST + i, 0xABABABABu);
+    xenos_gl_stats s0, s1;
+    xenos_gl_get_stats(g, &s0);
+    for (uint32_t i = 0; i < 4; i++)
+        reg(0x4400 + i, fbits(1.0f));
+    reg(0x2104, 0xFFFFu), reg(0x2201, 0x00010001u), reg(0x2200, 0), reg(0x2206, 0), reg(0x2208, 4);
+    reg(0x2000, 32u), reg(0x2001, 0), reg(0x2002, 0x200u);
+    reg(0x2205, 1u << 16), reg(0x2080, 0);
+    reg(0x2081, 0), reg(0x2082, 32u | 64u << 16);
+    screen_quad(VQ, -8, -8, 72, 72, 0.5f, 0, 1, 0, ps, nps);
+    resolve_rect(RQ, 0, 0, 32, 64, DST);
+    reg(0x2080, 0x7FE0u);                               /* x -32 */
+    reg(0x2081, 40u), reg(0x2082, 64u | 64u << 16);
+    screen_quad(VQ + 0x100, -8, -8, 72, 72, 0.5f, 1, 0, 0, ps, nps);
+    resolve_rect(RQ + 0x40, 32, 0, 64, 64, DST + 32 * 32 * 4);
+    reg(0x2080, 0), reg(0x2205, 0), reg(0x2081, 0), reg(0x2082, 0);
+    reg(0x2000, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2206, 0x3Fu);
+    run(cp);
+    xenos_gl_get_stats(g, &s1);
+    const char *mode = lazy ? "lazy" : "eager";
+    CHECK(s1.unsupported == s0.unsupported && s1.resolves == s0.resolves + 2,
+          "window offset tiles (%s): resolves +%llu (want 2), unsupported +%llu (want 0)", mode,
+          (unsigned long long)(s1.resolves - s0.resolves), (unsigned long long)(s1.unsupported - s0.unsupported));
+    if (lazy) {
+        CHECK(s1.resolves_deferred == s0.resolves_deferred + 2 &&
+                  rd32(NULL, DST + tiled_off_pitch(50, 10, 64, 2)) == 0xABABABABu,
+              "window offset tiles (lazy): deferred +%llu (want 2), memory %08X (want ABABABAB)",
+              (unsigned long long)(s1.resolves_deferred - s0.resolves_deferred),
+              rd32(NULL, DST + tiled_off_pitch(50, 10, 64, 2)));
+        xenos_gl_flush_resolves(g, cp);
+        xenos_gl_get_stats(g, &s1);
+        CHECK(s1.resolve_flushes == s0.resolve_flushes + 1,
+              "window offset tiles (lazy): written %llu times, want once (the two tiles one rectangle)",
+              (unsigned long long)(s1.resolve_flushes - s0.resolve_flushes));
+    }
+    static const struct {
+        int x, y;
+        uint32_t want;
+        const char *what;
+    } at[6] = {
+        {1, 1, 0xFF00FF00u, "left tile: green"},
+        {31, 63, 0xFF00FF00u, "left tile's last column: green"},
+        {32, 5, 0xFF00FF00u, "right tile, left of its scissor: green (the left tile's quad)"},
+        {39, 40, 0xFF00FF00u, "right tile, the scissor's edge - 1: green"},
+        {40, 40, 0xFF0000FFu, "right tile, in the scissor moved by the window offset: red"},
+        {63, 63, 0xFF0000FFu, "right tile's last pixel: red"},
+    };
+    for (int i = 0; i < 6; i++) {
+        uint32_t t = rd32(NULL, DST + tiled_off_pitch(at[i].x, at[i].y, 64, 2));
+        CHECK(t == at[i].want, "window offset tiles (%s), %s: %08X, want %08X", mode, at[i].what, t, at[i].want);
+    }
 }
 
 int main(int argc, char **argv)
@@ -2057,6 +2152,7 @@ int main(int argc, char **argv)
         reg(0x2206, 0x3Fu), reg(0x2082, 0), reg(0x2001, 0), reg(0x2002, 0), reg(0x2000, 0);
         run(&cp);
     }
+    window_offset_tiles(g, &cp, ps, nps, 0);
     xenos_gl_destroy(g);
 
     /* WP-2, lazy resolves (RECOMP_X360_RESOLVE=lazy), on a renderer of their own: a resolve leaves memory as it was
@@ -2196,6 +2292,7 @@ int main(int argc, char **argv)
         #undef LAZY_RESOLVE
         #undef LAZY_SAMPLE
         #undef LAZY_AT
+        window_offset_tiles(g, &cp, ps, nps, 1);
         xenos_gl_destroy(g);
     }
     /* WP-10, rectangle lists on the GPU (the capture read as a uniform block, 16 rectangles a pass) and with

@@ -2699,7 +2699,7 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
     int polygonal = (prim_type >= 4 && prim_type <= 7) || (prim_type >= 13 && prim_type <= 15);
     uint32_t in_offset[6] = {cp->regs[0x2205] & 0x3803u, cp->regs[0x2380], cp->regs[0x2381], cp->regs[0x2382],
                              cp->regs[0x2383], (uint32_t)polygonal};
-    uint32_t in_scissor[5] = {cp->regs[0x2081], cp->regs[0x2082], (uint32_t)g->tw, (uint32_t)g->th, 0};
+    uint32_t in_scissor[5] = {cp->regs[0x2081], cp->regs[0x2082], (uint32_t)g->tw, (uint32_t)g->th, cp->regs[0x2080]};
     int do_blend = !valid || memcmp(in_blend, g->gs_blend, sizeof in_blend);
     int do_depth = !valid || memcmp(in_depth, g->gs_depth, sizeof in_depth);
     int do_cull = !valid || (cp->regs[0x2205] & 7) != g->gs_cull;
@@ -2813,6 +2813,21 @@ static void apply_scissor(xenos_gl *g, const xenos_cp *cp)
     uint32_t tl = cp->regs[0x2081], br = cp->regs[0x2082];
     int x0 = (int)(tl & 0x7FFF), y0 = (int)((tl >> 16) & 0x7FFF);
     int x1 = (int)(br & 0x7FFF), y1 = (int)((br >> 16) & 0x7FFF);
+    if (br && !(tl >> 31) && cp->regs[0x2080]) {
+        /* WP-26: PA_SC_WINDOW_OFFSET moves the window scissor unless PA_SC_WINDOW_SCISSOR_TL's window_offset_disable
+         * (bit 31) is set (Xenia's GetScissor): a title drawing a 1920-wide picture as two 960-wide tiles gives the
+         * right tile's scissor as 960..1920 and the offset -960 */
+        int empty = !(x1 > x0 && y1 > y0);
+        uint32_t wo = cp->regs[0x2080];
+        int wx = (int32_t)(wo << 17) >> 17, wy = (int32_t)(wo << 1) >> 17;
+        x0 += wx, x1 += wx, y0 += wy, y1 += wy;
+        x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
+        if (!empty && !(x1 > x0 && y1 > y0)) { /* moved off the target: nothing is drawn */
+            g->glEnable(GL_SCISSOR_TEST);
+            g->glScissor(0, 0, 0, 0);
+            return;
+        }
+    }
     if (br && (x0 > 0 || y0 > 0 || x1 < g->tw || y1 < g->th) && x1 > x0 && y1 > y0) {
         int s = g->scale;
         g->glEnable(GL_SCISSOR_TEST);
@@ -4475,19 +4490,55 @@ static int copy_rows(uint32_t given, int y1, uint32_t height_aligned)
     return (int)(given && th < height_aligned ? th : height_aligned);
 }
 
+/* WP-26: a resolve destination whose base lies inside the memory of a live copy of the same pitch, format, endian
+ * mode and red / blue order, whole 32x32 blocks in (Direct3D resolving the right half of a two-tile picture moves the
+ * base by the blocks of the left half): that copy, the rectangle (*dx, *dy) further in. Tiled 2D addresses are linear
+ * in whole blocks, so it is the same memory. NULL when there is none or the rectangle would not fit its picture. */
+static rt_copy *copy_holding(xenos_gl *g, const xenos_cp *cp, const surface *s, uint32_t base, uint32_t pitch_aligned,
+                             uint32_t fmt, uint32_t endian, int swap_rb, int bpp, int x1, int y1, int *dx, int *dy)
+{
+    uint32_t blk = 32u * 32u * (uint32_t)bpp, per = pitch_aligned / 32;
+    if (!bpp || !per)
+        return NULL;
+    for (int i = 0; i < MAX_COPIES; i++) {
+        rt_copy *c = &g->copies[i];
+        if (!c->tex || c->base >= base || base >= c->base + c->bytes || c->w != (int)pitch_aligned ||
+            c->ifmt != s->ifmt || c->fmt != fmt || c->endian != endian || c->swap_rb != swap_rb ||
+            (base - c->base) % blk)
+            continue;
+        uint32_t nb = (base - c->base) / blk;
+        int ox = (int)(nb % per) * 32, oy = (int)(nb / per) * 32;
+        if (x1 + ox > c->w || y1 + oy > c->th)
+            return NULL;
+        if (copy_at(g, cp, c->base) != c) /* the CPU wrote its memory since: dropped */
+            return NULL;
+        *dx = ox, *dy = oy;
+        return c;
+    }
+    return NULL;
+}
+
 /* A colour resolve the lazy way, into its copy only; 0 when it cannot be (no host picture for it, or the rectangle
- * goes past the destination): the caller resolves it eagerly. */
+ * goes past the destination): the caller resolves it eagerly. into (WP-26): the copy holding the destination
+ * (copy_holding), the guest rectangle (dx, dy) further in there. */
 static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint32_t base, uint32_t pitch_aligned,
                         uint32_t height, uint32_t fmt, uint32_t endian, int swap_rb, int bias, int bpp, int x0, int y0,
-                        int x1, int y1)
+                        int x1, int y1, rt_copy *into, int dx, int dy)
 {
     if (s->kind == 2 || (base & 0xFFF) || bias)
         return 0;
+    int sx0 = x0, sy0 = y0; /* the source rectangle's corner; from here x0..y1 are the destination's */
+    if (into) {
+        base = into->base;
+        x0 += dx, x1 += dx, y0 += dy, y1 += dy;
+    }
     uint32_t given = height;
     if (!height)
         height = (uint32_t)y1;
     uint32_t height_aligned = (height + 31) & ~31u, bytes = pitch_aligned * height_aligned * (uint32_t)bpp;
     int th = copy_rows(given, y1, height_aligned);
+    if (into) /* its picture as it is (the registers give the moved destination's height) */
+        height_aligned = (uint32_t)into->h, bytes = into->bytes, th = into->th;
     if ((uint32_t)x1 > pitch_aligned || (uint32_t)y1 > height_aligned)
         return 0;
     /* other copies over this memory: their pending pixels go under ours first, then the copies go (an eager resolve
@@ -4532,13 +4583,20 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
          * one (the picture there is what memory would have), else the old one is written now */
         int holds_old = x0 <= rc->px0 && y0 <= rc->py0 && x1 >= rc->px1 && y1 >= rc->py1;
         int in_old = rc->px0 <= x0 && rc->py0 <= y0 && rc->px1 >= x1 && rc->py1 >= y1;
+        /* WP-26: or two that share an edge whole (the two tiles of one picture): the one rectangle they make */
+        int beside = rc->py0 == y0 && rc->py1 == y1 && (rc->px1 == x0 || rc->px0 == x1);
+        int below = rc->px0 == x0 && rc->px1 == x1 && (rc->py1 == y0 || rc->py0 == y1);
         if (holds_old)
             rc->px0 = x0, rc->py0 = y0, rc->px1 = x1, rc->py1 = y1;
+        else if (beside)
+            rc->px0 = x0 < rc->px0 ? x0 : rc->px0, rc->px1 = x1 > rc->px1 ? x1 : rc->px1;
+        else if (below)
+            rc->py0 = y0 < rc->py0 ? y0 : rc->py0, rc->py1 = y1 > rc->py1 ? y1 : rc->py1;
         else if (!in_old)
             flush_copy(g, cp, rc);
     }
     frame_detach(g, rc); /* the swap's picture stays the swap's */
-    blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0, !x0 && !y0 && x1 == rc->w && y1 == rc->th);
+    blit_tex(g, s->tex, rc->tex, sx0, sy0, x1 - x0, y1 - y0, x0, y0, !x0 && !y0 && x1 == rc->w && y1 == rc->th);
     if (fresh)
         copy_rehash(g, cp, rc); /* of the memory as it is: a CPU write still shows */
     if (!rc->pending) {
@@ -5248,6 +5306,14 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
     surface *s = &g->surf[si];
     pclear_flush(g, s); /* WP-17: an earlier resolve's clear, before the copy reads the picture */
     surface_flush(g, s); /* multisampled: the samples averaged into the picture the copy reads */
+    if ((cp->regs[0x2205] >> 16) & 1) {
+        /* WP-26: the rectangle is in window coordinates: PA_SC_WINDOW_OFFSET moves it onto the surface, as it moves
+         * the vertices (Xenia's GetResolveInfo). The destination stays where the registers put it: the right tile of
+         * a two-tile picture is resolved from 960..1920 with the offset -960, into a base already moved by 960 px */
+        uint32_t wo = cp->regs[0x2080];
+        int wx = (int32_t)(wo << 17) >> 17, wy = (int32_t)(wo << 1) >> 17;
+        x0 += wx, x1 += wx, y0 += wy, y1 += wy;
+    }
     x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
     x1 = x1 > s->w ? s->w : x1, y1 = y1 > s->h ? s->h : y1;
     if (x1 <= x0 || y1 <= y0) {
@@ -5263,8 +5329,12 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
         uint32_t pitch_aligned = (pitch + 31) & ~31u;
         int bpp = dest_bytes(fmt);
         int writable = bpp && endian < 4 && cp->write32 && cp->read32;
+        int dx = 0, dy = 0; /* WP-26: the copy holding the destination, the rectangle (dx, dy) further in there */
+        rt_copy *into = writable && s->kind != 2 && !(base & 0xFFF) && !bias
+                            ? copy_holding(g, cp, s, base, pitch_aligned, fmt, endian, (int)swap_rb, bpp, x1, y1, &dx, &dy)
+                            : NULL;
         if (writable && g->lazy && resolve_lazy(g, cp, s, base, pitch_aligned, height, fmt, endian, (int)swap_rb, bias,
-                                                bpp, x0, y0, x1, y1))
+                                                bpp, x0, y0, x1, y1, into, dx, dy))
             goto cleared;
         if (writable && g->npending) { /* written over: what is pending under it first */
             uint32_t h = height ? height : (uint32_t)y1;
@@ -5293,6 +5363,17 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                 height = (uint32_t)y1;
             uint32_t height_aligned = (height + 31) & ~31u;
             int th = copy_rows(given, y1, height_aligned);
+            if (into && into->tex) {
+                /* WP-26: the picture of the copy holding the destination takes the rectangle where it lies in it
+                 * (memory was written above at the destination's own base: the same bytes) */
+                frame_detach(g, into);
+                blit_tex(g, s->tex, into->tex, x0, y0, x1 - x0, y1 - y0, x0 + dx, y0 + dy, 0);
+                copy_rehash(g, cp, into);
+                into->used = ++g->copy_clock;
+                into->gen = ++g->copy_gen;
+                into->frame = g->swaps;
+                goto cleared;
+            }
             rt_copy *rc = NULL, *victim = &g->copies[0];
             for (int i = 0; i < MAX_COPIES; i++) {
                 rt_copy *c = &g->copies[i];
