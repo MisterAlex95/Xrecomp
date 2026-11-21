@@ -4613,7 +4613,7 @@ static inline __attribute__((always_inline)) void direct_texel(int kind, const u
 /* WP-36: tiled2d(x, y) is tiled2d(x & ~31, y) ^ tiled2d(x & 31, 0) (each address bit comes from one bit of x or of y,
  * the pipe bits from an exclusive or of both, and a 32-texel tile row's x never reaches the tile number's bits), so a
  * row's addresses take one tiled2d per 32 texels and a table lookup (xenos_resolve_write_test checks the identity).
- * The 8_8_8_8 resolves of Warhammer (~8 Mpx a frame) wrote at ~2 ns a texel with a tiled2d per 16 bytes, ~1 ns now. */
+ * (A 1920 x 1080 8_8_8_8 write in xenos_resolve_write_test: 3.9 ms with a tiled2d per 16 bytes, 2.4 ms so.) */
 static inline uint32_t tiled2d_split(int32_t x, int32_t y, uint32_t pitch_blocks, unsigned bpb_log2)
 {
     return (uint32_t)tiled2d(x & ~31, y, pitch_blocks, bpb_log2) ^ (uint32_t)tiled2d(x & 31, 0, 32, bpb_log2);
@@ -4629,7 +4629,7 @@ static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp
     uint8_t *const wmem = cp->wmem;
     uint32_t in_tile[32]; /* tiled2d of x in a 32-texel tile row at y = 0: see tiled2d_split */
     for (int i = 0; i < 32; i++)
-        in_tile[i] = (uint32_t)tiled2d(i, 0, 32, bpp_log2);
+        in_tile[i] = tiled2d_split(i, 0, 32, bpp_log2);
     for (int y = 0; y < h; y++) {
         const uint8_t *sp = px + (size_t)y * w * stride;
         for (int x = 0; x < w;) {
@@ -4647,33 +4647,33 @@ static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp
                 x = xe;
                 continue;
             }
-            for (; x < xe; ) {
-            gx = x0 + x;
-            uint32_t a = (base + (tile ^ in_tile[gx & 31])) & 0x1FFFFFFFu;
-            int run = (int)(per - ((unsigned)gx & (per - 1)));
-            run = run < xe - x ? run : xe - x;
-            if (wmem && a + (uint32_t)run * bpp <= 0x20000000u) {
-                uint8_t *dp = wmem + a;
-                if (run == (int)per) { /* a whole 16 bytes: a loop of known length, unrolled */
-                    for (unsigned i = 0; i < per; i++)
-                        direct_texel(kind, sp + i * stride, swap_rb, endian, dp + i * bpp);
-                    sp += per * stride;
-                } else {
-                    for (int i = 0; i < run; i++, sp += stride, dp += bpp)
-                        direct_texel(kind, sp, swap_rb, endian, dp);
-                }
-            } else { /* through write32, or at the very end of physical memory */
-                for (int i = 0; i < run; i++, sp += stride) {
-                    uint8_t t[8];
-                    uint32_t v;
-                    direct_texel(kind, sp, swap_rb, endian, t);
-                    for (unsigned k = 0; k < bpp; k += 4) {
-                        memcpy(&v, t + k, 4);
-                        gpu_store(cp, a + (uint32_t)i * bpp + k, v);
+            while (x < xe) {
+                gx = x0 + x;
+                uint32_t a = (base + (tile ^ in_tile[gx & 31])) & 0x1FFFFFFFu;
+                int run = (int)(per - ((unsigned)gx & (per - 1)));
+                run = run < xe - x ? run : xe - x;
+                if (wmem && a + (uint32_t)run * bpp <= 0x20000000u) {
+                    uint8_t *dp = wmem + a;
+                    if (run == (int)per) { /* a whole 16 bytes: a loop of known length, unrolled */
+                        for (unsigned i = 0; i < per; i++)
+                            direct_texel(kind, sp + i * stride, swap_rb, endian, dp + i * bpp);
+                        sp += per * stride;
+                    } else {
+                        for (int i = 0; i < run; i++, sp += stride, dp += bpp)
+                            direct_texel(kind, sp, swap_rb, endian, dp);
+                    }
+                } else { /* through write32, or at the very end of physical memory */
+                    for (int i = 0; i < run; i++, sp += stride) {
+                        uint8_t t[8];
+                        uint32_t v;
+                        direct_texel(kind, sp, swap_rb, endian, t);
+                        for (unsigned k = 0; k < bpp; k += 4) {
+                            memcpy(&v, t + k, 4);
+                            gpu_store(cp, a + (uint32_t)i * bpp + k, v);
+                        }
                     }
                 }
-            }
-            x += run;
+                x += run;
             }
         }
     }
@@ -4706,7 +4706,7 @@ static void direct16_rows(const xenos_cp *cp, const resolve_dest *d, const uint8
     uint8_t *const wmem = cp->wmem;
     uint32_t in_tile[32]; /* the addresses by tile row, as direct_rows (tiled2d_split) */
     for (int i = 0; i < 32; i++)
-        in_tile[i] = (uint32_t)tiled2d(i, 0, 32, 1);
+        in_tile[i] = tiled2d_split(i, 0, 32, 1);
     for (int y = 0; y < h; y++) {
         const uint8_t *row = px + (size_t)y * w * 4;
         uint32_t tile = 0;
@@ -4799,7 +4799,7 @@ static inline __attribute__((always_inline)) void depth_rows(uint8_t *wmem, uint
 {
     uint32_t in_tile[32]; /* the addresses by tile row, as direct_rows (tiled2d_split) */
     for (int i = 0; i < 32; i++)
-        in_tile[i] = (uint32_t)tiled2d(i, 0, 32, 2);
+        in_tile[i] = tiled2d_split(i, 0, 32, 2);
     for (int y = 0; y < h; y++) {
         uint32_t tile = 0;
         for (int x = 0; x < w; x++) {
