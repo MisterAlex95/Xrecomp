@@ -3498,12 +3498,24 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
                     read_bytes(cp, level_addr + off, bw * tf->bytes, endian, row);
                     continue;
                 }
-                for (uint32_t bx = 0; bx < bw; bx++) {
-                    uint32_t off = dim == 2 ? (uint32_t)tiled3d((int32_t)(bx + ox), (int32_t)(by + oy), (int32_t)(z + oz),
-                                                                st.pitch_blocks, st.height_blocks, bpb_log2)
-                                            : z * st.stride + (uint32_t)tiled2d((int32_t)(bx + ox), (int32_t)(by + oy),
-                                                                                st.pitch_blocks, bpb_log2);
-                    read_bytes(cp, level_addr + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
+                if (dim == 2) {
+                    for (uint32_t bx = 0; bx < bw; bx++) {
+                        uint32_t off = (uint32_t)tiled3d((int32_t)(bx + ox), (int32_t)(by + oy), (int32_t)(z + oz),
+                                                         st.pitch_blocks, st.height_blocks, bpb_log2);
+                        read_bytes(cp, level_addr + off, tf->bytes, endian, row + (size_t)bx * tf->bytes);
+                    }
+                    continue;
+                }
+                /* WP-36: in a 2D-tiled row, 16 bytes of blocks from an aligned x lie together (8 one-byte blocks):
+                 * one address and one read per run of them, the bytes read_bytes gave block by block */
+                const uint32_t per = bpb_log2 ? 16u >> bpb_log2 : 8u;
+                for (uint32_t bx = 0; bx < bw;) {
+                    uint32_t gx = bx + ox, run = per - (gx & (per - 1));
+                    run = run < bw - bx ? run : bw - bx;
+                    uint32_t off = z * st.stride + (uint32_t)tiled2d((int32_t)gx, (int32_t)(by + oy), st.pitch_blocks,
+                                                                     bpb_log2);
+                    read_bytes(cp, level_addr + off, run * tf->bytes, endian, row + (size_t)bx * tf->bytes);
+                    bx += run;
                 }
             }
         if (!cp->mem)
