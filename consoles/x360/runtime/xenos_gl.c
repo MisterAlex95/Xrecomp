@@ -270,6 +270,7 @@ typedef struct texture {
     int used;
     uint32_t checked; /* the epoch its memory was last compared in */
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
+    int direct;       /* WP-18: tex is that copy's own texture (the fetch constant's size is the picture's), not ours */
     int swap_rb;      /* that copy's: red and blue are the other way round from the memory the fetch constant reads */
     int levels;       /* mip levels uploaded */
     int copy_w, copy_h; /* a copy's texture: its host size and internal format (kept for the next copy that fits) */
@@ -325,8 +326,11 @@ typedef struct rt_copy {
     uint64_t sparse;       /* WP-12: sparse_hash of the same bytes, what the check once per epoch compares */
     uint32_t checked;      /* the epoch the hash was last confirmed in */
     uint32_t checks;       /* sparse checks since the last full one (COPY_FULL_EVERY) */
-    GLuint tex;            /* the destination's pitch x height at the internal resolution, top row first */
-    int w, h;
+    GLuint tex;            /* the destination's pitch x th at the internal resolution, top row first */
+    int w, h;              /* pitch and height, both 32-aligned: the memory it stands for */
+    int th;                /* WP-18: the picture's rows: RB_COPY_DEST_PITCH's height (or what was resolved past it),
+                            * aligned only when that is unset, so that a texture of the destination's own size samples
+                            * the picture itself */
     GLenum ifmt;
     int swap_rb;           /* the resolve exchanged red and blue in memory; the picture has them as the surface did */
     uint32_t fmt, endian;  /* the destination's texture format and endian mode: how memory was written */
@@ -415,6 +419,13 @@ struct xenos_gl {
     unsigned swaps;           /* xenos_gl_swap calls (the age of a pending copy) */
     GLuint frame_tex;         /* the last swap's picture: a texture of frame_w x frame_h host pixels, top row first */
     int frame_w, frame_h;
+    /* WP-18: the last swap's picture is a resolve copy's own texture (1 + its index; 0: frame_tex), show_w x show_h
+     * host pixels with the frame's swizzle and filters set on it; taken into frame_tex (frame_detach) before that
+     * texture changes or is sampled with other parameters */
+    int frame_copy;
+    int show_w, show_h;
+    GLint frame_swz[4];       /* the swizzle last set on the frame's texture */
+    int copy_direct;          /* WP-18: copies sampled and shown in place (RECOMP_X360_COPY_TEXTURES=blit: not) */
     GLenum frame_fmt;         /* frame_tex's internal format */
     uint8_t *frame;
     char cache[512], frames[512];
@@ -838,6 +849,10 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     if (g->depth_untouched)
         fprintf(stderr, "xenos: draws that do not use depth leave the depth surface untouched "
                         "(RECOMP_X360_UNUSED_DEPTH=untouched)\n");
+    const char *ct_env = getenv("RECOMP_X360_COPY_TEXTURES"); /* direct (default) | blit (WP-18) */
+    g->copy_direct = !(ct_env && !strcmp(ct_env, "blit"));
+    if (!g->copy_direct)
+        fprintf(stderr, "xenos: resolve pictures copied for each texture and frame (RECOMP_X360_COPY_TEXTURES=blit)\n");
     const char *hash_env = getenv("RECOMP_X360_COPY_HASH"); /* sparse (default) | full (WP-12) */
     g->copy_hash_full = hash_env && !strcmp(hash_env, "full");
     if (g->copy_hash_full)
@@ -976,7 +991,7 @@ void xenos_gl_destroy(xenos_gl *g)
         if (g->mxbuf)
             g->glDeleteBuffers(1, &g->mxbuf);
         for (int i = 0; i < MAX_TEXTURES; i++)
-            if (g->textures[i].tex)
+            if (g->textures[i].tex && !g->textures[i].direct)
                 g->glDeleteTextures(1, &g->textures[i].tex);
         for (int i = 0; i < MAX_SURFACES; i++) {
             if (g->surf[i].tex)
@@ -1043,6 +1058,13 @@ int xenos_gl_scale(const xenos_gl *g)
 
 unsigned xenos_gl_frame_texture(const xenos_gl *g, int *width, int *height)
 {
+    if (g->frame_copy) {
+        if (width)
+            *width = g->show_w;
+        if (height)
+            *height = g->show_h;
+        return g->copies[g->frame_copy - 1].tex;
+    }
     if (width)
         *width = g->frame_w;
     if (height)
@@ -1073,8 +1095,12 @@ static void do_reset(xenos_gl *g)
             memset(&g->copies[i], 0, sizeof g->copies[i]);
         }
     g->npending = 0;
-    for (int i = 0; i < MAX_TEXTURES; i++)
+    g->frame_copy = 0; /* (frame_tex keeps what it had: the window shows black until the next swap otherwise) */
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+        if (g->textures[i].direct) /* the copy's texture, deleted above */
+            g->textures[i].tex = 0, g->textures[i].direct = 0;
         g->textures[i].copy = 0, g->textures[i].hash = 0, g->textures[i].checked = 0, g->textures[i].gen = 0;
+    }
     for (int i = 0; i < 4; i++)
         g->cur[i] = -1;
     g->cur_ds = -1;
@@ -3084,6 +3110,36 @@ static void copy_rehash(xenos_gl *g, const xenos_cp *cp, rt_copy *rc)
     rc->checked = g->epoch;
 }
 
+/* WP-18: the swap's picture taken out of copy rc's texture into frame_tex (rc about to change, go, or be sampled):
+ * what the window shows stays that swap's */
+static void frame_texture(xenos_gl *g, int fw, int fh, GLenum ifmt);
+static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w, int h, int dx, int dy, int whole);
+static void frame_detach(xenos_gl *g, const rt_copy *rc)
+{
+    if (!g->frame_copy || (rc && &g->copies[g->frame_copy - 1] != rc))
+        return;
+    const rt_copy *c = &g->copies[g->frame_copy - 1];
+    int fw = g->show_w / g->scale, fh = g->show_h / g->scale;
+    frame_texture(g, fw, fh, c->ifmt);
+    blit_tex(g, c->tex, g->frame_tex, 0, 0, fw, fh, 0, 0, 1);
+    g->glBindTexture(GL_TEXTURE_2D, g->frame_tex);
+    for (int k = 0; k < 4; k++)
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R + (GLenum)k, g->frame_swz[k]);
+    g->frame_copy = 0;
+}
+
+/* WP-18: copy rc's texture is deleted or replaced: the textures that were it go too, the frame is taken out of it */
+static void copy_tex_gone(xenos_gl *g, const rt_copy *rc)
+{
+    frame_detach(g, rc);
+    int idx = 1 + (int)(rc - g->copies);
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+        texture *t = &g->textures[i];
+        if (t->direct && t->copy == idx)
+            memset(t, 0, sizeof *t);
+    }
+}
+
 /* a copy goes: its picture, its pending write if any (the CPU wrote that memory since: its bytes win, as they would
  * have over the resolve), and with `retake` the textures taken from it are checked again at their next use */
 static void drop_copy(xenos_gl *g, rt_copy *c, int retake)
@@ -3096,6 +3152,7 @@ static void drop_copy(xenos_gl *g, rt_copy *c, int retake)
         for (int i = 0; i < MAX_TEXTURES; i++)
             if (g->textures[i].copy == 1 + (int)(c - g->copies))
                 g->textures[i].checked = g->epoch - 1u;
+    copy_tex_gone(g, c);
     g->glDeleteTextures(1, &c->tex);
     memset(c, 0, sizeof *c);
 }
@@ -3165,7 +3222,7 @@ static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w,
  * A 2D texture a resolve wrote (memory unchanged since) is the resolve's host picture at the internal resolution;
  * any other cached texture is checked against its memory once per frame (and after each resolve, which may have
  * written it), decoded again when that changed. 0 if unsupported. */
-static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, uint32_t want_dim)
+static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, uint32_t want_dim, int no_direct)
 {
     uint32_t dim = (fc[5] >> 9) & 3, gl_dim = dim == 0 ? 1 : dim;
     if ((fc[0] & 3) != 2 || gl_dim != want_dim || !tex_format(fc[1] & 63))
@@ -3190,8 +3247,33 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
         rc = NULL; /* read another way than it was written: decoded from memory */
     if (rc) {
         uint32_t w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
-        if ((int)w <= rc->w && (int)h <= rc->h) {
-            if (t && t->copy == 1 + (int)(rc - g->copies) && t->gen == rc->gen) {
+        int idx = 1 + (int)(rc - g->copies);
+        if (g->copy_direct && !no_direct && (int)w == rc->w && (int)h == rc->th) {
+            /* WP-18: the picture's own size: its texture sampled in place, no copy (it changes with the copy, as the
+             * memory would: a resolve moves the copy's generation and its texture keeps its name; one deleted or
+             * replaced takes these entries with it, copy_tex_gone) */
+            if (!t) {
+                t = victim;
+                memcpy(t->key, fc, sizeof t->key);
+            }
+            if (t->tex && !t->direct)
+                g->glDeleteTextures(1, &t->tex);
+            if (!(t->direct && t->copy == idx && t->gen == rc->gen))
+                g->st.copy_textures++; /* (taken again: what a copy was counted for before) */
+            t->tex = rc->tex;
+            t->direct = 1;
+            t->copy = idx;
+            t->copy_w = t->copy_h = 0;
+            t->levels = 1;
+            t->swap_rb = rc->swap_rb;
+            t->hash = rc->hash;
+            t->gen = rc->gen;
+            t->checked = g->epoch;
+            t->used = (int)++g->tex_clock;
+            return t->tex;
+        }
+        if ((int)w <= rc->w && (int)h <= rc->th) {
+            if (t && !t->direct && t->copy == idx && t->gen == rc->gen) {
                 t->swap_rb = rc->swap_rb;
                 t->checked = g->epoch;
                 t->used = (int)++g->tex_clock;
@@ -3201,6 +3283,8 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
                 t = victim;
                 memcpy(t->key, fc, sizeof t->key);
             }
+            if (t->direct) /* not ours to keep or delete */
+                t->tex = 0, t->direct = 0;
             /* another copy's picture in a texture of this size and format: the blit below overwrites all of it, the
              * texture object is kept (a new 1080p texture per copy change is a reallocation and a render pass more) */
             int hw = (int)w * g->scale, hh = (int)h * g->scale;
@@ -3226,6 +3310,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
             t->checked = g->epoch;
             t->used = (int)++g->tex_clock;
             g->st.copy_textures++;
+            g->st.copy_blits++;
             return t->tex;
         }
     }
@@ -3253,8 +3338,9 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
         t = victim;
         memcpy(t->key, fc, sizeof t->key);
     }
-    if (t->tex) /* a texture object keeps its first target and sizes: a new one */
+    if (t->tex && !t->direct) /* a texture object keeps its first target and sizes: a new one */
         g->glDeleteTextures(1, &t->tex);
+    t->direct = 0;
     g->glGenTextures(1, &t->tex);
     t->copy = 0;
     t->swap_rb = 0;
@@ -3398,7 +3484,24 @@ static void bind_textures(xenos_gl *g, const xenos_cp *cp, const program *p)
     GLuint texs[MAX_SAMPLERS];
     for (int i = 0; i < p->nsamplers; i++) {
         uint32_t k = p->sampler_fetch[i];
-        texs[i] = k < 32 ? texture_of(g, cp, &cp->regs[0x4800 + 6 * (k & 31)], p->sampler_dim[i]) : 0;
+        texs[i] = k < 32 ? texture_of(g, cp, &cp->regs[0x4800 + 6 * (k & 31)], p->sampler_dim[i], 0) : 0;
+    }
+    /* WP-18: a copy's texture sampled in place carries the sampling state on itself: two units sampling it another
+     * way in one draw get a copy of their own for the second; the swap's picture shown from it is taken out first */
+    for (int i = 0; i < p->nsamplers; i++) {
+        if (!texs[i])
+            continue;
+        if (g->frame_copy && texs[i] == g->copies[g->frame_copy - 1].tex)
+            frame_detach(g, NULL);
+        const uint32_t *fi = &cp->regs[0x4800 + 6 * (p->sampler_fetch[i] & 31)];
+        for (int j = 0; j < i; j++) {
+            const uint32_t *fj = &cp->regs[0x4800 + 6 * (p->sampler_fetch[j] & 31)];
+            if (texs[j] == texs[i] && (((fi[0] ^ fj[0]) & 0x7FC00u) || ((fi[3] ^ fj[3]) & 0x01FFFFFEu) ||
+                                       ((fi[1] ^ fj[1]) & 63))) {
+                texs[i] = texture_of(g, cp, fi, p->sampler_dim[i], 1);
+                break;
+            }
+        }
     }
     for (int i = 0; i < p->nsamplers; i++) {
         uint32_t k = p->sampler_fetch[i], dim = p->sampler_dim[i];
@@ -3912,6 +4015,14 @@ int xenos_gl_lazy_resolves(const xenos_gl *g)
     return g && g->lazy;
 }
 
+/* WP-18: the rows of a copy's picture: RB_COPY_DEST_PITCH's height (`given`) or the rows resolved past it, within the
+ * aligned height; the aligned height when the register leaves it unset (as before) */
+static int copy_rows(uint32_t given, int y1, uint32_t height_aligned)
+{
+    uint32_t th = given > (uint32_t)y1 ? given : (uint32_t)y1;
+    return (int)(given && th < height_aligned ? th : height_aligned);
+}
+
 /* A colour resolve the lazy way, into its copy only; 0 when it cannot be (no host picture for it, or the rectangle
  * goes past the destination): the caller resolves it eagerly. */
 static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint32_t base, uint32_t pitch_aligned,
@@ -3920,9 +4031,11 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
 {
     if (s->kind == 2 || (base & 0xFFF) || bias)
         return 0;
+    uint32_t given = height;
     if (!height)
         height = (uint32_t)y1;
     uint32_t height_aligned = (height + 31) & ~31u, bytes = pitch_aligned * height_aligned * (uint32_t)bpp;
+    int th = copy_rows(given, y1, height_aligned);
     if ((uint32_t)x1 > pitch_aligned || (uint32_t)y1 > height_aligned)
         return 0;
     /* other copies over this memory: their pending pixels go under ours first, then the copies go (an eager resolve
@@ -3935,7 +4048,7 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
         }
     }
     rt_copy *rc = copy_at(g, cp, base); /* still what memory holds (or held, plus what is pending) */
-    if (rc && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned ||
+    if (rc && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned || rc->th != th ||
                rc->swap_rb != swap_rb || rc->fmt != fmt || rc->endian != endian)) {
         flush_copy(g, cp, rc); /* resized or another format: what it holds is written the old way first */
         drop_copy(g, rc, 1);
@@ -3956,8 +4069,8 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
     if (fresh) {
         GLenum tf, tt;
         upload_fmt(s->ifmt, &tf, &tt);
-        rc->tex = new_texture(g, s->ifmt, tf, tt, (int)pitch_aligned * g->scale, (int)height_aligned * g->scale);
-        rc->ifmt = s->ifmt, rc->w = (int)pitch_aligned, rc->h = (int)height_aligned;
+        rc->tex = new_texture(g, s->ifmt, tf, tt, (int)pitch_aligned * g->scale, th * g->scale);
+        rc->ifmt = s->ifmt, rc->w = (int)pitch_aligned, rc->h = (int)height_aligned, rc->th = th;
         rc->swap_rb = swap_rb, rc->fmt = fmt, rc->endian = endian;
         rc->base = base, rc->bytes = bytes;
     }
@@ -3971,8 +4084,8 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
         else if (!in_old)
             flush_copy(g, cp, rc);
     }
-    blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0,
-             !x0 && !y0 && x1 == rc->w && y1 == rc->h);
+    frame_detach(g, rc); /* the swap's picture stays the swap's */
+    blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0, !x0 && !y0 && x1 == rc->w && y1 == rc->th);
     if (fresh)
         copy_rehash(g, cp, rc); /* of the memory as it is: a CPU write still shows */
     if (!rc->pending) {
@@ -4710,9 +4823,11 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
             /* the host picture at the internal resolution. A resolve that swaps red and blue (what Direct3D asks for
              * every A8R8G8B8 destination) keeps the picture unswapped and says so: whoever samples it exchanges the
              * two in its swizzle (sampler_state, the frame at the swap). */
+            uint32_t given = height;
             if (!height)
                 height = (uint32_t)y1;
             uint32_t height_aligned = (height + 31) & ~31u;
+            int th = copy_rows(given, y1, height_aligned);
             rt_copy *rc = NULL, *victim = &g->copies[0];
             for (int i = 0; i < MAX_COPIES; i++) {
                 rt_copy *c = &g->copies[i];
@@ -4726,6 +4841,7 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
             /* no picture where it would not read as the memory does: values scaled by an exponent bias */
             if (s->kind == 2 || (base & 0xFFF) || bias) {
                 if (rc) {
+                    copy_tex_gone(g, rc);
                     g->glDeleteTextures(1, &rc->tex);
                     memset(rc, 0, sizeof *rc);
                 }
@@ -4733,7 +4849,8 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                 if (!rc)
                     rc = victim;
                 if (rc->tex && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned ||
-                                rc->swap_rb != (int)swap_rb)) {
+                                rc->th != th || rc->swap_rb != (int)swap_rb)) {
+                    copy_tex_gone(g, rc);
                     g->glDeleteTextures(1, &rc->tex);
                     rc->tex = 0;
                 }
@@ -4742,14 +4859,15 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                 if (!rc->tex) {
                     GLenum tf, tt;
                     upload_fmt(s->ifmt, &tf, &tt);
-                    rc->tex = new_texture(g, s->ifmt, tf, tt, (int)pitch_aligned * sc, (int)height_aligned * sc);
-                    rc->ifmt = s->ifmt, rc->w = (int)pitch_aligned, rc->h = (int)height_aligned;
+                    rc->tex = new_texture(g, s->ifmt, tf, tt, (int)pitch_aligned * sc, th * sc);
+                    rc->ifmt = s->ifmt, rc->w = (int)pitch_aligned, rc->h = (int)height_aligned, rc->th = th;
                 }
                 rc->base = base & 0x1FFFF000u;
                 rc->bytes = pitch_aligned * height_aligned * (uint32_t)bpp;
-                int cw = x1 < rc->w ? x1 - x0 : rc->w - x0, ch = y1 < rc->h ? y1 - y0 : rc->h - y0;
+                int cw = x1 < rc->w ? x1 - x0 : rc->w - x0, ch = y1 < rc->th ? y1 - y0 : rc->th - y0;
+                frame_detach(g, rc); /* the swap's picture stays the swap's */
                 if (cw > 0 && ch > 0)
-                    blit_tex(g, s->tex, rc->tex, x0, y0, cw, ch, x0, y0, !x0 && !y0 && cw == rc->w && ch == rc->h);
+                    blit_tex(g, s->tex, rc->tex, x0, y0, cw, ch, x0, y0, !x0 && !y0 && cw == rc->w && ch == rc->th);
                 copy_rehash(g, cp, rc);
                 rc->used = ++g->copy_clock;
                 rc->gen = ++g->copy_gen;
@@ -5446,7 +5564,7 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         fw = (int)(fc[2] & 0x1FFF) + 1, fh = (int)((fc[2] >> 13) & 0x1FFF) + 1;
         swizzle = (fc[3] >> 1) & 0xFFF;
     }
-    if (rc && fw <= rc->w && fh <= rc->h) {
+    if (rc && fw <= rc->w && fh <= rc->th) {
         src = rc->tex, src_fmt = rc->ifmt;
         if (rc->swap_rb)
             swizzle = swizzle_swap_rb(swizzle);
@@ -5480,6 +5598,7 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
                 g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                 g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                 g->frame_w = (int)d.w, g->frame_h = (int)d.h; /* frame_texture remakes it when the size differs */
+                g->frame_copy = 0;
                 free(rgba);
                 done = 1;
             }
@@ -5497,17 +5616,34 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         swizzle = ident;
     }
     if (src) {
-        frame_texture(g, fw, fh, src_fmt);
-        if (src_fmt != GL_SRGB8_ALPHA8 || !frame_encode(g, src, fw, fh))
-            blit_tex(g, src, g->frame_tex, 0, 0, fw, fh, 0, 0, 1);
-        g->glBindTexture(GL_TEXTURE_2D, g->frame_tex);
+        GLenum rf = is_float_fmt(src_fmt) ? GL_RGBA16F : GL_RGBA8; /* frame_tex's format */
+        /* WP-18: a copy of the frame's own size in frame_tex's format is shown as it is (frame_detach takes it out
+         * when it changes before the window shows it); else into frame_tex (a smaller frame, gamma, render target 0) */
+        GLuint shown = g->frame_tex;
+        if (rc && src == rc->tex && g->copy_direct && fw == rc->w && fh == rc->th && src_fmt == rf) {
+            g->frame_copy = 1 + (int)(rc - g->copies);
+            g->show_w = fw * g->scale, g->show_h = fh * g->scale;
+            shown = src;
+            g->glBindTexture(GL_TEXTURE_2D, src); /* as frame_texture sets frame_tex's */
+            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        } else {
+            g->frame_copy = 0;
+            frame_texture(g, fw, fh, src_fmt);
+            if (src_fmt != GL_SRGB8_ALPHA8 || !frame_encode(g, src, fw, fh))
+                blit_tex(g, src, g->frame_tex, 0, 0, fw, fh, 0, 0, 1);
+            shown = g->frame_tex;
+            g->glBindTexture(GL_TEXTURE_2D, g->frame_tex);
+        }
         for (int c = 0; c < 4; c++) {
             uint32_t sel = (swizzle >> (3 * c)) & 7;
-            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R + (GLenum)c, sel < 6 ? swz[sel] : GL_ZERO);
+            g->frame_swz[c] = sel < 6 ? swz[sel] : GL_ZERO;
+            g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R + (GLenum)c, g->frame_swz[c]);
         }
         if (g->readback) {
-            GLenum rf = is_float_fmt(src_fmt) ? GL_RGBA16F : GL_RGBA8;
-            const uint8_t *px = read_raw(g, g->frame_tex, rf, 0, 0, fw, fh);
+            const uint8_t *px = read_raw(g, shown, rf, 0, 0, fw, fh);
             int lay = pix_layout(rf);
             memset(g->frame, 0, (size_t)g->width * g->height * 4);
             for (int y = 0; px && y < fh && y < g->height; y++)
