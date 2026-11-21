@@ -103,6 +103,7 @@ struct x360_gpu {
     int deferred; /* x360_gpu_set_deferred: x360_gpu_poll posts only; x360_gpu_run / _drain run (stage 2's hook) */
     gpu_overlap ov;         /* stage 2: the CPU worker and the GL thread's service (x360_gpu_overlap) */
     uint64_t swaps_issued;  /* post side: VdSwap calls (counted from cp.swaps at link_sync), stage 2's back-pressure */
+    uint64_t lag_t;         /* post side, stage 2 unpaced: virtual time (+1) since posted work waits on the GL thread */
     uint64_t inline_cpu_ns; /* the part of cp_cpu_ns spent on the guest's own thread (stage 1 runs): x360_gpu_cpu_ns */
     /* the run half's host state (from here down) */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
@@ -587,6 +588,7 @@ static void link_sync(struct x360_gpu *g, int loaded)
     __atomic_store_n(&g->link.swaps, g->cp.swaps, __ATOMIC_RELAXED); /* a load sets cp.swaps: not swaps seen */
     g->swaps_seen = g->cp.swaps;
     g->swaps_issued = g->cp.swaps; /* stage 2's back-pressure counts from here */
+    g->lag_t = 0;
     if (loaded && g->ring && size_dw && g->cp.wptr != g->last_wptr % size_dw)
         __atomic_store_n(&g->link.post, (uint64_t)(seq + 1) << 32 | g->last_wptr, __ATOMIC_RELEASE);
     else
@@ -747,6 +749,29 @@ static void gpu_post_irq(x360_machine *x, struct x360_gpu *g, uint64_t now)
         }
 }
 
+/* Stage 2, an unpaced job (no run_until: x360_run without --swaps): virtual time is the guest's instructions, and a
+ * guest that spins on a fence (or a read pointer) while the GL thread takes host time over its work would burn
+ * virtual frames, seeing the GPU many frames late. Posted work is allowed to wait at most this long in virtual time;
+ * past it the worker waits for the GL thread to run everything posted (a run stopped at an unmet wait counts as run:
+ * that wait needs the guest). The player's paced frames keep their swap back-pressure only. */
+#define GPU_LAG_100NS (VBLANK_100NS / 2)
+static void overlap_lag(x360_machine *x, struct x360_gpu *g, uint64_t now)
+{
+    if ((uint32_t)(__atomic_load_n(&g->link.post, __ATOMIC_RELAXED) >> 32) ==
+        __atomic_load_n(&g->link.taken, __ATOMIC_ACQUIRE)) {
+        g->lag_t = 0;
+        return;
+    }
+    if (!g->lag_t) {
+        g->lag_t = now + 1;
+        return;
+    }
+    if (now + 1 - g->lag_t <= GPU_LAG_100NS)
+        return;
+    x360_gpu_wait_posted(x);
+    g->lag_t = 0;
+}
+
 void x360_gpu_poll(x360_machine *x)
 {
     struct x360_gpu *g = x->gpu;
@@ -756,6 +781,8 @@ void x360_gpu_poll(x360_machine *x)
     gpu_post(x, g, now);
     if (!g->deferred && !overlap_remote(g))
         x360_gpu_run(x); /* stage 1: the run half right here; stage 2: gpu_post woke the GL thread */
+    else if (!x->run_until && overlap_remote(g))
+        overlap_lag(x, g, now);
     gpu_post_irq(x, g, now);
 }
 
@@ -879,6 +906,32 @@ int x360_gpu_overlap(x360_machine *x, int (*job)(x360_machine *, uint64_t), uint
     int rc = o->job_rc;
     pthread_mutex_unlock(&o->mu);
     return rc;
+}
+
+/* Stage 2, on the CPU worker, from the scheduler when every guest thread waits and it would jump the clock to the
+ * next deadline: posted work the GL thread has not run yet (or is running) may be what a thread waits on (a fence,
+ * the read pointer, a swap's interrupt), so jumping now would let the guest see GPU results late by however much
+ * virtual time the jump skips. Waits for the GL thread to run everything posted (not a drain: no flush, no
+ * stalled-wait retry) and returns 1 when it waited (the scheduler then polls again instead of jumping), 0 when
+ * there was nothing to wait for (and always when no job runs on the worker: stage 1, the off path, is untouched).
+ * Ends: the GL thread serves posts until the job ends, and the job is this thread; held is only set inside a Vd*
+ * call on this thread, never here; a run that stops at an unmet wait still sets taken. */
+int x360_gpu_wait_posted(x360_machine *x)
+{
+    struct x360_gpu *g = x->gpu;
+    if (!g || !overlap_remote(g))
+        return 0;
+    gpu_overlap *o = &g->ov;
+    int waited = 0;
+    pthread_mutex_lock(&o->mu);
+    while (!o->held && (o->running || (uint32_t)(__atomic_load_n(&g->link.post, __ATOMIC_RELAXED) >> 32) !=
+                                          __atomic_load_n(&g->link.taken, __ATOMIC_ACQUIRE))) {
+        waited = 1;
+        pthread_cond_signal(&o->work);
+        pthread_cond_wait(&o->done, &o->mu);
+    }
+    pthread_mutex_unlock(&o->mu);
+    return waited;
 }
 
 /* Everything posted run to its end, and (flush_resolves) the lazy resolves written to guest memory, the interrupts
