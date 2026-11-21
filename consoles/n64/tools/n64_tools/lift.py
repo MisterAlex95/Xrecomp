@@ -9,7 +9,8 @@ interpreter's (n64_cpu.c / n64_fpu.c), instruction for instruction:
   results sign-extended, SRA / SRAV shifting the whole register, the DIV / DDIV results for a zero divisor;
 - the fetch cost and the count of every instruction (RC_I), multiply / divide latencies, at the same point;
 - branch delay slots inline; branch-likely skips its slot when not taken; a branch in a delay slot, COP0 (but
-  CACHE), SYSCALL / BREAK, LL / SC, COP2 / COP3 and reserved encodings go to the interpreter, and so does any
+  CACHE, MFC0 and DMFC0: the read through the core, n64_rc_mfc0), SYSCALL / BREAK, LL / SC, COP2 / COP3 and reserved
+  encodings go to the interpreter, and so does any
   instruction whose exception condition holds (overflow, a trap taken, COP1 unusable): RC_INTERP, nothing of it done,
   so the interpreter raises with the exact EPC / BD;
 - memory: cached RDRAM inline, anything else handed to the interpreter (« memory accesses » below), accesses to
@@ -99,6 +100,10 @@ class FnLifter:
             return ""
         if c == "cache":
             return "RC_CACHE(%d, %s, %s);" % (i.rt, ea, fault)
+        if c == "mfc0":
+            # no side effect: with r0 as its destination it does nothing
+            return "RC_MFC0(%s, %d, %s, %s);" % (rt, i.rd, "RC_S32" if n == "cop0" and i.rs == 0 else "RC_U64",
+                                                 fault) if i.rt else ""
         if c == "alu":
             if (i.word >> 26) == 0:
                 sa = i.sa

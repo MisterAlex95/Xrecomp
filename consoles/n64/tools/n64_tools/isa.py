@@ -16,7 +16,8 @@ Classes:
   fmem     LWC1 LDC1 SWC1 SDC1
   fop      the other COP1 instructions (arithmetic, conversions, compares, reserved formats): run by n64_fpu.c
   nop      CACHE and SYNC (no cache model: they do nothing in kernel mode)
-  interp   left to the interpreter: SYSCALL, BREAK, COP0 (MFC0 MTC0 TLB* ERET ...), COP2 / COP3 and their loads /
+  mfc0     MFC0 DMFC0 (name "cop0"): the COP0 read through the core (n64_rc_mfc0, XBA-295)
+  interp   left to the interpreter: SYSCALL, BREAK, the other COP0 (MTC0 TLB* ERET ...), COP2 / COP3 and their loads /
            stores, LL LLD SC SCD, reserved encodings
 """
 
@@ -145,6 +146,8 @@ class Ins:
             d = self.rt
         elif c == "fmove" and n in ("mfc1", "dmfc1", "cfc1"):
             d = self.rt
+        elif c == "mfc0":
+            d = self.rt
         out = [d] if d else []
         if self.link:
             out.append(self.link)
@@ -242,7 +245,9 @@ def _decode(i):
     if name is None:
         name = "reserved"
     i.name = name
-    if name in INTERP:
+    if name == "cop0" and i.rs in (0x00, 0x01):
+        i.cls = "mfc0"  # MFC0 / DMFC0: the read through the core (n64_rc_mfc0), the others go to the interpreter
+    elif name in INTERP:
         i.cls = "interp"
     elif name == "cache":
         i.cls = "cache"  # the core keeps the caches' tags (n64_rc_cache)

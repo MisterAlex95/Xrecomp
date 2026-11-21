@@ -149,7 +149,7 @@ class Gen:
             op = [0x31, 0x35, 0x39, 0x3D][c - 4]
             return i_type(op, r.choice([GP, SP, UB]), self.freg(op in (0x35, 0x3D)), r.randrange(0, 0xF80, 8))
         if k < 0.97:
-            return cop0(0, self.reg(), r.choice([9, 1]))  # MFC0 COUNT / RANDOM (interpreted)
+            return cop0(0, self.reg(), r.choice([9, 1]))  # MFC0 COUNT / RANDOM (n64_rc_mfc0)
         if k < 0.98:
             return i_type(0x2F, GP, r.choice([0x19, 0x15, 0x01]), r.randrange(0, 0xF80, 16))  # CACHE
         if k < 0.985:

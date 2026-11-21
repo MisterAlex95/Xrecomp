@@ -643,6 +643,12 @@ static uint64_t cop0_read(n64_machine *m, int r)
     }
 }
 
+/* Lifted code's MFC0 / DMFC0 (n64_recomp_rt.h RC_MFC0, XBA-295): m->now and m->instructions as step() has them. */
+uint64_t n64_rc_mfc0(n64_machine *m, int r)
+{
+    return cop0_read(m, r & 31);
+}
+
 static void cop0_write(n64_machine *m, int r, uint64_t v)
 {
     n64_cpu *c = &m->cpu;
