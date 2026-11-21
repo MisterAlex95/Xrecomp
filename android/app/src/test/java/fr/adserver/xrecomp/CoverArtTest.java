@@ -130,6 +130,20 @@ public class CoverArtTest {
         assertTrue(CoverArt.wanted(files, key, System.currentTimeMillis()));
     }
 
+    /** Report launcher-lag RC4: a temporary file of its own per write (two writers never share one), none left. */
+    @Test
+    public void storeLeavesNoTemporaryFile() throws IOException {
+        File files = tmp.newFolder("files");
+        File f = CoverArt.artFile(files, "gba-TMPS");
+        assertTrue(CoverArt.store(png(), f));
+        assertTrue(CoverArt.store(png(), f));   // replaces it
+        assertTrue(f.isFile());
+        String[] left = f.getParentFile().list();
+        assertEquals(java.util.Arrays.toString(left), 1, left.length);
+        assertFalse(CoverArt.store("<html>".getBytes(), f));
+        assertEquals(1, f.getParentFile().list().length);
+    }
+
     @Test
     public void notAnImageIsNotKept() throws IOException {
         File files = tmp.newFolder("files");
