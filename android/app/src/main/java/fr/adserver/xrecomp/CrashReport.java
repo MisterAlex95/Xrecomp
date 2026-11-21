@@ -581,6 +581,17 @@ final class CrashReport {
         return r;
     }
 
+    /** The app release every report carries (« xrecomp@&lt;version&gt; »). */
+    static String release(Context c) {
+        return "xrecomp@" + c.getString(R.string.xba_version);
+    }
+
+    /** « debug » for a debuggable build, else « release ». */
+    static String environment(Context c) {
+        return (c.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+               ? "debug" : "release";
+    }
+
     private static void game(CrashReport r, String key, String title) {
         r.tags.put("console", consoleOf(key));
         r.tags.put("game_key", key);

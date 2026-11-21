@@ -347,6 +347,37 @@ killed. `DeviceGuard` (shared with the library check, XBA-130) decides:
 So a hot device keeps going slowly instead of being stopped. The library check no longer cancels a Prepare when the
 device is hot: it pauses (nothing new starts after it) and lets the Prepare drop its own jobs.
 
+## Timings per stage (XBA-341)
+
+Only with **Send reports automatically** on (Settings; `Telemetry`, off by default): when a Prepare ends (done, failed
+or cancelled), the `:prepare` process sends one performance transaction « prepare » to the project's Rustrak server,
+from a short background thread (the next queued Prepare does not wait for it). Option off: nothing is built or sent.
+It is never queued: offline, it is dropped. Rustrak › Performance shows it with its stages as a waterfall.
+
+`PrepareTimings` (owned by `PrepareRunner`) takes the wall clock at each stage change; the stages are the ones the
+progress lines already name, one span each, op `prepare.<stage>`:
+
+| Span | From → to |
+|---|---|
+| `prepare.install` | the Prepare starts → tools.prepare is started (the tools' assets, `Toolchain.install`) |
+| `prepare.launch` | tools.prepare started → its first progress line (Python's start-up) |
+| `prepare.identify`, `prepare.analyse`, `prepare.lift`, `prepare.compile`, `prepare.pack` | the first `XBA_PROGRESS` line with that `id=` → the next stage (or the end) |
+
+What each tools.prepare stage holds: `identify` the XBE parse, `analyse` disasm + func_id + abi_analysis, `lift`
+tools.recomp, `compile` clang on default.xbe's C files **and**, on a title with more images (XBA-82), those images'
+whole identify / analyse / lift / compile (they report inside step 4), `pack` the link and pack.json.
+
+A retry after a kill starts again at `launch`, so a stage can appear twice. A Prepare whose stamps skip work (an
+up-to-date analysis or lift) shows those stages near zero. A Prepare resumed after its process died covers only the
+resumed part (`resumes` > 0); a Prepare given up after too many deaths sends nothing.
+
+The transaction: status `ok` (done), `internal_error` (failed) or `cancelled`; release `xrecomp@<version>` and
+environment as the crash reports; tags `console`, `game_key` (the library key, as the crash reports), `device`
+(`Build.MANUFACTURER` + `MODEL`), `abi`, `android`, `cores` (`availableProcessors`), `big_cores` (cores above the
+slowest cluster, from `cpu_capacity` or `cpuinfo_max_freq`; absent when unreadable), `result` (`ok` or the error code,
+never its message), `prepare_kind` (`foreground` / `background`), `opt` (`O1` / `O2`), `jobs`, `attempt`, `resumes`.
+No title, no path, no file name, no install id.
+
 ## When the Prepare's process dies (XBA-128)
 
 What a kill costs, step by step: identify, analyse (`disasm`, `func_id`, `abi`) and link have their stamps, so a

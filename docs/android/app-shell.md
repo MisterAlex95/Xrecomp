@@ -3162,6 +3162,9 @@ app's own folders keep their names (`<app:fr.adserver.xrecomp.shell>/files/…`)
 Offline or refused (not 2xx): one retry, then the envelope waits in `files/reports/` (the newest 5) and leaves after
 the next report that gets through.
 
+With « Send reports automatically » on, each ended Prepare also sends its time per stage as a performance transaction
+(XBA-341, [prepare.md](prepare.md#timings-per-stage-xba-341)); off, nothing.
+
 Check on the device (Alex):
 1. Make a Prepare fail (for example fill the storage): the failed screen shows **Send report**.
 2. Press it: the sheet shows the four lines, Send focused. B: nothing sent.
