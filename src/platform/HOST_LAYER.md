@@ -35,7 +35,7 @@ interface target when there is no Vulkan bridge). The `*.cmake` files have inclu
 | `recomp_play.[ch]` | G (new) | the frame loop's controls every console runtime calls once per shown frame (XBA-274): the desktop keys' hotkeys next to the pads' chords, the pressed actions, the fast-forward and rewind holds, console frames per shown frame (`recomp_play_begin`); on top of `recomp_states` (slots, fast-forward), `recomp_hotkeys`, `recomp_rewind`, also in `xbr_host_core`. A new console runtime gets the same hotkeys, fast-forward and rewind by calling it |
 | `host_perf_line.[ch]` | G (new) | the performance line every runtime logs every 10 s and over the run, and the overlay's live figures (XBA-243, [below](#performance-line-xba-243)) |
 | `recomp_storage.[ch]` | M → split | new `recomp_storage_resolve_entry(ext, int, entry, out)` is the generic call (any entry file, or none). `recomp_storage_resolve` = that call with `"default.xbe"`, unchanged |
-| `recomp_app.[ch]` | M, kept X | the Android start-up: host parts plus `xbox_path_init` and the kernel fault handler; it stays a thin Xbox wrapper |
+| `recomp_app.[ch]` | M, kept X | the Android start-up: host parts plus `xbox_path_init` and the kernel fault handler; it stays a thin Xbox wrapper. `recomp_app_start_rom` is the same start-up for another console's game (storage through `recomp_storage_resolve_entry` with no entry: no `default.xbe`, no « disc image ») |
 | `recomp_pack.[ch]` | M, kept X | pack.json parse/validate/dlopen is generic, the XBE title ID and the exported symbols are Xbox. Generalised with the manifest `console` field (C0-3) |
 | `win32_compat.[ch]`, `xbox_winnt.h` | X | Win32/NT vocabulary for lifted Xbox code (`platform`) |
 | `mmio_decode*.h` | X | trapped guest MMIO decode |

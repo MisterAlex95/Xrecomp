@@ -300,12 +300,25 @@ int main(int argc, char *argv[])
     const char *gd = getenv("RECOMP_GAME_DIR");
     ps1_identify_install();   /* a .chd PlayStation disc gets its title key through the PS1 disc reader (XBA-159) */
     gc_disc_identify_install();   /* a .gcz GameCube disc through the GameCube disc readers (XBA-261) */
-    if (gd && *gd && xba_pack_rom_console(gd) != RECOMP_CONSOLE_UNKNOWN)
+    /* Identified once (for an Xbox 360 disc that is a walk of its tree), reused where the game is routed below. */
+    int rom_console = gd && *gd ? xba_pack_rom_console(gd) : RECOMP_CONSOLE_UNKNOWN;
+    /* Before xbox_path_init (in the start-up): without it the kernel would mount a disc image it can read, an
+     * Xbox 360 ISO among them (XBA-270), as an Xbox disc, and the game would never reach its own runtime. */
+    if (rom_console != RECOMP_CONSOLE_UNKNOWN)
         setenv("RECOMP_DISC_IMAGE", "0", 1);
-    /* Start-up steps, shared with every title (recomp_app.h). */
+    /* Start-up steps, shared with every title (recomp_app.h); another console's game: the directories only, it is
+     * no Xbox disc (have_game 0, store.game_dir naming its file). */
     recomp_storage store;
-    int have_game = recomp_app_start(SDL_AndroidGetExternalStoragePath(),
-                                     SDL_AndroidGetInternalStoragePath(), &store);
+    int have_game = rom_console != RECOMP_CONSOLE_UNKNOWN
+                        ? recomp_app_start_rom(SDL_AndroidGetExternalStoragePath(),
+                                               SDL_AndroidGetInternalStoragePath(), &store)
+                        : recomp_app_start(SDL_AndroidGetExternalStoragePath(),
+                                           SDL_AndroidGetInternalStoragePath(), &store);
+    if (rom_console != RECOMP_CONSOLE_UNKNOWN && have_game >= 0) {
+        const char *name = recomp_pack_console_name(rom_console);
+        printf("xboxrecomp: %s: %s %s game, for its own runtime\n", store.game_dir,
+               name && strchr("aeinox", name[0]) ? "an" : "a", name ? name : "console");
+    }
     s_title_main = recomp_title_main;
 
     /* Back is ours: the shell decides when it quits (twice within 2 s). */
@@ -346,8 +359,10 @@ int main(int argc, char *argv[])
      * memory cards under <internal>/save/gc-<KEY>/, XBA-264). The Xbox 360
      * runtime (XBA-280) needs its pack (bringup --app-pack): without one
      * the shell says PACK_MISSING and goes back to the launcher. */
-    int console = !s_title_main && have_game <= 0 && store.game_dir[0] ? xba_pack_rom_console(store.game_dir)
-                                                                        : RECOMP_CONSOLE_UNKNOWN;
+    int console = RECOMP_CONSOLE_UNKNOWN;
+    if (!s_title_main && have_game <= 0 && store.game_dir[0])
+        /* RECOMP_GAME_DIR as identified above; one that only recomp.cfg set is identified here. */
+        console = rom_console != RECOMP_CONSOLE_UNKNOWN ? rom_console : xba_pack_rom_console(store.game_dir);
     int console_game = console != RECOMP_CONSOLE_UNKNOWN;
     if (console_game) {
         int console_rc = -1;
