@@ -62,6 +62,8 @@ final class PrepareRunner {
     private final Validator validator;
     private final int jobs;
     private final PrepareProtocol.Status status = new PrepareProtocol.Status();
+    /** Wall-clock time per stage (XBA-341): sent by PrepareService when the Prepare ends, behind the gate. */
+    private final PrepareTimings timings;
 
     long killGraceMs = 5000;
     /** tools.prepare's own log (<work>/prepare.log): its tail is appended to ours at the end, for « Share log ». */
@@ -81,6 +83,12 @@ final class PrepareRunner {
 
     PrepareRunner(File statusDir, String titleId, int jobs, CommandFactory factory, Validator validator,
                   Listener listener) {
+        this(statusDir, titleId, jobs, factory, validator, listener, new PrepareTimings());
+    }
+
+    PrepareRunner(File statusDir, String titleId, int jobs, CommandFactory factory, Validator validator,
+                  Listener listener, PrepareTimings timings) {
+        this.timings = timings;
         this.statusFile = new File(statusDir, "status.json");
         this.logFile = new File(statusDir, "prepare.log");
         this.factory = factory;
@@ -89,6 +97,10 @@ final class PrepareRunner {
         this.jobs = Math.max(1, jobs);
         status.titleId = titleId == null ? "" : titleId;
         status.log = logFile.getAbsolutePath();
+    }
+
+    PrepareTimings timings() {
+        return timings;
     }
 
     File statusFile() {
@@ -137,6 +149,7 @@ final class PrepareRunner {
             logLine("=== resumed after the Prepare's process died (" + status.resumes + "): the stamps skip what was done");
         status.state = PrepareProtocol.RUNNING;
         status.startedAt = System.currentTimeMillis();
+        timings.begin();
         status.step = 0;
         status.id = PrepareProtocol.STEP_INSTALL;
         status.jobs = jobs;
@@ -213,6 +226,7 @@ final class PrepareRunner {
         status.code = code == null ? "" : code;
         status.msg = msg == null ? "" : msg;
         status.eta = -1;
+        timings.end();
         logLine("=== " + state + (status.code.isEmpty() ? "" : " " + status.code) + ": " + status.msg);
         //noinspection ResultOfMethodCallIgnored
         pgidFile().delete();
@@ -294,6 +308,7 @@ final class PrepareRunner {
         Outcome out = new Outcome();
         List<String> cmd = factory.command(attemptJobs);
         List<String> full = wrap(cmd);
+        timings.stage(PrepareTimings.STAGE_LAUNCH);   // Python's start-up, until the first progress line
         logLine("=== attempt " + attempt + ", " + attemptJobs + " jobs: " + String.join(" ", cmd));
         ProcessBuilder pb = new ProcessBuilder(full).redirectErrorStream(true);
         File cwd = factory.workingDir();
@@ -428,6 +443,7 @@ final class PrepareRunner {
     }
 
     private void onProgress(PrepareProtocol.Progress pr) {
+        timings.stage(pr.id);
         boolean stepChanged = pr.step != status.step || !pr.id.equals(status.id);
         status.step = pr.step;
         status.n = pr.n;

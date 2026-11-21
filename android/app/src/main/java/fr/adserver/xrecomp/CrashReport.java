@@ -562,14 +562,24 @@ final class CrashReport {
     private static CrashReport base(Context c, String kind) {
         CrashReport r = new CrashReport();
         r.kind = kind;
-        r.release = "xrecomp@" + c.getString(R.string.xba_version);
-        r.environment = (c.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-                        ? "debug" : "release";
+        r.release = release(c);
+        r.environment = environment(c);
         r.tags.put("kind", kind);
         r.tags.put("device", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL);
         r.tags.put("android", String.valueOf(android.os.Build.VERSION.SDK_INT));
         r.tags.put("abi", android.os.Build.SUPPORTED_ABIS.length > 0 ? android.os.Build.SUPPORTED_ABIS[0] : "");
         return r;
+    }
+
+    /** The app release every report carries (« xrecomp@&lt;version&gt; »). */
+    static String release(Context c) {
+        return "xrecomp@" + c.getString(R.string.xba_version);
+    }
+
+    /** « debug » for a debuggable build, else « release ». */
+    static String environment(Context c) {
+        return (c.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+               ? "debug" : "release";
     }
 
     private static void game(CrashReport r, String key, String title) {

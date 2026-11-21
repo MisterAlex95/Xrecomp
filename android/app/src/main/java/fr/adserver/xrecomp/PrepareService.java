@@ -445,6 +445,9 @@ public class PrepareService extends Service {
         }
         Log.i(TAG, "prepare: " + end.state + (end.code.isEmpty() ? "" : " " + end.code)
                    + (end.msg.isEmpty() ? "" : ": " + end.msg));
+        // XBA-341: the time per stage, one performance transaction; only with « Send reports automatically » on.
+        if (Telemetry.allowed(this))
+            PrepareTimings.sendInBackground(this, runner.timings(), end);
         if (runner.background()) {   // XBA-129: the launcher ends the other rounds (it relaunches the game)
             try {
                 SelfHeal.roundEnded(new File(new File(filesDir(this), "work"), titleId),
