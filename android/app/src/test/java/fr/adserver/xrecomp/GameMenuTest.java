@@ -139,6 +139,20 @@ public class GameMenuTest {
             if (typed != null)
                 done.accept(typed);
         }
+        /** The Benchmark: marks, and the summary the next take writes (null: nothing written). */
+        int benchMarks;
+        String benchJson;
+        @Override public void benchMark() { benchMarks++; }
+        @Override public boolean benchTake(File f) {
+            if (benchJson == null)
+                return true;
+            try {
+                TestSupport.write(f, benchJson);
+            } catch (java.io.IOException e) {
+                return false;
+            }
+            return true;
+        }
         @Override public void addCheat(Console con, String key, java.util.function.Consumer<String> added) {
             cheatAdds.add(key);
             if (cheatToAdd != null) {
@@ -1507,6 +1521,78 @@ public class GameMenuTest {
         for (Breadcrumbs.Crumb c : Breadcrumbs.read(Breadcrumbs.file(activity), Breadcrumbs.KEEP))
             out.add(c.name);
         return out;
+    }
+
+    /**
+     * The Benchmark: from the newest state (loaded, fast-forward off), it measures until 60 s are played, then shows
+     * the result in the menu; nothing leaves before Send, which posts once whatever « Send reports automatically »
+     * says. Without a state, the game restarts and the next start measures its boot.
+     */
+    @Test
+    public void benchmarkFromTheNewestState() throws Exception {
+        List<byte[]> posted = new ArrayList<>();
+        CrashReport.transport = (url, h, body) -> {
+            posted.add(body);
+            return 200;
+        };
+        try {
+            menu.reportWork = Runnable::run;
+            host.states = true;
+            host.ff = true;
+            host.times[1] = 1_700_000_000_000L;
+            host.times[3] = 1_700_000_500_000L;   // the newest
+            menu.open("Back");
+            assertNotNull(menu.row(GameMenu.Item.BENCH));
+            menu.row(GameMenu.Item.BENCH).performClick();
+            idle(20);
+            assertEquals(GameMenu.Page.BENCH, menu.page());
+            menu.row(GameMenu.Item.BENCH_START).performClick();
+            idle(20);
+            assertEquals(List.of(3), host.loaded);
+            assertFalse("fast-forward off", host.ff);
+            assertFalse(menu.isOpen());
+            assertEquals(1, host.benchMarks);
+            assertTrue(menu.benchRunningForTest());
+            host.benchJson = GamePerfTest.X360.replace("\"bench\":0", "\"bench\":1").replace("312.5", "30.0");
+            idle(3000);
+            assertTrue("30 s played: still measuring", menu.benchRunningForTest());
+            host.benchJson = GamePerfTest.X360.replace("\"bench\":0", "\"bench\":1").replace("312.5", "60.2");
+            idle(3000);
+            assertFalse(menu.benchRunningForTest());
+            assertTrue("the result in the menu", menu.isOpen());
+            assertEquals(GameMenu.Page.BENCH_RESULT, menu.page());
+            assertTrue(posted.isEmpty());   // nothing before Send
+            assertFalse(Telemetry.auto(activity));
+            menu.row(GameMenu.Item.BENCH_SEND).performClick();
+            idle(20);
+            assertEquals(1, posted.size());
+            String text = new String(posted.get(0), java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(text.contains("\"benchmark\":\"1\""));
+            assertTrue("the state's hash", java.util.regex.Pattern.compile("\"state\":\"[0-9a-f]{12}\"").matcher(text).find());
+        } finally {
+            CrashReport.transport = CrashReport.HTTP;
+        }
+    }
+
+    @Test
+    public void benchmarkWithoutAStateRestartsFromBoot() {
+        menu.open("Back");
+        menu.row(GameMenu.Item.BENCH).performClick();
+        idle(20);
+        assertEquals(activity.getString(R.string.BENCH_FROM_BOOT), menu.row(GameMenu.Item.BENCH_START).subtitle);
+        menu.row(GameMenu.Item.BENCH_START).performClick();
+        idle(20);
+        assertEquals(1, host.restarts);
+        assertEquals(0, host.benchMarks);
+        assertTrue(GameStore.takeFreshStart(activity));
+        menu.onStop();
+        menu.onStart();   // as the new process's first start
+        idle(20);
+        assertEquals(1, host.benchMarks);
+        assertTrue(menu.benchRunningForTest());
+        menu.onStop();
+        menu.onStart();
+        assertEquals("one start only", 1, host.benchMarks);
     }
 
     /**

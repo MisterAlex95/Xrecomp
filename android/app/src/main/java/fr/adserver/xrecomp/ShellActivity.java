@@ -952,6 +952,24 @@ public class ShellActivity extends SDLActivity {
         }
 
         @Override
+        public void benchMark() {
+            try {
+                MenuNative.nativeBenchMark();
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: no native benchmark", e);
+            }
+        }
+
+        @Override
+        public boolean benchTake(java.io.File f) {
+            try {
+                return MenuNative.nativeBenchTake(f.getPath());
+            } catch (UnsatisfiedLinkError e) {
+                return false;
+            }
+        }
+
+        @Override
         public void askReportText(String current, java.util.function.Consumer<String> done) {
             ProblemReport.askText(ShellActivity.this, current, done);
         }

@@ -237,6 +237,14 @@ final class GameMenu {
 
         /** XBA-339: the one-line dialog of Report a problem (ProblemReport.askText); done(text) on OK. */
         default void askReportText(String current, java.util.function.Consumer<String> done) {}
+
+        /** The Benchmark's window starts at the game's next frame (MenuNative.nativeBenchMark). */
+        default void benchMark() {}
+
+        /** The game writes the Benchmark's summary to f at its next frame (MenuNative.nativeBenchTake). */
+        default boolean benchTake(java.io.File f) {
+            return false;
+        }
     }
 
     /** The automatic slot (« Where you left off ») and the kinds of nativeStateEvent. */
@@ -261,12 +269,13 @@ final class GameMenu {
     static final int ROW_H = Theme.ROW_H;
     static final int VOLUME_STEP = 10;
 
-    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS, GAME_SETTINGS, CHEATS, CHEATS_DELETE, REPORT }
+    enum Page { MAIN, SETTINGS, CONTROLS, DISCS, SAVE_SLOTS, LOAD_SLOTS, GAME_SETTINGS, CHEATS, CHEATS_DELETE, REPORT,
+                BENCH, BENCH_RESULT }
 
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
                 FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE, SHADER,
-                TOUCH_EDIT, RESTART, REPORT, REPORT_TEXT, REPORT_SHOT, REPORT_SEND }
+                TOUCH_EDIT, RESTART, REPORT, REPORT_TEXT, REPORT_SHOT, REPORT_SEND, BENCH, BENCH_START, BENCH_SEND }
 
     private final Activity activity;
     private final Host host;
@@ -553,6 +562,8 @@ final class GameMenu {
 
     void onStart() {
         started = true;
+        if (!benchRunning && GamePerf.takeBenchPending(activity))   // « Start » without a state: this boot is measured
+            beginBench("boot");
         syncPicture("start");   // back from the launcher, where its Game settings may have changed the picture
         handler.removeCallbacks(perfTick);
         if (perfOn)
@@ -1054,6 +1065,8 @@ final class GameMenu {
                 row(Item.DISC, s(R.string.MENU_DISC));
             if (CrashReport.available(activity))   // XBA-339
                 row(Item.REPORT, s(R.string.REPORT_PROBLEM));
+            if (AutoReports.possible(activity))   // game performance: a game's own app cannot send
+                row(Item.BENCH, s(R.string.BENCH));
             // A game's own app has no launcher to go back to: the row leaves to Android's home screen (the game
             // waits there as it would behind the launcher; the « Launcher » app shortcut still opens the settings).
             row(Item.LAUNCHER, s(TitleApp.ownTitleId(activity) != null ? R.string.MENU_LEAVE : R.string.MENU_LAUNCHER));
@@ -1217,6 +1230,12 @@ final class GameMenu {
         }
         case REPORT:
             reportPage();
+            break;
+        case BENCH:
+            benchPage();
+            break;
+        case BENCH_RESULT:
+            benchResultPage();
             break;
         case DISCS:
             pageV.setText(s(R.string.MENU_DISC));
@@ -1554,6 +1573,172 @@ final class GameMenu {
         return reportDraft;
     }
 
+    // ---- Benchmark (game performance) ----------------------------------------------------------------------------
+
+    private boolean benchRunning;
+    private int benchGen;
+    private String benchState;
+    private GamePerf.Summary benchResult;
+    private long benchStartedAt;
+
+    /** The newest save state: its slot (the automatic one included), or -1 without one. */
+    private int newestSlot() {
+        if (!statesSupported())
+            return -1;
+        int best = -1;
+        long when = 0;
+        for (int slot = AUTO_SLOT; slot <= SLOTS; slot++) {
+            long t = host.stateTime(slot);
+            if (t > when) {
+                when = t;
+                best = slot;
+            }
+        }
+        return best;
+    }
+
+    /** What it does, where it starts from (the newest state, or the boot), Start. */
+    private void benchPage() {
+        pageV.setText(s(R.string.BENCH));
+        pageV.setVisibility(View.VISIBLE);
+        TextView explain = Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, s(R.string.BENCH_EXPLAIN));
+        explain.setMaxLines(4);
+        explain.setLineSpacing(0, 1.15f);
+        explain.setPadding(Theme.ROW_INSET, 0, Theme.ROW_INSET, Theme.S2);
+        list.addView(explain, new LinearLayout.LayoutParams(-1, -2));
+        Widgets.MenuRow start = row(Item.BENCH_START, s(R.string.BENCH_START));
+        int slot = newestSlot();
+        start.setSubtitle(slot >= 0 ? activity.getString(R.string.BENCH_FROM_STATE,
+                                                         slotTime(activity, host.stateTime(slot), System.currentTimeMillis()))
+                                    : s(R.string.BENCH_FROM_BOOT));
+        row(Item.BACK, s(R.string.MENU_BACK));
+    }
+
+    /** Start: the newest state is loaded (none: the game restarts and its boot is measured), fast-forward off. */
+    private void startBench() {
+        int slot = newestSlot();
+        if (slot < 0) {
+            Log.i(LauncherActivity.TAG, "shell: menu: benchmark from boot (no save state): restarting");
+            GamePerf.setBenchPending(activity);
+            GameStore.requestFreshStart(activity);   // a boot, not the automatic slot the stop saves
+            host.restartGame();
+            return;
+        }
+        String key = titleId();
+        String hash = GamePerf.stateHash(key, slot, host.stateTime(slot), host.stateThumb(slot));
+        int code = host.loadState(slot);
+        Log.i(LauncherActivity.TAG, "shell: menu: benchmark from slot " + slot + ": " + code);
+        GameCrumbs.state(activity, false, slot, code, "menu");
+        if (code != STATE_OK) {
+            close();
+            flash(stateError(code, slot, false), false);
+            return;
+        }
+        close();
+        beginBench(hash);
+    }
+
+    /** The Benchmark's window starts now; a tick each second asks the game for its figures until 60 s are played. */
+    void beginBench(String state) {
+        try {
+            host.setFastForward(false);
+        } catch (RuntimeException e) {
+            // a game without fast-forward
+        }
+        java.io.File f = GamePerf.benchFile(activity);
+        f.delete();
+        benchRunning = true;
+        benchState = state;
+        benchResult = null;
+        benchStartedAt = clock.getAsLong();
+        int gen = ++benchGen;
+        host.benchMark();
+        flash(s(R.string.BENCH_RUNNING), true);
+        handler.postDelayed(() -> benchTick(gen), 1000);
+    }
+
+    /** At most this long on the wall clock (a game held in the menu or the background counts no time). */
+    static final long BENCH_GIVE_UP_MS = 15 * 60_000L;
+
+    private void benchTick(int gen) {
+        if (gen != benchGen || !benchRunning)
+            return;
+        java.io.File f = GamePerf.benchFile(activity);
+        GamePerf.Summary sum = GamePerf.read(f);
+        if (sum != null && sum.bench && sum.seconds >= GamePerf.BENCH_SECONDS) {
+            benchDone(sum);
+            return;
+        }
+        if (clock.getAsLong() - benchStartedAt > BENCH_GIVE_UP_MS) {
+            benchRunning = false;
+            flash(s(R.string.BENCH_NO_FIGURES), false);
+            return;
+        }
+        host.benchTake(f);
+        handler.postDelayed(() -> benchTick(gen), 1000);
+    }
+
+    /** 60 s played: the result, in the menu, with Send. */
+    void benchDone(GamePerf.Summary sum) {
+        benchRunning = false;
+        GamePerf.benchFile(activity).delete();
+        if (sum.guestFps <= 0 && sum.shownFps <= 0) {
+            flash(s(R.string.BENCH_NO_FIGURES), false);
+            return;
+        }
+        benchResult = sum;
+        Log.i(LauncherActivity.TAG, "shell: menu: benchmark: " + GamePerf.resultLine(sum));
+        if (!open)
+            open("benchmark");
+        showPage(Page.BENCH_RESULT, Item.BENCH_SEND);
+    }
+
+    private void benchResultPage() {
+        pageV.setText(s(R.string.BENCH));
+        pageV.setVisibility(View.VISIBLE);
+        TextView result = Theme.text(activity, Theme.T_BODY, Theme.MEDIUM, Theme.TEXT,
+                                     benchResult == null ? "" : GamePerf.resultLine(benchResult));
+        result.setPadding(Theme.ROW_INSET, Theme.S1, Theme.ROW_INSET, Theme.S2);
+        list.addView(result, new LinearLayout.LayoutParams(-1, -2));
+        TextView explain = Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM,
+                                      s(R.string.BENCH_SEND_EXPLAIN));
+        explain.setMaxLines(4);
+        explain.setLineSpacing(0, 1.15f);
+        explain.setPadding(Theme.ROW_INSET, 0, Theme.ROW_INSET, Theme.S2);
+        list.addView(explain, new LinearLayout.LayoutParams(-1, -2));
+        if (benchResult != null)
+            row(Item.BENCH_SEND, s(R.string.BENCH_SEND));
+        row(Item.BACK, s(R.string.MENU_BACK));
+    }
+
+    /** Send (the consent): one post, never queued, whatever « Send reports automatically » says. */
+    private void sendBench() {
+        GamePerf.Summary sum = benchResult;
+        if (sum == null)
+            return;
+        benchResult = null;
+        String key = titleId(), state = benchState;
+        showPage(Page.MAIN, Item.BENCH);
+        flash(s(R.string.REPORT_SENDING), true);
+        reportWork.execute(() -> {
+            boolean ok;
+            try {
+                ok = CrashReport.sendOnce(activity, GamePerf.benchEnvelope(activity, sum, key, state,
+                                                                           System.currentTimeMillis()));
+            } catch (RuntimeException e) {
+                ok = false;
+            }
+            boolean sent = ok;
+            Log.i(LauncherActivity.TAG, "shell: menu: benchmark result " + (sent ? "sent" : "not sent"));
+            handler.post(() -> flash(s(sent ? R.string.REPORT_SENT : R.string.BENCH_NOT_SENT), sent));
+        });
+    }
+
+    /** Tests: the Benchmark is measuring. */
+    boolean benchRunningForTest() {
+        return benchRunning;
+    }
+
     // ---- Save states and fast-forward (XBA-182) ----------------------------------------------------------------
 
     private boolean statesSupported() {
@@ -1863,6 +2048,15 @@ final class GameMenu {
             break;
         case REPORT_SEND:
             sendReport();
+            break;
+        case BENCH:
+            showPage(Page.BENCH, Item.BENCH_START);
+            break;
+        case BENCH_START:
+            startBench();
+            break;
+        case BENCH_SEND:
+            sendBench();
             break;
         case SCREENSHOT:
             // Closed first: the player sees the game the picture is of (the BMP is the game's frame alone anyway).

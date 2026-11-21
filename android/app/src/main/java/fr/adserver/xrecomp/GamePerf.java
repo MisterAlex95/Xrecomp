@@ -325,4 +325,24 @@ final class GamePerf {
         return envelope(s, tags(c, s, key, null, state), start, endMs, CrashReport.release(c),
                         CrashReport.environment(c));
     }
+
+    /** « Start » without a state: the next start of the game's process measures its boot (one start). */
+    static void setBenchPending(Context c) {
+        File f = new File(new File(c.getFilesDir(), "logs"), "bench-pending");
+        try {
+            File dir = f.getParentFile();
+            if (dir != null && (dir.mkdirs() || dir.isDirectory()))
+                Files.write(f.toPath(), new byte[] { '1' });
+        } catch (IOException e) {
+            Log.w(TAG, "perf: cannot note the benchmark", e);
+        }
+    }
+
+    /** True once after setBenchPending, within 5 minutes (the file goes as it is read). */
+    static boolean takeBenchPending(Context c) {
+        File f = new File(new File(c.getFilesDir(), "logs"), "bench-pending");
+        boolean fresh = f.isFile() && System.currentTimeMillis() - f.lastModified() < 5 * 60_000L;
+        f.delete();
+        return fresh;
+    }
 }
