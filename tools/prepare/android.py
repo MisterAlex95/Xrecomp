@@ -99,14 +99,17 @@ class Run:
         self.stamp.update(kv)
         pack.write_json_atomic(self.stamp_path, self.stamp)
 
-    def py_step(self, args, step, lo, hi, msg, expect, code):
+    def py_step(self, args, step, lo, hi, msg, expect, code, early=None, peak=None):
         """A pipeline tool as `python -m ...`, its progress a time-based guess
-        from lo to just under hi (the tools print no counts)."""
+        from lo to just under hi (the tools print no counts). early: the
+        EarlyCompile running beside it (the lift), whose count the line shows."""
         def tick(t):
             frac = 1.0 - math.exp(-t / max(expect, 1.0))
-            self.rep.progress(step, min(hi - 1, lo + (hi - lo) * frac), msg)
+            n = early.count() if early is not None else 0
+            self.rep.progress(step, min(hi - 1, lo + (hi - lo) * frac),
+                              "%s, %d file(s) compiled meanwhile" % (msg, n) if n else msg)
         self.rep.progress(step, lo, msg)
-        rc, secs = self.procs.run_logged([self.py, "-m"] + args, self.log, cwd=self.m.ROOT, on_tick=tick)
+        rc, secs = self.procs.run_logged([self.py, "-m"] + args, self.log, cwd=self.m.ROOT, on_tick=tick, peak=peak)
         if rc != 0:
             raise cc.StepError(code, "%s failed (exit %d), see %s" % (args[0], rc, self.log))
         self.rep.progress(step, hi, "%s done in %.0f s" % (args[0].split(".")[-1], secs))
@@ -289,7 +292,22 @@ class Run:
                 args += ["--xmv-bind", xmv_bind]
             mb = max(1.0, os.path.getsize(self.xbe) / 1e6)
             log_at = os.path.getsize(self.log) if os.path.exists(self.log) else 0
-            self.py_step(args, 3, 2, 100, "lifting to C", 30 * mb, "LIFT_FAILED")
+            # The chunks tools.recomp has written are compiled while it goes on (cc.EarlyCompile); compile()
+            # adopts the objects.
+            self.proj = proj
+            self.pre_lift_peak_kb = metrics.children_peak_kb()   # before any early compile is reaped
+            early = self.start_early(gen)
+            peak = []
+            try:
+                self.py_step(args, 3, 2, 100, "lifting to C", 30 * mb, "LIFT_FAILED", early, peak)
+                self.lift_peak_kb = peak[0] if peak else None
+            except BaseException:
+                if early is not None:
+                    early.abort()
+                raise
+            if early is not None:
+                early.finish()
+            self.early = early
             # Bodies the analysis cut short (WP2): reaching one stops the title.
             cut = self.m.lift_cut_bodies(self.log, log_at)
             # What the title cannot reach, by class (XBA-139).
@@ -304,11 +322,23 @@ class Run:
                               + ("; lift health: " + words if words else ""))
         self.proj = proj
 
-    def compile(self):
+    def start_early(self, gen):
+        """The EarlyCompile of gen/ beside the lift, or None when the compile cannot be set up yet (compile()
+        then reports why)."""
+        try:
+            tc, flags, jobs, limit = self.compile_setup()
+        except (cc.StepError, AttributeError, TypeError, OSError):
+            return None
+        return cc.EarlyCompile(gen, flags, tc, os.path.join(self.work, "obj"), jobs, limit=limit,
+                               log=self.log).start()
+
+    def compile_setup(self):
+        """(toolchain, flags, jobs, limit) of the compile, made once: the lift's early compiles use the same."""
+        if getattr(self, "_setup", None):
+            return self._setup
         a = self.a
         self.tc = cc.Toolchain(a.cc, os.path.abspath(a.sysroot), cc_prefix=a.cc_prefix_arg, ld=a.ld,
                                ld_prefix=a.ld_prefix_arg, builtins=a.builtins, procs=self.procs)
-        sources = cc.collect_sources(self.proj)
         has_profile = os.path.isdir(os.path.join(self.proj, "src", "title")) and \
             any(fn.endswith(".c") for fn in os.listdir(os.path.join(self.proj, "src", "title")))
         # XBA-313: the CPU this Prepare runs on, which is the device that runs the pack (--cpu-features auto); a
@@ -320,19 +350,34 @@ class Run:
         flags = cc.compile_flags(a.opt, self.m.ROOT, self.proj, self.tc.sysroot, has_profile, a.include_dir,
                                  cpu_features=self.cpu_features)
         jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count())
-        self.jobs, self.sources = jobs, sources
-        self.tools_peak_kb = metrics.children_peak_kb()     # the pipeline tools so far (disasm, lift, ...)
         device_log = getattr(a, "device_log", None)
         limit = (lambda: metrics.jobs_now(device_log, jobs)) if device_log else None
+        self._setup = (self.tc, flags, jobs, limit)
+        return self._setup
+
+    def compile(self):
+        a = self.a
+        tc, flags, jobs, limit = self.compile_setup()
+        sources = cc.collect_sources(self.proj)
+        self.jobs, self.sources = jobs, sources
+        # The pipeline tools so far (disasm, lift, ...): the lifter's own peak, not the early compiles' (reaped since).
+        if getattr(self, "lift_peak_kb", None) is not None:
+            self.tools_peak_kb = max(self.pre_lift_peak_kb, self.lift_peak_kb)
+        else:
+            self.tools_peak_kb = metrics.children_peak_kb()
         self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s, %s" % (len(sources), jobs, a.opt,
                                                                           cpu.describe(self.cpu_features)))
 
         def prog(done, total, now, eta):
             self.rep.progress(4, done * 100 // max(1, total), "%d/%d files (%d compiled)" % (done, total, now),
                               eta)
-        self.objects, n = cc.compile_all(sources, flags, self.tc, os.path.join(self.work, "obj"), jobs,
-                                         log=self.log, on_progress=prog, limit=limit, stats=self.compile_stats)
-        self.rep.progress(4, 100, "%d files, %d compiled" % (len(sources), n))
+        self.objects, n = cc.compile_all(sources, flags, tc, os.path.join(self.work, "obj"), jobs,
+                                         log=self.log, on_progress=prog, limit=limit, stats=self.compile_stats,
+                                         early=getattr(self, "early", None))
+        self.early = None
+        e = self.compile_stats.get("early")
+        self.rep.progress(4, 100, "%d files, %d compiled%s" % (len(sources), n,
+                                                               ", %d of them while lifting" % e if e else ""))
         self.compiled = n
 
     def wanted_images(self):

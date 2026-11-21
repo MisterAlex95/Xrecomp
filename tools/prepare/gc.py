@@ -369,49 +369,9 @@ class Run(ps1.Run):
     def lift_note(self):
         return "lifting to C (main DOL, %d REL module(s) on the disc)" % len(self.rels)
 
-    def lift(self):
-        gen = os.path.join(self.work, "gen")
-        cm = self.cm                        # this module, or a Run built on this one (tools/prepare/x360.py)
-        module = os.environ.get(cm.RECOMP_MODULE_ENV, cm.DEFAULT_MODULE)
-        key = "%s|%s" % (self.disc_key, module)
-        if self.stamp.get("lift") == key and os.path.isdir(gen) and any(f.endswith(".c") for f in os.listdir(gen)):
-            self.rep.progress(3, 100, "lift up to date (%d C files)" % len([f for f in os.listdir(gen)
-                                                                            if f.endswith(".c")]))
-            self.gen = gen
-            return
-        if "lift" in self.stamp:            # a half-written gen/ never passes as a finished lift (XBA-138)
-            self.stamp.pop("lift")
-            self.save_stamp()
-        new = gen + ".new"
-        shutil.rmtree(new, ignore_errors=True)
-        os.makedirs(new)
-        args = self.lift_args(module, new)
-        env = dict(os.environ)
-        paths = [p for p in (os.environ.get(cm.TOOLS_DIR_ENV), cm.tools_dir(self.m.ROOT), self.m.ROOT) if p]
-        if env.get("PYTHONPATH"):
-            paths.append(env["PYTHONPATH"])
-        env["PYTHONPATH"] = os.pathsep.join(paths)
-        self.rep.progress(3, 2, self.lift_note())
-        with open(self.log, "a") as f:
-            f.write("\n$ %s\n" % " ".join(args))
-            f.flush()
-            p = self.procs.start(args, cwd=self.m.ROOT, env=env, stdout=subprocess.DEVNULL, stderr=f,
-                                 stdin=subprocess.DEVNULL)
-            try:
-                rc = p.wait()
-            finally:
-                self.procs.done(p)
-        if self.procs.cancelled.is_set():
-            raise cc.Cancelled()
-        files = [fn for fn in os.listdir(new) if fn.endswith(".c")]
-        if rc != 0 or not files:
-            raise cc.StepError("LIFT_FAILED", "%s failed (exit %d%s), see %s"
-                               % (module, rc, ", no C written" if rc == 0 else "", self.log))
-        shutil.rmtree(gen, ignore_errors=True)
-        os.rename(new, gen)
-        self.save_stamp(lift=key)
-        self.gen = gen
-        self.rep.progress(3, 100, "%d C files%s" % (len(files), self._lift_summary(gen)))
+    # ── the lift: ps1.Run's, its stdout dropped (the lifter's report goes to report.json) ──
+
+    lift_stdout_to_log = False
 
     def _lift_summary(self, gen):
         import json

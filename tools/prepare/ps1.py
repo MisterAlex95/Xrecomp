@@ -380,7 +380,7 @@ class Run(gba.Run):
 
     def lift(self):
         gen = os.path.join(self.work, "gen")
-        cm = self.cm
+        cm = self.cm                        # this module, or a Run built on this one (gc.py, x360.py, n64.py)
         module = os.environ.get(cm.RECOMP_MODULE_ENV, cm.DEFAULT_MODULE)
         key = "%s|%s" % (self.disc_key, module)
         if self.stamp.get("lift") == key and os.path.isdir(gen) and any(f.endswith(".c") for f in os.listdir(gen)):
@@ -388,69 +388,44 @@ class Run(gba.Run):
                                                                             if f.endswith(".c")]))
             self.gen = gen
             return
-        if "lift" in self.stamp:            # a half-written gen/ never passes as a finished lift (XBA-138)
-            self.stamp.pop("lift")
-            self.save_stamp()
-        new = gen + ".new"
-        shutil.rmtree(new, ignore_errors=True)
-        os.makedirs(new)
-        args = [self.py, "-m", module, self.rom, new]
-        if self.seeds:
-            args += ["--discovered", self.seeds]
+        args = self.lift_args(module, gen)
         env = dict(os.environ)
         paths = [p for p in (os.environ.get(cm.TOOLS_DIR_ENV), cm.tools_dir(self.m.ROOT), self.m.ROOT) if p]
         if env.get("PYTHONPATH"):
             paths.append(env["PYTHONPATH"])
         env["PYTHONPATH"] = os.pathsep.join(paths)
-        self.rep.progress(3, 2, "lifting to C")
-        with open(self.log, "a") as f:
-            f.write("\n$ %s\n" % " ".join(args))
-            f.flush()
-            p = self.procs.start(args, cwd=self.m.ROOT, env=env, stdout=f, stderr=subprocess.STDOUT,
-                                 stdin=subprocess.DEVNULL)
-            try:
-                rc = p.wait()
-            finally:
-                self.procs.done(p)
-        if self.procs.cancelled.is_set():
-            raise cc.Cancelled()
-        files = [fn for fn in os.listdir(new) if fn.endswith(".c")]
-        if rc != 0 or not files:
-            raise cc.StepError("LIFT_FAILED", "%s failed (exit %d%s), see %s"
-                               % (module, rc, ", no C written" if rc == 0 else "", self.log))
-        shutil.rmtree(gen, ignore_errors=True)
-        os.rename(new, gen)
-        self.save_stamp(lift=key)
-        self.gen = gen
-        self.rep.progress(3, 100, "%d C files" % len(files))
+        files = self.run_lifter(module, args, env, gen, key, self.lift_note(), self.lift_stdout_to_log)
+        self.rep.progress(3, 100, "%d C files%s" % (len(files), self._lift_summary(gen)))
 
-    # ── 4 compile ──
+    lift_stdout_to_log = True
 
-    def compile(self):
-        a = self.a
-        cm = self.cm
-        self.opt = opt = cm.lifted_opt(a.opt)
-        if self.android:
-            self.tc = cc.Toolchain(a.cc, os.path.abspath(a.sysroot), cc_prefix=a.cc_prefix_arg, ld=a.ld,
-                                   ld_prefix=a.ld_prefix_arg, builtins=a.builtins, procs=self.procs)
-            flags = cm.compile_flags(opt, self.m.ROOT, self.gen, self.tc.sysroot, a.include_dir)
-        else:
-            self.tc = gba.HostToolchain(a.cc or os.environ.get("CC") or "cc", self.procs)
-            flags = cm.compile_flags(opt, self.m.ROOT, self.gen, None, a.include_dir)
-        sources = [os.path.join(self.gen, fn) for fn in sorted(os.listdir(self.gen)) if fn.endswith(".c")]
-        sources += [os.path.abspath(s) for s in a.extra_src]
-        jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count(), cm.JOB_RSS, cm.RESERVED)
-        self.jobs, self.sources = jobs, sources
-        self.tools_peak_kb = metrics.children_peak_kb()
-        device_log = getattr(a, "device_log", None)
-        limit = (lambda: metrics.jobs_now(device_log, jobs)) if device_log else None
-        self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s" % (len(sources), jobs, opt))
+    def lift_args(self, module, out):
+        args = [self.py, "-m", module, self.rom, out]
+        if self.seeds:
+            args += ["--discovered", self.seeds]
+        return args
 
-        def prog(done, total, now, eta):
-            self.rep.progress(4, done * 100 // max(1, total), "%d/%d files (%d compiled)" % (done, total, now), eta)
-        self.objects, n = cc.compile_all(sources, flags, self.tc, os.path.join(self.work, "obj"), jobs,
-                                         log=self.log, on_progress=prog, limit=limit, stats=self.compile_stats)
-        self.rep.progress(4, 100, "%d files, %d compiled" % (len(sources), n))
+    def lift_note(self):
+        return "lifting to C"
+
+    def _lift_summary(self, gen):
+        return ""
+
+    # ── 4 compile: gba.Run's, with this console's flags ──
+
+    @property
+    def job_rss(self):
+        return self.cm.JOB_RSS
+
+    @property
+    def reserved(self):
+        return self.cm.RESERVED
+
+    def lifted_opt(self):
+        return self.cm.lifted_opt(self.a.opt)
+
+    def flags_for(self, opt, sysroot):
+        return self.cm.compile_flags(opt, self.m.ROOT, self.gen, sysroot, self.a.include_dir)
 
     # ── 5 pack ──
 

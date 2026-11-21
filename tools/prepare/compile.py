@@ -150,23 +150,26 @@ class Procs:
             raise Cancelled()
         return p.returncode, out.decode("utf-8", "replace")
 
-    def run_logged(self, args, log, cwd=None, on_tick=None, tick=0.5):
+    def run_logged(self, args, log, cwd=None, on_tick=None, tick=0.5, peak=None):
         """Run with stdout+stderr appended to `log`; on_tick(elapsed seconds)
-        while it runs. Returns (returncode, seconds)."""
+        while it runs. Returns (returncode, seconds). peak: a list that gets
+        the child's own peak RSS in kB (wait_ticking)."""
         t0 = time.time()
         with open(log, "a") as f:
             f.write("\n$ %s\n" % " ".join(args))
             f.flush()
             p = self.start(args, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
             try:
-                while True:
-                    try:
-                        p.wait(timeout=tick)
-                        break
-                    except subprocess.TimeoutExpired:
-                        if on_tick:
-                            on_tick(time.time() - t0)
+                kb = wait_ticking(p, (lambda: on_tick(time.time() - t0)) if on_tick else None, tick)
+                if peak is not None:
+                    peak.append(kb)
             finally:
+                if p.returncode is None:     # an exception while it ran (a cancel, a bug): it does not outlive us
+                    try:
+                        p.kill()
+                        p.wait()
+                    except OSError:
+                        pass
                 self.done(p)
         if self.cancelled.is_set():
             raise Cancelled()
@@ -189,6 +192,38 @@ class Procs:
                 p.kill()
             except OSError:
                 pass
+
+
+def wait_ticking(p, on_tick=None, tick=0.5):
+    """Wait for Popen p, calling on_tick() every `tick` seconds; its exit status
+    into p.returncode. Returns its own peak RSS in kB (wait4's ru_maxrss: the
+    lifter's alone, where RUSAGE_CHILDREN mixes in every compile reaped so
+    far), 0 where the host has no wait4."""
+    if not hasattr(os, "wait4"):
+        while True:
+            try:
+                p.wait(timeout=tick)
+                return 0
+            except subprocess.TimeoutExpired:
+                if on_tick:
+                    on_tick()
+    next_tick = time.time() + tick
+    while True:
+        try:
+            pid, status, ru = os.wait4(p.pid, os.WNOHANG)
+        except InterruptedError:
+            continue
+        except ChildProcessError:       # reaped elsewhere: Popen knows the code
+            p.wait()
+            return 0
+        if pid:
+            p.returncode = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else \
+                (-(status & 0x7F) if status & 0x7F else (status >> 8) & 0xFF)
+            return int(ru.ru_maxrss)
+        time.sleep(0.05)
+        if on_tick and time.time() >= next_tick:
+            next_tick = time.time() + tick
+            on_tick()
 
 
 def _reap(p):
@@ -595,7 +630,7 @@ def _first_error(out):
     return lines[-1].strip() if lines else "no output"
 
 
-def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, limit=None, stats=None):
+def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, limit=None, stats=None, early=None):
     """Compile `sources` (largest first) into obj_dir/<key>.o.
 
     Returns (objects in the order of `sources`, number compiled now).
@@ -605,13 +640,16 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     before each compile starts, never above `jobs`. stats: a dict that gets
     "peak_kb" (each compile's peak RSS), "compiled" and "held_s" (wall time
     limit() held every compile, 0 jobs) and "hashed" (the sources read and
-    hashed for their key: plan_keys()).
+    hashed for their key: plan_keys()). early: the EarlyCompile that ran
+    beside the lift (finished): its objects that still match are adopted,
+    and its compiles count in stats.
     Raises StepError (COMPILE_FAILED / NO_SPACE) or Cancelled."""
     os.makedirs(obj_dir, exist_ok=True)
     cached_id = getattr(tc, "compiler_id_cached", None)
     plan, hashed = plan_keys(sources, flags, cached_id(obj_dir) if cached_id else tc.compiler_id(), obj_dir)
     if stats is not None:
         stats["hashed"] = hashed
+    adopted = early.adopt(plan) if early is not None else 0
     total = len(plan)
     todo = [p for p in plan if not os.path.isfile(p[2])]
     todo.sort(key=lambda p: -p[1])
@@ -626,8 +664,12 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     peaks = []
     held = [0.0]
     held_since = [None]             # the device log holds every compile (jobs 0) since then
+    if early is not None:
+        peaks.extend(early.peaks)
     if stats is not None:
         stats.update(peak_kb=peaks, compiled=0, held_s=0.0)
+        if early is not None:
+            stats.update(early=adopted, early_compiled=early.compiled)
     if on_progress:
         on_progress(state["done"], total, 0, None)
 
@@ -704,12 +746,272 @@ def compile_all(sources, flags, tc, obj_dir, jobs, log=None, on_progress=None, l
     if held_since[0] is not None:
         held[0] += time.time() - held_since[0]
     if stats is not None:
-        stats.update(compiled=state["compiled"], held_s=held[0])
+        stats.update(compiled=state["compiled"] + adopted, held_s=held[0])
     if tc.procs.cancelled.is_set():
         raise Cancelled()
     if failed:
         raise StepError(*failed[0])
-    return [p[2] for p in plan], state["compiled"]
+    return [p[2] for p in plan], state["compiled"] + adopted
+
+
+# ── Compiling while the lifter runs ─────────────────────────────
+#
+# The lifters write their C file by file (x360_tools.recomp one per bucket of guest code, tools.recomp one per
+# chunk with --split-bytes), and the compile used to wait for the last one. EarlyCompile compiles the files that are
+# finished while the lifter goes on, into temporary objects; compile_all then adopts each one under the key it
+# computes after the lift, when the source and the headers it was compiled against are still those it would
+# compile now, and compiles the rest as before. compile_all stays the only judge: an early object that is not
+# adopted is deleted, an early compile that fails says nothing (compile_all compiles that file again and reports
+# its error), and a lift that fails or is cancelled stops every early compile and leaves no temporary object.
+#
+# « Finished »: no lifter announces its files, and they write them in place (open, write, close). A file is taken
+# once its stat (size, mtime, ctime, inode) is the same at two polls POLL_S apart; whatever happens later, an object
+# is only adopted when the source's stat when compile_all hashes it is the one taken before that compile started,
+# so an object is never kept under the key of other bytes than the ones clang read.
+#
+# Jobs: the lifter counts as one, so at most min(jobs, limit()) - 1 early compiles run (jobs 1, a severe device
+# (limit 1) or a hold (0): none, as before), and one starts only while MemAvailable leaves `reserved` beside it.
+
+EARLY_PREFIX = "early-"          # the temporary objects in obj/ (prune removes a crashed run's)
+
+
+class EarlyCompile:
+    POLL_S = 0.25
+
+    def __init__(self, gen, flags, tc, obj_dir, jobs, limit=None, log=None, job_rss=JOB_RSS, reserved=RESERVED,
+                 mem=mem_available):
+        self.gen = gen
+        self.flags = list(flags)
+        self.tc = tc
+        self.obj_dir = obj_dir
+        self.jobs = max(1, jobs)
+        self.limit = limit
+        self.log = log
+        self.job_rss, self.reserved, self.mem = job_rss, reserved, mem
+        self.dirs = include_dirs_of(self.flags)
+        self.funcs_h = os.path.join(os.path.abspath(gen), FUNCS_H)
+        self.done = {}            # source -> (temporary object, source stat, headers' stat digest, includes FUNCS_H)
+        self.peaks = []           # each early compile's peak RSS (kB)
+        self.compiled = 0         # early compiles that succeeded (adopted or not)
+        self.failed = 0           # early compiles that failed or whose source changed under them
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._queue = []
+        self._seen = {}           # source -> its stat at the last poll
+        self._taken = {}          # source -> the stat it was queued with
+        self._running = 0
+        self._live = set()        # the clang processes running now (Popen)
+        self._threads = []
+        self._stop = False
+        self._watcher = None
+        self._seq = 0
+
+    # -- the lifter's side --
+
+    def start(self):
+        os.makedirs(self.obj_dir, exist_ok=True)
+        self._watcher = threading.Thread(target=self._watch, name="early-compile", daemon=True)
+        self._watcher.start()
+        return self
+
+    def count(self):
+        with self._lock:
+            return self.compiled
+
+    def finish(self):
+        """The lifter has exited: no early compile starts any more; waits for the running ones."""
+        self._halt()
+        self._join()
+
+    def abort(self):
+        """The lift failed or was cancelled: the running compiles are killed, and every temporary object deleted."""
+        self._halt()
+        with self._lock:
+            live = list(self._live)
+        for p in live:
+            try:
+                p.kill()
+            except OSError:
+                pass
+        self._join()
+        self.discard()
+
+    def discard(self):
+        with self._lock:
+            done, self.done = self.done, {}
+        for tmp, _, _, _ in done.values():
+            _remove(tmp)
+
+    def _halt(self):
+        with self._cv:
+            self._stop = True
+            self._queue = []
+            self._cv.notify_all()
+
+    def _join(self):
+        if self._watcher is not None:
+            self._watcher.join()
+        for t in list(self._threads):
+            t.join()
+
+    # -- watching gen/ --
+
+    def _allowed(self):
+        n = self.jobs if self.limit is None else max(0, min(self.jobs, self.limit()))
+        return n - 1                # the lifter is one of them
+
+    def _poll(self):
+        try:
+            names = os.listdir(self.gen)
+        except OSError:
+            return
+        for fn in sorted(names):
+            if not fn.endswith(".c"):
+                continue
+            src = os.path.join(self.gen, fn)
+            try:
+                sig = stat_sig(src)
+            except OSError:
+                continue
+            last = self._seen.get(src)
+            self._seen[src] = sig
+            if sig == last and self._taken.get(src) != sig:
+                self._taken[src] = sig
+                with self._lock:
+                    self._queue.append(src)
+
+    def _watch(self):
+        try:
+            while True:
+                with self._cv:
+                    if self._stop or self.tc.procs.cancelled.is_set():
+                        return
+                self._poll()
+                with self._cv:
+                    while self._queue and not self._stop and self._running < self._allowed() and self._room():
+                        src = self._queue.pop(0)
+                        self._running += 1
+                        t = threading.Thread(target=self._one, args=(src,), daemon=True)
+                        self._threads.append(t)
+                        t.start()
+                    self._cv.wait(self.POLL_S)
+        except Exception:           # a bug here must not break the lift: compile_all does the work
+            with self._cv:
+                self._stop = True
+
+    def _room(self):
+        if self.mem is None:
+            return True
+        avail = self.mem()
+        return avail is None or avail >= self.reserved + self.job_rss
+
+    # -- one compile --
+
+    def _headers(self, with_funcs_h):
+        """sha256 over the stat of every header the compile sees; FUNCS_H left out for a file that does not include
+        it (tools.recomp's self-contained chunks: the lift writes recomp_funcs.h last)."""
+        h = hashlib.sha256()
+        for p, _ in _headers(self.dirs):
+            if not with_funcs_h and p == os.path.realpath(self.funcs_h):
+                continue
+            h.update(("%s\0%s\0" % (p, stat_sig(p))).encode())
+        return h.hexdigest()
+
+    def _one(self, src):
+        tmp = None
+        ok = False
+        try:
+            sig = stat_sig(src)
+            with open(src, "rb") as f:
+                with_funcs_h = b'"' + FUNCS_H.encode() + b'"' in f.read()
+            hs = self._headers(with_funcs_h)
+            with self._lock:
+                self._seq += 1
+                tmp = os.path.join(self.obj_dir, "%s%d.%d.o" % (EARLY_PREFIX, os.getpid(), self._seq))
+            rc, peak = self._run(self.tc.compile_args(self.flags, src, tmp))
+            if peak:
+                with self._lock:
+                    self.peaks.append(peak)
+            ok = (rc == 0 and os.path.isfile(tmp) and stat_sig(src) == sig and self._headers(with_funcs_h) == hs)
+            if ok:
+                with self._lock:
+                    old = self.done.get(src)
+                    self.done[src] = (tmp, sig, hs, with_funcs_h)
+                    self.compiled += 1
+                if old:
+                    _remove(old[0])
+        except (OSError, Cancelled):
+            ok = False
+        finally:
+            if not ok:
+                if tmp:
+                    _remove(tmp)
+                with self._lock:
+                    self.failed += 1
+            with self._cv:
+                self._running -= 1
+                self._cv.notify_all()
+
+    def _run(self, args):
+        """(returncode, peak RSS kB) of one compile, its output dropped (compile_all reports a real error)."""
+        procs = self.tc.procs
+        with self._lock:
+            if self._stop:
+                return 1, 0
+        p = procs.start(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        with self._lock:
+            self._live.add(p)
+            stop = self._stop
+        if stop:                    # abort() copied _live before this one was in it
+            p.kill()
+        try:
+            if hasattr(os, "wait4"):
+                peak = _reap(p)
+            else:
+                p.wait()
+                peak = 0
+        finally:
+            procs.done(p)
+            with self._lock:
+                self._live.discard(p)
+        if procs.cancelled.is_set():
+            raise Cancelled()
+        return p.returncode, peak
+
+    # -- compile_all's side --
+
+    def adopt(self, plan):
+        """Moves each early object whose source and headers are still the ones it was compiled from to its key's
+        object path in `plan` ([(source, size, object)]); deletes the others. Returns how many were adopted."""
+        with self._lock:
+            done, self.done = self.done, {}
+        n = 0
+        heads = {}
+        for src, _, obj in plan:
+            got = done.pop(src, None)
+            if got is None:
+                continue
+            tmp, sig, hs, with_funcs_h = got
+            try:
+                if with_funcs_h not in heads:
+                    heads[with_funcs_h] = self._headers(with_funcs_h)
+                if stat_sig(src) == sig and heads[with_funcs_h] == hs and not os.path.isfile(obj):
+                    os.replace(tmp, obj)
+                    n += 1
+                    continue
+            except OSError:
+                pass
+            _remove(tmp)
+        for tmp, _, _, _ in done.values():
+            _remove(tmp)
+        return n
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def prune(obj_dir, keep):

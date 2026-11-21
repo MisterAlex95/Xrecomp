@@ -366,14 +366,8 @@ class Run:
                                                                             if f.endswith(".c")]))
             self.gen = gen
             return
-        if "lift" in self.stamp:            # a half-written gen/ never passes as a finished lift (XBA-138)
-            self.stamp.pop("lift")
-            self.save_stamp()
-        new = gen + ".new"
-        shutil.rmtree(new, ignore_errors=True)
-        os.makedirs(new)
         module = os.environ.get(RECOMP_MODULE_ENV, DEFAULT_MODULE)
-        args = [self.py, "-m", module, self.rom, new]
+        args = [self.py, "-m", module, self.rom, gen]
         if self.seeds:
             args += ["--discovered", self.seeds]
         env = dict(os.environ)
@@ -381,54 +375,125 @@ class Run:
         if env.get("PYTHONPATH"):
             paths.append(env["PYTHONPATH"])
         env["PYTHONPATH"] = os.pathsep.join(paths)
-        self.rep.progress(3, 2, "lifting to C")
-        with open(self.log, "a") as f:
-            f.write("\n$ %s\n" % " ".join(args))
-            f.flush()
-            p = self.procs.start(args, cwd=self.m.ROOT, env=env, stdout=f, stderr=subprocess.STDOUT,
-                                 stdin=subprocess.DEVNULL)
-            try:
-                rc = p.wait()
-            finally:
-                self.procs.done(p)
-        if self.procs.cancelled.is_set():
-            raise cc.Cancelled()
-        files = [fn for fn in os.listdir(new) if fn.endswith(".c")]
-        if rc != 0 or not files:
-            raise cc.StepError("LIFT_FAILED", "%s failed (exit %d%s), see %s"
-                               % (module, rc, ", no C written" if rc == 0 else "", self.log))
-        shutil.rmtree(gen, ignore_errors=True)
-        os.rename(new, gen)
-        self.save_stamp(lift=key)
-        self.gen = gen
+        files = self.run_lifter(module, args, env, gen, key, "lifting to C", stdout_to_log=True)
         self.rep.progress(3, 100, "%d C files" % len(files))
+
+    def run_lifter(self, module, args, env, gen, key, note, stdout_to_log):
+        """The lifter into gen/ (emptied first), the files it has finished compiled meanwhile (cc.EarlyCompile:
+        compile() adopts them). The lift stamp `key` is dropped first and saved only once the lifter succeeded, so a
+        half-written gen/ never passes as a finished lift (XBA-138). The C files written; StepError LIFT_FAILED or
+        Cancelled, every early compile stopped."""
+        if "lift" in self.stamp:
+            self.stamp.pop("lift")
+            self.save_stamp()
+        # In place, not in gen.new: an object's key and bytes hold its source's path (compile.py cache_key), so the
+        # early compiles must see the path compile() will.
+        shutil.rmtree(gen + ".new", ignore_errors=True)      # an older toolkit's
+        shutil.rmtree(gen, ignore_errors=True)
+        os.makedirs(gen)
+        self.gen = gen
+        tc, flags, jobs, limit = self.compile_setup()
+        self.tools_peak_kb = metrics.children_peak_kb()     # the tools so far, before any early compile is reaped
+        early = cc.EarlyCompile(gen, flags, tc, os.path.join(self.work, "obj"), jobs, limit=limit, log=self.log,
+                                job_rss=self.job_rss, reserved=self.reserved).start()
+        self.rep.progress(3, 2, note)
+        rc = None
+        try:
+            with open(self.log, "a") as f:
+                f.write("\n$ %s\n" % " ".join(args))
+                f.flush()
+                p = self.procs.start(args, cwd=self.m.ROOT, env=env, stdout=f if stdout_to_log else subprocess.DEVNULL,
+                                     stderr=subprocess.STDOUT if stdout_to_log else f, stdin=subprocess.DEVNULL)
+                shown = [0]
+
+                def tick():
+                    n = early.count()
+                    if n != shown[0]:
+                        shown[0] = n
+                        self.rep.progress(3, 2, "%s, %d file(s) compiled meanwhile" % (note, n))
+                try:
+                    peak = cc.wait_ticking(p, tick, 1.0)
+                    rc = p.returncode
+                    self.lift_peak_kb = peak
+                finally:
+                    if rc is None:          # an exception (a cancel, a bug) while it ran: it does not outlive us
+                        try:
+                            p.kill()
+                            p.wait()
+                        except OSError:
+                            pass
+                    self.procs.done(p)
+            if self.procs.cancelled.is_set():
+                raise cc.Cancelled()
+            files = [fn for fn in os.listdir(gen) if fn.endswith(".c")]
+            if rc != 0 or not files:
+                raise cc.StepError("LIFT_FAILED", "%s failed (exit %d%s), see %s"
+                                   % (module, rc, ", no C written" if rc == 0 else "", self.log))
+        except BaseException:
+            early.abort()
+            raise
+        early.finish()
+        self.early = early
+        self.save_stamp(lift=key)
+        return files
 
     # ── 4 compile ──
 
-    def compile(self):
+    job_rss, reserved = GBA_JOB_RSS, GBA_RESERVED
+
+    def lifted_opt(self):
+        return gba_opt(self.a.opt)
+
+    def flags_for(self, opt, sysroot):
+        return compile_flags(opt, self.m.ROOT, self.gen, sysroot, self.a.include_dir)
+
+    def compile_setup(self):
+        """(toolchain, flags, jobs, limit) of the compile, made once: the lift's early compiles use the same."""
+        if getattr(self, "_setup", None):
+            return self._setup
         a = self.a
-        self.opt = opt = gba_opt(a.opt)
+        self.opt = opt = self.lifted_opt()
         if self.android:
             self.tc = cc.Toolchain(a.cc, os.path.abspath(a.sysroot), cc_prefix=a.cc_prefix_arg, ld=a.ld,
                                    ld_prefix=a.ld_prefix_arg, builtins=a.builtins, procs=self.procs)
-            flags = compile_flags(opt, self.m.ROOT, self.gen, self.tc.sysroot, a.include_dir)
+            flags = self.flags_for(opt, self.tc.sysroot)
         else:
             self.tc = HostToolchain(a.cc or os.environ.get("CC") or "cc", self.procs)
-            flags = compile_flags(opt, self.m.ROOT, self.gen, None, a.include_dir)
-        sources = [os.path.join(self.gen, fn) for fn in sorted(os.listdir(self.gen)) if fn.endswith(".c")]
-        sources += [os.path.abspath(s) for s in a.extra_src]
-        jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count(), GBA_JOB_RSS, GBA_RESERVED)
-        self.jobs, self.sources = jobs, sources
-        self.tools_peak_kb = metrics.children_peak_kb()
+            flags = self.flags_for(opt, None)
+        jobs = a.jobs or cc.default_jobs(cc.mem_available(), os.cpu_count(), self.job_rss, self.reserved)
         device_log = getattr(a, "device_log", None)
         limit = (lambda: metrics.jobs_now(device_log, jobs)) if device_log else None
+        self._setup = (self.tc, flags, jobs, limit)
+        return self._setup
+
+    def compile(self):
+        a = self.a
+        tc, flags, jobs, limit = self.compile_setup()
+        opt = self.opt
+        sources = [os.path.join(self.gen, fn) for fn in sorted(os.listdir(self.gen)) if fn.endswith(".c")]
+        sources += [os.path.abspath(s) for s in a.extra_src]
+        self.jobs, self.sources = jobs, sources
+        self.tools_peak_kb = self.tools_peak()
         self.rep.progress(4, 0, "compiling %d files, %d jobs, -O%s" % (len(sources), jobs, opt))
 
         def prog(done, total, now, eta):
             self.rep.progress(4, done * 100 // max(1, total), "%d/%d files (%d compiled)" % (done, total, now), eta)
-        self.objects, n = cc.compile_all(sources, flags, self.tc, os.path.join(self.work, "obj"), jobs,
-                                         log=self.log, on_progress=prog, limit=limit, stats=self.compile_stats)
-        self.rep.progress(4, 100, "%d files, %d compiled" % (len(sources), n))
+        self.objects, n = cc.compile_all(sources, flags, tc, os.path.join(self.work, "obj"), jobs,
+                                         log=self.log, on_progress=prog, limit=limit, stats=self.compile_stats,
+                                         early=getattr(self, "early", None))
+        self.early = None
+        self.rep.progress(4, 100, "%d files, %d compiled%s" % (len(sources), n, self.early_note()))
+
+    def tools_peak(self):
+        """The pipeline tools' peak RSS (pack.json tools_peak_mb): the children reaped before the lift, and the
+        lifter's own (the early compiles are the compile's, not the tools')."""
+        if getattr(self, "lift_peak_kb", None) is None:
+            return metrics.children_peak_kb()
+        return max(self.tools_peak_kb or 0, self.lift_peak_kb)
+
+    def early_note(self):
+        e = self.compile_stats.get("early")
+        return ", %d of them while lifting" % e if e else ""
 
     # ── 5 pack ──
 
