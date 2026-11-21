@@ -256,6 +256,17 @@ public class LauncherActivity extends Activity {
     /** Where a missing theme is baked: a thread of its own (tests run it in place: TestSupport.StockTheme). */
     static final java.util.concurrent.Executor THEME_THREAD = r -> new Thread(r, "xba-theme").start();
     static java.util.concurrent.Executor themeExecutor = THEME_THREAD;
+    /**
+     * Report launcher-lag WP-4: the library polls' model work (the entries, from sources.json, downloads.json, the
+     * queue and each game's pack) runs here, one after the other, never on the main thread; tests run it in place
+     * (TestSupport.StockTheme).
+     */
+    static final java.util.concurrent.Executor LIB_THREAD = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "xba-lib-poll");
+        t.setDaemon(true);
+        return t;
+    });
+    static java.util.concurrent.Executor libExecutor = LIB_THREAD;
 
     // ---- Home ----
     private Widgets.PillButton homePrimary;
@@ -5643,14 +5654,12 @@ public class LauncherActivity extends Activity {
                     homeStatus.set(progressLine(s), Theme.OK);
             }
         } else if (screen == Screen.HOME && homeChip != null) {
-            LibraryScreen.Entry e = ++libPolls % LIBRARY_POLL_EVERY == 0 ? currentEntry() : null;
-            if (e != null && e.chip != homeChip)
-                backgroundRefresh(screen);
+            if (++libPolls % LIBRARY_POLL_EVERY == 0)
+                homeChipCheckLater();
         } else if (screen == Screen.LIBRARY && !scanning()) {
             // (not while the search is typed: the field and its keyboard would go)
-            if (++libPolls % LIBRARY_POLL_EVERY == 0 && (libSearch == null || !libSearch.hasFocus())
-                && libraryChanged())
-                backgroundRefresh(screen);
+            if (++libPolls % LIBRARY_POLL_EVERY == 0 && !libSearchTyped())
+                libraryCheckLater();
         } else if (screen == Screen.HOME && homePrep != null) {
             Prep now = prep();
             if (now != homePrep) {
@@ -6000,16 +6009,28 @@ public class LauncherActivity extends Activity {
     }
 
     private LibraryScreen.Env libEnv() {
+        LibraryScreen.Env e = libEnvBase();
+        fillLibEnv(e, index);
+        return e;
+    }
+
+    /** What libEnv takes from the main thread's state (the import running, the packs dropped); the rest is fillLibEnv's. */
+    private LibraryScreen.Env libEnvBase() {
         LibraryScreen.Env e = new LibraryScreen.Env();
+        e.importingTid = worker != null && worker.isAlive() ? importTid : null;
+        e.packDropped = new java.util.HashSet<>(droppedPacks);
+        return e;
+    }
+
+    /** The rest of libEnv: files, processes and the network library, read on any thread (index: the one shown). */
+    private void fillLibEnv(LibraryScreen.Env e, LibraryIndex index) {
         e.toolchain = Toolchain.available(this);
         // Each library folder can be read: All files access for a path, the persisted permission for a tree.
         e.accessible = true;
         e.noAccess = Library.unreadableFolders(this, Environment.isExternalStorageManager());
         e.prepareProcess = prepareProcessAlive();
         e.runningTid = gameRunning() ? launchedTid() : null;
-        e.importingTid = worker != null && worker.isAlive() ? importTid : null;
         e.queue = PrepareProtocol.readQueue(PrepareProtocol.queueFile(getFilesDir()));
-        e.packDropped = droppedPacks;
         e.toolkit = Toolchain.toolkitDigest(this);
         // XBA-319: the network sources' games, unless the player hid them (Options › Network sources)
         e.remote = NetService.showInLibrary(this) ? RemoteLibrary.notLocal(getFilesDir(), index)
@@ -6018,7 +6039,84 @@ public class LauncherActivity extends Activity {
         for (NetDownloads.Job j : NetDownloads.read(getFilesDir()))
             d.put(j.key, j);
         e.downloads = d;
-        return e;
+    }
+
+    /** A copy of the games' list to read on another thread (the records are shared, read only). */
+    private Library.Games gamesSnapshot() {
+        Library.Games g = new Library.Games();
+        g.selected = games.selected;
+        g.unreadable = games.unreadable;
+        g.games.putAll(games.games);
+        return g;
+    }
+
+    /** The search field has the focus (a rebuild would take it and its keyboard away). */
+    private boolean libSearchTyped() {
+        return libSearch != null && libSearch.hasFocus();
+    }
+
+    private boolean libCheckBusy, homeCheckBusy, netPollBusy;
+
+    /**
+     * The library poll (WP-4): its entries worked out on libExecutor, compared there with those shown; only a change
+     * comes back to the main thread, which builds the library again if it still shows the same entries. One at a
+     * time.
+     */
+    private void libraryCheckLater() {
+        if (libCheckBusy)
+            return;
+        libCheckBusy = true;
+        List<LibraryScreen.Entry> shown = libEntries;
+        File files = getFilesDir();
+        Library.Games g = gamesSnapshot();
+        LibraryIndex idx = index;
+        LibraryScreen.Env env = libEnvBase();
+        libExecutor.execute(() -> {
+            boolean changed = false;
+            try {
+                fillLibEnv(env, idx);
+                changed = entriesDiffer(LibraryScreen.entries(files, g, idx, env), shown);
+            } catch (RuntimeException ex) {
+                Log.w(TAG, "launcher: library poll: " + ex);
+            }
+            boolean c = changed;
+            poller.post(() -> {
+                libCheckBusy = false;
+                if (c && !isDestroyed() && libEntries == shown && screen == Screen.LIBRARY && !scanning()
+                    && !libSearchTyped())
+                    backgroundRefresh(screen);
+            });
+        });
+    }
+
+    /** Home's poll (WP-4): the selected game's entry worked out on libExecutor; a new chip builds Home again. */
+    private void homeChipCheckLater() {
+        Library.Record r = games.selected();
+        if (homeCheckBusy || r == null)
+            return;
+        homeCheckBusy = true;
+        String tid = r.titleId;
+        File files = getFilesDir();
+        Library.Games g = gamesSnapshot();
+        LibraryIndex idx = index;
+        LibraryScreen.Env env = libEnvBase();
+        libExecutor.execute(() -> {
+            GameState.Chip chip = null;
+            try {
+                fillLibEnv(env, idx);
+                chip = LibraryScreen.entry(files, tid, g, idx, env).chip;
+            } catch (RuntimeException ex) {
+                Log.w(TAG, "launcher: home poll: " + ex);
+            }
+            GameState.Chip c = chip;
+            poller.post(() -> {
+                homeCheckBusy = false;
+                Library.Record now = games.selected();
+                if (c != null && !isDestroyed() && screen == Screen.HOME && homeChip != null && c != homeChip
+                    && now != null && tid.equals(now.titleId))
+                    backgroundRefresh(screen);
+            });
+        });
     }
 
     /** The selected game as a library entry (its chip), or null. */
@@ -7193,16 +7291,62 @@ public class LauncherActivity extends Activity {
      */
     private void netPoll() {
         File dl = LibraryScanner.netDir(this);
-        if (dl == null)
+        if (dl == null || netPollBusy)
             return;
-        for (NetDownloads.Job j : NetDownloads.read(getFilesDir())) {
-            if (!NetDownloads.DONE.equals(j.state) || !j.auto || j.files.isEmpty())
-                continue;
-            File unpacked = NetUnpack.dirOf(dl, j);   // XBA-331: an archive's game is in the folder it unpacked into
-            File f = unpacked != null ? unpacked : NetDownloads.jobFile(dl, j, j.files.get(0).path);
-            LibraryScreen.Entry e = f == null ? null
-                                    : unpacked != null ? entryUnder(LibraryIndex.fileLoc(f) + "/")
-                                    : entryAt(LibraryIndex.fileLoc(f));
+        netPollBusy = true;
+        File files = getFilesDir();
+        Library.Games g = gamesSnapshot();
+        LibraryIndex idx = index;
+        LibraryScreen.Env env = libEnvBase();
+        // WP-4: the jobs read and their games looked for (the library's entries, once) on libExecutor
+        libExecutor.execute(() -> {
+            List<NetDone> done = new ArrayList<>();
+            try {
+                List<LibraryScreen.Entry> entries = null;
+                for (NetDownloads.Job j : NetDownloads.read(files)) {
+                    if (!NetDownloads.DONE.equals(j.state) || !j.auto || j.files.isEmpty())
+                        continue;
+                    File unpacked = NetUnpack.dirOf(dl, j);   // XBA-331: an archive's game is in the folder it unpacked into
+                    File f = unpacked != null ? unpacked : NetDownloads.jobFile(dl, j, j.files.get(0).path);
+                    if (f != null && entries == null) {
+                        fillLibEnv(env, idx);
+                        entries = LibraryScreen.entries(files, g, idx, env);
+                    }
+                    LibraryScreen.Entry e = f == null ? null
+                                            : unpacked != null ? entryUnder(entries, LibraryIndex.fileLoc(f) + "/")
+                                            : entryAt(entries, LibraryIndex.fileLoc(f));
+                    done.add(new NetDone(j, f, e));
+                }
+            } catch (RuntimeException ex) {
+                Log.w(TAG, "launcher: net poll: " + ex);
+            }
+            poller.post(() -> {
+                netPollBusy = false;
+                if (!isDestroyed())
+                    netPollDone(done);
+            });
+        });
+    }
+
+    /** A download done (« auto »), its file, and its game in the library (null: not listed yet). */
+    private static final class NetDone {
+        final NetDownloads.Job job;
+        final File file;
+        final LibraryScreen.Entry entry;
+
+        NetDone(NetDownloads.Job job, File file, LibraryScreen.Entry entry) {
+            this.job = job;
+            this.file = file;
+            this.entry = entry;
+        }
+    }
+
+    /** netPoll's outcome on the main thread: one game per tick goes on (or a scan is started for it). */
+    private void netPollDone(List<NetDone> done) {
+        for (NetDone d : done) {
+            NetDownloads.Job j = d.job;
+            File f = d.file;
+            LibraryScreen.Entry e = d.entry;
             if (e == null) {
                 int scans = netScans.getOrDefault(j.key, 0);
                 if (f != null && scans < 3) {
@@ -7252,16 +7396,16 @@ public class LauncherActivity extends Activity {
     }
 
     /** The first library entry whose active file is below the folder location prefix (ends with « / »), or null. */
-    private LibraryScreen.Entry entryUnder(String prefix) {
-        for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
+    private static LibraryScreen.Entry entryUnder(List<LibraryScreen.Entry> entries, String prefix) {
+        for (LibraryScreen.Entry e : entries)
             if (e.active != null && e.active.loc.startsWith(prefix))
                 return e;
         return null;
     }
 
     /** The library entry whose active file is at loc, or null. */
-    private LibraryScreen.Entry entryAt(String loc) {
-        for (LibraryScreen.Entry e : LibraryScreen.entries(getFilesDir(), games, index, libEnv()))
+    private static LibraryScreen.Entry entryAt(List<LibraryScreen.Entry> entries, String loc) {
+        for (LibraryScreen.Entry e : entries)
             if (e.active != null && loc.equals(e.active.loc))
                 return e;
         return null;
@@ -7661,12 +7805,11 @@ public class LauncherActivity extends Activity {
     }
 
     /** The library's entries changed state (a Prepare moved on, the queue, a game ended): true. */
-    private boolean libraryChanged() {
-        List<LibraryScreen.Entry> now = LibraryScreen.entries(getFilesDir(), games, index, libEnv());
-        if (now.size() != libEntries.size())
+    static boolean entriesDiffer(List<LibraryScreen.Entry> now, List<LibraryScreen.Entry> shown) {
+        if (now.size() != shown.size())
             return true;
         for (int i = 0; i < now.size(); i++) {
-            LibraryScreen.Entry a = now.get(i), b = libEntries.get(i);
+            LibraryScreen.Entry a = now.get(i), b = shown.get(i);
             if (!a.tid.equals(b.tid) || a.chip != b.chip || a.prepared != b.prepared || a.queuePos != b.queuePos
                 || !netState(a).equals(netState(b)))
                 return true;

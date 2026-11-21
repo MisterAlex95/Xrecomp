@@ -305,7 +305,8 @@ final class TestSupport {
 
     /**
      * Puts the stock colours back after each test (Theme's tokens are mutable statics, GameTheme applies a game's),
-     * and bakes a missing game theme in place rather than on a thread (the launcher's re-show stays posted), so a
+     * and bakes a missing game theme in place rather than on a thread (the launcher's re-show stays posted), as the
+     * library polls' model work (LauncherActivity.libExecutor; its outcome stays posted), so a
      * launcher test sees the same colours at every run:
      * {@code @Rule public final TestSupport.StockTheme stock = new TestSupport.StockTheme();}
      */
@@ -314,12 +315,14 @@ final class TestSupport {
         protected void before() {
             Theme.reset();
             LauncherActivity.themeExecutor = Runnable::run;
+            LauncherActivity.libExecutor = Runnable::run;
         }
 
         @Override
         protected void after() {
             Theme.reset();
             LauncherActivity.themeExecutor = LauncherActivity.THEME_THREAD;
+            LauncherActivity.libExecutor = LauncherActivity.LIB_THREAD;
         }
     }
 
