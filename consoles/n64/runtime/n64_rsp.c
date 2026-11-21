@@ -1586,6 +1586,7 @@ enum {
     RK_VU, /* COP2 computational: vu_fns[vop] */
     RK_IDLE,  /* a backward branch closing a loop that only reads (rsp_idle); e = the branch's own RK_* */
     RK_CDOWN, /* BGTZ / BNEZ rs to itself with ADDI rs, rs, -1 in its delay slot (a delay loop); e = RK_BGTZ / RK_BNE */
+    RK_COUNT
 };
 
 /* Decodes the IMEM word raw (as loaded, see rsp_dec) at offset ia into x. Same semantics as the hardware notes in the
@@ -1709,6 +1710,24 @@ static void rsp_decode_word(uint32_t ia, uint32_t raw, rsp_dec *out)
     }
     default: break;
     }
+    switch (k) { /* results that go to $0: nothing (n64_rsp_run never writes r[0]) */
+    case RK_SLL: case RK_SRL: case RK_SRA: case RK_SLLV: case RK_SRLV: case RK_SRAV: case RK_SRLV_RS:
+    case RK_ADD: case RK_SUB: case RK_AND: case RK_OR: case RK_XOR: case RK_NOR: case RK_SLT: case RK_SLTU:
+        if (x.c == 0)
+            k = RK_NOP;
+        break;
+    case RK_JALR:
+        if (x.c == 0)
+            k = RK_JR;
+        break;
+    case RK_ADDI: case RK_SLTI: case RK_SLTIU: case RK_ANDI: case RK_ORI: case RK_XORI:
+    case RK_LB: case RK_LH: case RK_LW: case RK_LBU: case RK_LHU:
+        if (x.b == 0)
+            k = RK_NOP;
+        break;
+    default:
+        break;
+    }
     x.kind = (uint8_t)k;
     *out = x;
 }
@@ -1800,209 +1819,276 @@ static RSP_NOINLINE uint32_t rsp_idle(n64_rsp *s, uint32_t b, uint32_t target, u
     return n;
 }
 
-uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
+/* GCC and clang: each handler ends in its own fetch and indirect jump (labels as values), so the host predicts each
+ * jump from the instruction before it; elsewhere one switch in a loop. */
+#if defined(__GNUC__) || defined(__clang__)
+#define RSP_THREADED 1
+#else
+#define RSP_THREADED 0
+#endif
+
+/* Runs up to cycles instructions; stops early once an instruction may have halted the RSP (BREAK, an SP_STATUS write),
+ * halting it then when single-step is on. pc / npc live in locals: nothing the loop calls reads them (COP0 cannot
+ * reach SP_PC). Each instruction runs from its predecoded entry (rsp_dec), decoded again first when IMEM no longer
+ * holds the word it was made from. No instruction writes r[0] here: the decoder makes the ones that would NOPs
+ * (their other effects are none), MFC0 and the COP2 moves clear it again. */
+static uint32_t rsp_loop(n64_rsp *s, uint32_t cycles)
 {
-    if (s->status & ST_HALT)
-        return 0;
-    /* pc / npc live in locals: nothing the loop calls reads them (COP0 cannot reach SP_PC). The loop stops when an
-     * instruction may have halted the RSP (BREAK, an SP_STATUS write) or single-stepping is on. Each instruction runs
-     * from its predecoded entry (rsp_dec), decoded again first when IMEM no longer holds the word it was made from. */
     uint32_t n = 0, pc = s->pc, npc = s->npc;
     uint32_t *r = s->r;
     const uint8_t *imem = s->mem + 0x1000;
     const rsp_dec *dec = s->dec;
-    int sstep = (s->status & ST_SSTEP) != 0;
+    const rsp_dec *d;
     s->idle_b = ~0u;
-    while (n < cycles) {
-        uint32_t raw;
-        memcpy(&raw, imem + pc, 4);
-        const rsp_dec *d = (const rsp_dec *)((const uint8_t *)dec + pc * (sizeof *dec / 4)); /* dec[pc / 4] */
-        if (RSP_UNLIKELY(d->word != raw))
-            d = rsp_decode(s, pc, raw);
-        pc = npc;
-        npc = (npc + 4) & 0xFFC;
-        n++;
-        if (d->kind == RK_VU) { /* most of a microcode: before the scalar switch */
-            vu_fns[d->vop](s, d);
-            if (sstep) {
-                if (s->status & ST_SSTEP)
-                    s->status |= ST_HALT;
-                if (s->status & ST_HALT)
-                    break;
-            }
-            continue;
-        }
-        int stop = 0;
-        uint32_t rs = d->a, rt = d->b, rd = d->c, imm = d->imm;
+#define FETCH()                                                                                                        \
+    do {                                                                                                               \
+        if (RSP_UNLIKELY(n >= cycles))                                                                                 \
+            goto out;                                                                                                  \
+        uint32_t raw_;                                                                                                 \
+        memcpy(&raw_, imem + pc, 4);                                                                                   \
+        d = (const rsp_dec *)((const uint8_t *)dec + pc * (sizeof *dec / 4)); /* dec[pc / 4] */                        \
+        if (RSP_UNLIKELY(d->word != raw_))                                                                             \
+            d = rsp_decode(s, pc, raw_);                                                                               \
+        pc = npc;                                                                                                      \
+        npc = (npc + 4) & 0xFFC;                                                                                       \
+        n++;                                                                                                           \
+    } while (0)
+#define RS r[d->a]
+#define RT r[d->b]
+#define IMM (d->imm)
+#if RSP_THREADED
+#define K(k) [RK_##k] = &&L_##k
+    static const void *const labels[] = {
+        K(NOP), K(SLL), K(SRL), K(SRA), K(SLLV), K(SRLV), K(SRAV), K(SRLV_RS), K(JR), K(JALR), K(BREAK),
+        K(ADD), K(SUB), K(AND), K(OR), K(XOR), K(NOR), K(SLT), K(SLTU),
+        K(BLTZ), K(BGEZ), K(BLTZAL), K(BGEZAL), K(J), K(JAL), K(BEQ), K(BNE), K(BLEZ), K(BGTZ),
+        K(ADDI), K(SLTI), K(SLTIU), K(ANDI), K(ORI), K(XORI),
+        K(MFC0), K(MTC0), K(COP2M),
+        K(LB), K(LH), K(LW), K(LBU), K(LHU), K(SB), K(SH), K(SW), K(LWC2), K(SWC2),
+        K(LDV), K(LQV), K(SDV), K(SQV),
+        K(VU), K(IDLE), K(CDOWN),
+    };
+#undef K
+    _Static_assert(sizeof labels / sizeof labels[0] == RK_COUNT, "a handler per RK_*");
+#define CASE(k) L_##k:
+#define NEXT                                                                                                           \
+    do {                                                                                                               \
+        FETCH();                                                                                                       \
+        goto *labels[d->kind];                                                                                         \
+    } while (0)
+    NEXT;
+#else
+#define CASE(k) case RK_##k:
+#define NEXT continue
+    for (;;) {
+        FETCH();
         switch (d->kind) {
-        case RK_NOP: break;
-        case RK_SLL: r[rd] = r[rt] << imm; break;
-        case RK_SRL: r[rd] = r[rt] >> imm; break;
-        case RK_SRA: r[rd] = (uint32_t)((int32_t)r[rt] >> imm); break;
-        case RK_SLLV: r[rd] = r[rt] << (r[rs] & 31); break;
-        case RK_SRLV: r[rd] = r[rt] >> (r[rs] & 31); break;
-        case RK_SRAV: r[rd] = (uint32_t)((int32_t)r[rt] >> (r[rs] & 31)); break;
-        case RK_SRLV_RS: r[rd] = r[rs] >> (r[rs] & 31); break;
-        case RK_JR: npc = r[rs] & 0xFFC; break;
-        case RK_JALR: /* the target before the link (rd may be rs) */
-        {
-            uint32_t tgt = r[rs] & 0xFFC;
-            r[rd] = d->link;
-            npc = tgt;
-            break;
-        }
-        case RK_BREAK:
-            s->status |= ST_HALT | ST_BROKE;
-            if (s->status & ST_INTR_BREAK)
-                raise_sp(s);
-            stop = 1;
-            break;
-        case RK_ADD: r[rd] = r[rs] + r[rt]; break;
-        case RK_SUB: r[rd] = r[rs] - r[rt]; break;
-        case RK_AND: r[rd] = r[rs] & r[rt]; break;
-        case RK_OR: r[rd] = r[rs] | r[rt]; break;
-        case RK_XOR: r[rd] = r[rs] ^ r[rt]; break;
-        case RK_NOR: r[rd] = ~(r[rs] | r[rt]); break;
-        case RK_SLT: r[rd] = (int32_t)r[rs] < (int32_t)r[rt]; break;
-        case RK_SLTU: r[rd] = r[rs] < r[rt]; break;
-        /* REGIMM: the condition before the link (rs may be $31) */
-        case RK_BLTZ: if ((int32_t)r[rs] < 0) npc = imm; break;
-        case RK_BGEZ: if ((int32_t)r[rs] >= 0) npc = imm; break;
-        case RK_BLTZAL:
-        {
-            int taken = (int32_t)r[rs] < 0;
-            r[31] = d->link;
-            if (taken)
-                npc = imm;
-            break;
-        }
-        case RK_BGEZAL:
-        {
-            int taken = (int32_t)r[rs] >= 0;
-            r[31] = d->link;
-            if (taken)
-                npc = imm;
-            break;
-        }
-        case RK_J: npc = imm; break;
-        case RK_JAL:
-            r[31] = d->link;
-            npc = imm;
-            break;
-        case RK_IDLE:
-        {
-            int taken;
-            switch (d->e) {
-            case RK_BEQ: taken = r[rs] == r[rt]; break;
-            case RK_BNE: taken = r[rs] != r[rt]; break;
-            case RK_BLEZ: taken = (int32_t)r[rs] <= 0; break;
-            case RK_BGTZ: taken = (int32_t)r[rs] > 0; break;
-            case RK_BLTZ: taken = (int32_t)r[rs] < 0; break;
-            case RK_BGEZ: taken = (int32_t)r[rs] >= 0; break;
-            default: taken = 1; break; /* J */
-            }
-            if (taken) {
-                uint32_t b = (uint32_t)(d - dec) << 2;
-                npc = imm;
-                if (!sstep && pc == b + 4) /* not in another branch's delay slot */
-                    n = rsp_idle(s, b, imm, n, cycles);
-            }
-            break;
-        }
-        case RK_CDOWN: /* each turn: the branch, then rs - 1 in the delay slot; j turns at once while all are taken */
-        {
-            uint32_t v = r[rs];
-            if (d->e == RK_BGTZ ? (int32_t)v > 0 : v != 0) {
-                npc = imm;
-                uint32_t slot = n64_be32(imem + pc);
-                if (!sstep && pc == imm + 4 && (slot & ~(1u << 26)) == (0x20000000u | rs << 21 | rs << 16 | 0xFFFFu)) {
-                    uint32_t j = v - 1, m = (cycles - n) / 2;
-                    if (j > m)
-                        j = m;
-                    r[rs] = v - j;
-                    n += 2 * j;
-                }
-            }
-            break;
-        }
-        case RK_BEQ: if (r[rs] == r[rt]) npc = imm; break;
-        case RK_BNE: if (r[rs] != r[rt]) npc = imm; break;
-        case RK_BLEZ: if ((int32_t)r[rs] <= 0) npc = imm; break;
-        case RK_BGTZ: if ((int32_t)r[rs] > 0) npc = imm; break;
-        case RK_ADDI: r[rt] = r[rs] + imm; break;
-        case RK_SLTI: r[rt] = (int32_t)r[rs] < (int32_t)imm; break;
-        case RK_SLTIU: r[rt] = r[rs] < imm; break;
-        case RK_ANDI: r[rt] = r[rs] & imm; break;
-        case RK_ORI: r[rt] = r[rs] | imm; break; /* and LUI */
-        case RK_XORI: r[rt] = r[rs] ^ imm; break;
-        case RK_MFC0: r[rt] = cop0_read(s, rd); break;
-        case RK_MTC0:
-            cop0_write(s, rd, r[rt]);
-            stop = 1; /* SP_STATUS may have halted the RSP or turned single-step on */
-            break;
-        case RK_COP2M: cop2_move(s, imm); break; /* COP2 moves (the computational ops are RK_VU) */
-        case RK_LB: r[rt] = (uint32_t)(int32_t)(int8_t)DM(r[rs] + imm); break;
-        case RK_LH: r[rt] = (uint32_t)(int32_t)(int16_t)ld16(s, r[rs] + imm); break;
-        case RK_LW: r[rt] = ld32(s, r[rs] + imm); break; /* and LWU */
-        case RK_LBU: r[rt] = DM(r[rs] + imm); break;
-        case RK_LHU: r[rt] = ld16(s, r[rs] + imm); break;
-        case RK_SB: DM(r[rs] + imm) = (uint8_t)r[rt]; break;
-        case RK_SH:
-            DM(r[rs] + imm) = (uint8_t)(r[rt] >> 8);
-            DM(r[rs] + imm + 1) = (uint8_t)r[rt];
-            break;
-        case RK_SW: st32(s, r[rs] + imm, r[rt]); break;
-        case RK_LWC2: vu_load(s, imm); break;
-        case RK_SWC2: vu_store(s, imm); break;
-        /* LDV / SDV inside DMEM, LQV / SQV of a whole register at a 16-byte boundary: as ld_bytes / st_bytes do them,
-         * the other cases through vu_load / vu_store (the instruction is the entry's word). */
-        case RK_LDV:
-        {
-            uint32_t addr = (r[rs] + imm) & 0xFFF;
-            if (addr <= 0xFF8)
-                ld_be16x4(s->vr[rt] + d->e / 2, s->mem + addr);
-            else
-                vu_load(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        case RK_SDV:
-        {
-            uint32_t addr = (r[rs] + imm) & 0xFFF;
-            if (addr <= 0xFF8)
-                st_be16x4(s->mem + addr, s->vr[rt] + d->e / 2);
-            else
-                vu_store(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        case RK_LQV:
-        {
-            uint32_t addr = r[rs] + imm;
-            if (!((addr & 15) | d->e))
-                ld_be16x8(s->vr[rt], s->mem + (addr & 0xFF0));
-            else
-                vu_load(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        case RK_SQV:
-        {
-            uint32_t addr = r[rs] + imm;
-            if (!((addr & 15) | d->e))
-                st_be16x8(s->mem + (addr & 0xFF0), s->vr[rt]);
-            else
-                vu_store(s, n64_be32((const uint8_t *)&d->word));
-            break;
-        }
-        default: break;
-        }
-        r[0] = 0;
-        if (stop | sstep) {
-            if (s->status & ST_SSTEP)
-                s->status |= ST_HALT;
-            if (s->status & ST_HALT)
-                break;
-        }
+#endif
+    CASE(VU) vu_fns[d->vop](s, d); NEXT; /* most of a microcode */
+    CASE(NOP) NEXT;
+    CASE(SLL) r[d->c] = RT << IMM; NEXT;
+    CASE(SRL) r[d->c] = RT >> IMM; NEXT;
+    CASE(SRA) r[d->c] = (uint32_t)((int32_t)RT >> IMM); NEXT;
+    CASE(SLLV) r[d->c] = RT << (RS & 31); NEXT;
+    CASE(SRLV) r[d->c] = RT >> (RS & 31); NEXT;
+    CASE(SRAV) r[d->c] = (uint32_t)((int32_t)RT >> (RS & 31)); NEXT;
+    CASE(SRLV_RS) r[d->c] = RS >> (RS & 31); NEXT;
+    CASE(JR) npc = RS & 0xFFC; NEXT;
+    CASE(JALR) /* the target before the link (rd may be rs) */
+    {
+        uint32_t tgt = RS & 0xFFC;
+        r[d->c] = d->link;
+        npc = tgt;
+        NEXT;
     }
+    CASE(BREAK)
+        s->status |= ST_HALT | ST_BROKE;
+        if (s->status & ST_INTR_BREAK)
+            raise_sp(s);
+        goto stop;
+    CASE(ADD) r[d->c] = RS + RT; NEXT;
+    CASE(SUB) r[d->c] = RS - RT; NEXT;
+    CASE(AND) r[d->c] = RS & RT; NEXT;
+    CASE(OR) r[d->c] = RS | RT; NEXT;
+    CASE(XOR) r[d->c] = RS ^ RT; NEXT;
+    CASE(NOR) r[d->c] = ~(RS | RT); NEXT;
+    CASE(SLT) r[d->c] = (int32_t)RS < (int32_t)RT; NEXT;
+    CASE(SLTU) r[d->c] = RS < RT; NEXT;
+    /* REGIMM: the condition before the link (rs may be $31) */
+    CASE(BLTZ) if ((int32_t)RS < 0) npc = IMM; NEXT;
+    CASE(BGEZ) if ((int32_t)RS >= 0) npc = IMM; NEXT;
+    CASE(BLTZAL)
+    {
+        int taken = (int32_t)RS < 0;
+        r[31] = d->link;
+        if (taken)
+            npc = IMM;
+        NEXT;
+    }
+    CASE(BGEZAL)
+    {
+        int taken = (int32_t)RS >= 0;
+        r[31] = d->link;
+        if (taken)
+            npc = IMM;
+        NEXT;
+    }
+    CASE(J) npc = IMM; NEXT;
+    CASE(JAL)
+        r[31] = d->link;
+        npc = IMM;
+        NEXT;
+    CASE(BEQ) if (RS == RT) npc = IMM; NEXT;
+    CASE(BNE) if (RS != RT) npc = IMM; NEXT;
+    CASE(BLEZ) if ((int32_t)RS <= 0) npc = IMM; NEXT;
+    CASE(BGTZ) if ((int32_t)RS > 0) npc = IMM; NEXT;
+    CASE(IDLE)
+    {
+        int taken;
+        switch (d->e) {
+        case RK_BEQ: taken = RS == RT; break;
+        case RK_BNE: taken = RS != RT; break;
+        case RK_BLEZ: taken = (int32_t)RS <= 0; break;
+        case RK_BGTZ: taken = (int32_t)RS > 0; break;
+        case RK_BLTZ: taken = (int32_t)RS < 0; break;
+        case RK_BGEZ: taken = (int32_t)RS >= 0; break;
+        default: taken = 1; break; /* J */
+        }
+        if (taken) {
+            uint32_t b = (uint32_t)(d - dec) << 2;
+            npc = IMM;
+            if (pc == b + 4) /* not in another branch's delay slot */
+                n = rsp_idle(s, b, IMM, n, cycles);
+        }
+        NEXT;
+    }
+    CASE(CDOWN) /* each turn: the branch, then rs - 1 in the delay slot; j turns at once while all are taken */
+    {
+        uint32_t v = RS, rs = d->a;
+        if (d->e == RK_BGTZ ? (int32_t)v > 0 : v != 0) {
+            npc = IMM;
+            uint32_t slot = n64_be32(imem + pc);
+            if (pc == IMM + 4 && (slot & ~(1u << 26)) == (0x20000000u | rs << 21 | rs << 16 | 0xFFFFu)) {
+                uint32_t j = v - 1, m = (cycles - n) / 2;
+                if (j > m)
+                    j = m;
+                r[rs] = v - j;
+                n += 2 * j;
+            }
+        }
+        NEXT;
+    }
+    CASE(ADDI) RT = RS + IMM; NEXT;
+    CASE(SLTI) RT = (int32_t)RS < (int32_t)IMM; NEXT;
+    CASE(SLTIU) RT = RS < IMM; NEXT;
+    CASE(ANDI) RT = RS & IMM; NEXT;
+    CASE(ORI) RT = RS | IMM; NEXT; /* and LUI */
+    CASE(XORI) RT = RS ^ IMM; NEXT;
+    CASE(MFC0) /* also into $0: reading SP_SEMAPHORE sets it */
+        RT = cop0_read(s, d->c);
+        r[0] = 0;
+        NEXT;
+    CASE(MTC0)
+        cop0_write(s, d->c, RT);
+        goto stop; /* SP_STATUS may have halted the RSP or turned single-step on */
+    CASE(COP2M) /* COP2 moves (the computational ops are RK_VU) */
+        cop2_move(s, IMM);
+        r[0] = 0;
+        NEXT;
+    CASE(LB) RT = (uint32_t)(int32_t)(int8_t)DM(RS + IMM); NEXT;
+    CASE(LH) RT = (uint32_t)(int32_t)(int16_t)ld16(s, RS + IMM); NEXT;
+    CASE(LW) RT = ld32(s, RS + IMM); NEXT; /* and LWU */
+    CASE(LBU) RT = DM(RS + IMM); NEXT;
+    CASE(LHU) RT = ld16(s, RS + IMM); NEXT;
+    CASE(SB) DM(RS + IMM) = (uint8_t)RT; NEXT;
+    CASE(SH)
+    {
+        uint32_t a = RS + IMM, v = RT;
+        DM(a) = (uint8_t)(v >> 8);
+        DM(a + 1) = (uint8_t)v;
+        NEXT;
+    }
+    CASE(SW) st32(s, RS + IMM, RT); NEXT;
+    CASE(LWC2) vu_load(s, IMM); NEXT;
+    CASE(SWC2) vu_store(s, IMM); NEXT;
+    /* LDV / SDV inside DMEM, LQV / SQV of a whole register at a 16-byte boundary: as ld_bytes / st_bytes do them, the
+     * other cases through vu_load / vu_store (the instruction is the entry's word). */
+    CASE(LDV)
+    {
+        uint32_t addr = (RS + IMM) & 0xFFF;
+        if (addr <= 0xFF8)
+            ld_be16x4(s->vr[d->b] + d->e / 2, s->mem + addr);
+        else
+            vu_load(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+    CASE(SDV)
+    {
+        uint32_t addr = (RS + IMM) & 0xFFF;
+        if (addr <= 0xFF8)
+            st_be16x4(s->mem + addr, s->vr[d->b] + d->e / 2);
+        else
+            vu_store(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+    CASE(LQV)
+    {
+        uint32_t addr = RS + IMM;
+        if (!((addr & 15) | d->e))
+            ld_be16x8(s->vr[d->b], s->mem + (addr & 0xFF0));
+        else
+            vu_load(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+    CASE(SQV)
+    {
+        uint32_t addr = RS + IMM;
+        if (!((addr & 15) | d->e))
+            st_be16x8(s->mem + (addr & 0xFF0), s->vr[d->b]);
+        else
+            vu_store(s, n64_be32((const uint8_t *)&d->word));
+        NEXT;
+    }
+#if !RSP_THREADED
+    default: NEXT;
+        }
+#endif
+    stop:
+        if (s->status & ST_SSTEP)
+            s->status |= ST_HALT;
+        if (s->status & ST_HALT)
+            goto out;
+        NEXT;
+#if !RSP_THREADED
+    }
+#endif
+out:
     s->pc = pc;
     s->npc = npc;
+    return n;
+#undef FETCH
+#undef RS
+#undef RT
+#undef IMM
+#undef CASE
+#undef NEXT
+}
+
+uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
+{
+    if (s->status & ST_HALT)
+        return 0;
+    if (!(s->status & ST_SSTEP))
+        return rsp_loop(s, cycles);
+    /* Single-step: one instruction, then the RSP halts (unless that instruction turned single-step off). A budget of
+     * one never skips anything (rsp_idle, RK_CDOWN). */
+    uint32_t n = 0;
+    while (n < cycles) {
+        n += rsp_loop(s, 1);
+        if (s->status & ST_SSTEP)
+            s->status |= ST_HALT;
+        if (s->status & ST_HALT)
+            break;
+    }
     return n;
 }
