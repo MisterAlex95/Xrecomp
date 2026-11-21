@@ -248,6 +248,7 @@ static struct x360_gpu *gpu_of(x360_machine *x)
         x->gpu->irq_thread = -1;
         x->gpu->cp.shader_loaded = shader_loaded;
         x->gpu->cp.mem = x360_p(x, X360_VIEW_64K); /* physical memory, mapped whole (x360_mem.c) */
+        x->gpu->cp.wmem = x360_p(x, X360_VIEW_64K); /* the same, for resolves' stores (what phys_write does) */
         xenos_cp_init(&x->gpu->cp);
     }
     return x->gpu;

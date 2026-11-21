@@ -324,6 +324,8 @@ struct xenos_gl {
     int stex_w, stex_h, sprog_failed;
     int rtex_w, rtex_h;
     GLenum rtex_fmt;
+    void *scratch[3];         /* reused read-back buffers (scratch_buf): grown, never shrunk */
+    size_t scratch_cap[3];
     int width, height;        /* the default target (a surface with pitch 0 / no scissor) and the frame size */
     int scale;                /* internal resolution: every surface is scale x its guest size */
     int max_tex;
@@ -742,6 +744,8 @@ void xenos_gl_destroy(xenos_gl *g)
     free(g->progs);
     free(g->prog_hash);
     free(g->frame);
+    for (int i = 0; i < 3; i++)
+        free(g->scratch[i]);
     free(g);
 }
 
@@ -2851,9 +2855,54 @@ static int is_float_fmt(GLenum ifmt)
     return ifmt == GL_RGBA16F || ifmt == GL_RG16F || ifmt == GL_R32F || ifmt == GL_RG32F || ifmt == GL_RGBA32F;
 }
 
-/* a w x h guest-pixel region at (x0, y0) of a colour texture as RGBA floats, top row first (scaled textures
- * filtered down to the guest resolution first); NULL when out of memory */
-static float *read_pixels(xenos_gl *g, GLuint tex, GLenum ifmt, int x0, int y0, int w, int h)
+/* Reused read-back buffers (WP-1): resolves, their depth and stencil, and the frame read back at the swap take them
+ * rather than a malloc / free pair each time (at 1080p a fresh 33 MB mapping: page faults, then an munmap, per
+ * resolve on Android). Grown, never shrunk; freed in xenos_gl_destroy. NULL when out of memory. */
+enum { SCRATCH_PIXELS, SCRATCH_STENCIL, SCRATCH_ROWS };
+static void *scratch_buf(xenos_gl *g, int slot, size_t bytes)
+{
+    if (g->scratch_cap[slot] < bytes) {
+        free(g->scratch[slot]);
+        g->scratch[slot] = malloc(bytes);
+        g->scratch_cap[slot] = g->scratch[slot] ? bytes : 0;
+    }
+    return g->scratch[slot];
+}
+
+/* How read_raw leaves the texels of a colour texture: GL_RGBA bytes (every fixed-point format), packed
+ * GL_UNSIGNED_INT_2_10_10_10_REV words (GL_RGB10_A2), RGBA floats (the float formats) */
+enum { PIX_U8X4, PIX_RGB10A2, PIX_F32X4 };
+
+static int pix_layout(GLenum ifmt)
+{
+    return is_float_fmt(ifmt) ? PIX_F32X4 : ifmt == GL_RGB10_A2 ? PIX_RGB10A2 : PIX_U8X4;
+}
+
+static size_t pix_bytes(int lay)
+{
+    return lay == PIX_F32X4 ? 16 : 4;
+}
+
+/* one texel of read_raw's output as RGBA floats */
+static void pix_float(int lay, const uint8_t *p, float out[4])
+{
+    if (lay == PIX_F32X4) {
+        memcpy(out, p, 16);
+    } else if (lay == PIX_RGB10A2) {
+        uint32_t v;
+        memcpy(&v, p, 4);
+        out[0] = (float)(v & 1023) / 1023.0f, out[1] = (float)((v >> 10) & 1023) / 1023.0f;
+        out[2] = (float)((v >> 20) & 1023) / 1023.0f, out[3] = (float)(v >> 30) / 3.0f;
+    } else {
+        for (int c = 0; c < 4; c++)
+            out[c] = (float)p[c] / 255.0f;
+    }
+}
+
+/* a w x h guest-pixel region at (x0, y0) of a colour texture in its own format (pix_layout(ifmt)), top row first, rows
+ * of w texels (scaled textures filtered down to the guest resolution first). The pointer is a scratch buffer, valid
+ * until the next read; NULL when out of memory. */
+static const uint8_t *read_raw(xenos_gl *g, GLuint tex, GLenum ifmt, int x0, int y0, int w, int h)
 {
     int s = g->scale;
     GLuint from = tex;
@@ -2884,30 +2933,14 @@ static float *read_pixels(xenos_gl *g, GLuint tex, GLenum ifmt, int x0, int y0, 
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, from, 0);
     g->glReadBuffer(GL_COLOR_ATTACHMENT0);
-    size_t n = (size_t)w * h;
-    float *out = malloc(n * 16);
-    void *raw = malloc(n * 16);
-    if (out && raw) {
-        if (is_float_fmt(ifmt)) {
-            g->glReadPixels(fx, fy, w, h, GL_RGBA, GL_FLOAT, out);
-        } else if (ifmt == GL_RGB10_A2) {
-            g->glReadPixels(fx, fy, w, h, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, raw);
-            const uint32_t *v = raw;
-            for (size_t i = 0; i < n; i++) {
-                out[4 * i] = (float)(v[i] & 1023) / 1023.0f, out[4 * i + 1] = (float)((v[i] >> 10) & 1023) / 1023.0f;
-                out[4 * i + 2] = (float)((v[i] >> 20) & 1023) / 1023.0f, out[4 * i + 3] = (float)(v[i] >> 30) / 3.0f;
-            }
-        } else {
-            g->glReadPixels(fx, fy, w, h, GL_RGBA, GL_UNSIGNED_BYTE, raw);
-            const uint8_t *b = raw;
-            for (size_t i = 0; i < 4 * n; i++)
-                out[i] = (float)b[i] / 255.0f;
-        }
-    } else {
-        free(out);
-        out = NULL;
-    }
-    free(raw);
+    int lay = pix_layout(ifmt);
+    uint8_t *out = scratch_buf(g, SCRATCH_PIXELS, (size_t)w * h * pix_bytes(lay));
+    if (out)
+        g->glReadPixels(fx, fy, w, h, GL_RGBA,
+                        lay == PIX_F32X4     ? GL_FLOAT
+                        : lay == PIX_RGB10A2 ? GL_UNSIGNED_INT_2_10_10_10_REV
+                                             : GL_UNSIGNED_BYTE,
+                        out);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     return out;
@@ -2991,6 +3024,18 @@ static int encode_texel(uint32_t fmt, const float c[4], uint8_t out[16])
     return n;
 }
 
+/* One dword the GPU writes at a guest physical address: x is the dword after the swap mode (gpu_swap), its
+ * little-endian bytes are what lands in memory (the CPU then reads them big-endian). Straight into cp->wmem when the
+ * runtime gives it (the host is little-endian, as gpu_read assumes too), else through write32. */
+static inline void gpu_store(const xenos_cp *cp, uint32_t phys, uint32_t x)
+{
+    phys &= 0x1FFFFFFFu;
+    if (cp->wmem)
+        memcpy(cp->wmem + phys, &x, 4);
+    else
+        cp->write32(cp->ctx, phys, __builtin_bswap32(x));
+}
+
 /* n bytes the GPU writes at a guest physical address through its swap mode (read-modify-write of partial dwords) */
 static void put_bytes(const xenos_cp *cp, uint32_t addr, const uint8_t *b, int n, uint32_t endian)
 {
@@ -3005,8 +3050,198 @@ static void put_bytes(const xenos_cp *cp, uint32_t addr, const uint8_t *b, int n
             for (uint32_t k = a & 3; k < 4 && i < n; k++, i++)
                 word = (word & ~(0xFFu << (8 * k))) | (uint32_t)b[i] << (8 * k);
         }
-        cp->write32(cp->ctx, wa & 0x1FFFFFFFu, __builtin_bswap32(gpu_swap(word, endian)));
+        gpu_store(cp, wa, gpu_swap(word, endian));
     }
+}
+
+/* ---- writing a resolved rectangle into guest memory (WP-1) ----
+ * resolve_write takes a host picture as read_raw leaves it and writes it the way a resolve's destination registers
+ * say. The usual pairs are byte (or bit) shuffles and go a direct way: no floats, the tiled address computed once per
+ * 16 bytes (4 consecutive 32-bit texels in x, or 2 of 64 bits, are contiguous in a tiled row), stores straight into
+ * memory. Everything else goes the generic way (RGBA floats, encode_texel, put_bytes) and gives the same bytes. */
+typedef struct {
+    uint32_t base;          /* physical address of the texture */
+    uint32_t pitch_aligned; /* its pitch in texels, a multiple of 32 */
+    uint32_t fmt, endian;   /* destination texture format (encode_texel) and swap mode (0-3) */
+    int swap_rb, bias;      /* red / blue exchanged; exponent bias (a factor of 2^bias) */
+} resolve_dest;
+
+/* bytes per texel of a destination format, 0 when resolves cannot write it */
+static int dest_bytes(uint32_t fmt)
+{
+    static const float zero[4] = {0, 0, 0, 0};
+    uint8_t probe[16];
+    return encode_texel(fmt, zero, probe);
+}
+
+/* the generic way: any pair encode_texel knows. Returns 0 (nothing written) for a format it does not. */
+static int resolve_write_float(const xenos_cp *cp, const resolve_dest *d, const uint8_t *px, int lay, int x0, int y0,
+                               int w, int h)
+{
+    int bpp = dest_bytes(d->fmt);
+    if (!bpp)
+        return 0;
+    unsigned bpp_log2 = bpp == 1 ? 0 : bpp == 2 ? 1 : bpp == 4 ? 2 : bpp == 8 ? 3 : 4;
+    float k = d->bias ? ldexpf(1.0f, d->bias) : 1.0f;
+    size_t stride = pix_bytes(lay);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float p[4];
+            pix_float(lay, px + ((size_t)y * w + x) * stride, p);
+            float c[4] = {(d->swap_rb ? p[2] : p[0]) * k, p[1] * k, (d->swap_rb ? p[0] : p[2]) * k, p[3] * k};
+            uint8_t b[16];
+            int n = encode_texel(d->fmt, c, b);
+            uint32_t off = (uint32_t)tiled2d(x0 + x, y0 + y, d->pitch_aligned, bpp_log2);
+            put_bytes(cp, d->base + off, b, n, d->endian);
+        }
+    return 1;
+}
+
+enum { DIRECT_8888, DIRECT_2101010, DIRECT_HALF4, DIRECT_F32 };
+
+/* one texel of a direct pair: the bytes it puts in memory (4, or 8 for DIRECT_HALF4) */
+static inline __attribute__((always_inline)) void direct_texel(int kind, const uint8_t *sp, int swap_rb,
+                                                              uint32_t endian, uint8_t *out)
+{
+    switch (kind) {
+    case DIRECT_8888: { /* RGBA bytes: unorm(b / 255, 8) is b again, so a byte shuffle */
+        uint32_t v;
+        memcpy(&v, sp, 4);
+        if (swap_rb)
+            v = (v & 0xFF00FF00u) | (v & 0xFFu) << 16 | ((v >> 16) & 0xFFu);
+        v = gpu_swap(v, endian);
+        memcpy(out, &v, 4);
+        break;
+    }
+    case DIRECT_2101010: { /* 2_10_10_10_REV words: the fields as they are (unorm(v / 1023, 10) is v again) */
+        uint32_t v;
+        memcpy(&v, sp, 4);
+        if (swap_rb)
+            v = (v & 0xC00FFC00u) | (v & 1023u) << 20 | ((v >> 20) & 1023u);
+        v = gpu_swap(v, endian);
+        memcpy(out, &v, 4);
+        break;
+    }
+    case DIRECT_HALF4: { /* RGBA floats to 16_16_16_16_FLOAT: what encode_texel does, without its switch */
+        float f[4];
+        memcpy(f, sp, 16);
+        uint32_t r = float_to_half(swap_rb ? f[2] : f[0]), b = float_to_half(swap_rb ? f[0] : f[2]);
+        uint32_t lo = gpu_swap(r | float_to_half(f[1]) << 16, endian);
+        uint32_t hi = gpu_swap(b | float_to_half(f[3]) << 16, endian);
+        memcpy(out, &lo, 4);
+        memcpy(out + 4, &hi, 4);
+        break;
+    }
+    default: { /* DIRECT_F32: the red float's bits (blue's when swapped) */
+        uint32_t v;
+        memcpy(&v, sp + (swap_rb ? 8 : 0), 4);
+        v = gpu_swap(v, endian);
+        memcpy(out, &v, 4);
+        break;
+    }
+    }
+}
+
+static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp, const resolve_dest *d,
+                                                             const uint8_t *px, int x0, int y0, int w, int h,
+                                                             int kind, int swap_rb, uint32_t endian)
+{
+    const unsigned bpp_log2 = kind == DIRECT_HALF4 ? 3 : 2, bpp = 1u << bpp_log2, per = 16u >> bpp_log2;
+    const size_t stride = kind == DIRECT_8888 || kind == DIRECT_2101010 ? 4 : 16;
+    for (int y = 0; y < h; y++) {
+        const uint8_t *sp = px + (size_t)y * w * stride;
+        for (int x = 0; x < w;) {
+            int gx = x0 + x;
+            uint32_t a = (d->base + (uint32_t)tiled2d(gx, y0 + y, d->pitch_aligned, bpp_log2)) & 0x1FFFFFFFu;
+            int run = (int)(per - ((unsigned)gx & (per - 1)));
+            run = run < w - x ? run : w - x;
+            if (cp->wmem && a + (uint32_t)run * bpp <= 0x20000000u) {
+                uint8_t *dp = cp->wmem + a;
+                for (int i = 0; i < run; i++, sp += stride, dp += bpp)
+                    direct_texel(kind, sp, swap_rb, endian, dp);
+            } else { /* through write32, or at the very end of physical memory */
+                for (int i = 0; i < run; i++, sp += stride) {
+                    uint8_t t[8];
+                    uint32_t v;
+                    direct_texel(kind, sp, swap_rb, endian, t);
+                    for (unsigned k = 0; k < bpp; k += 4) {
+                        memcpy(&v, t + k, 4);
+                        gpu_store(cp, a + (uint32_t)i * bpp + k, v);
+                    }
+                }
+            }
+            x += run;
+        }
+    }
+}
+
+/* the direct way, for the pairs it knows (with no exponent bias and a dword-aligned destination); 0 (nothing
+ * written) for any other */
+static int resolve_write_direct(const xenos_cp *cp, const resolve_dest *d, const uint8_t *px, int lay, int x0, int y0,
+                                int w, int h)
+{
+    if (d->bias || (d->base & 3) || d->endian > 3 || (!cp->wmem && !cp->write32))
+        return 0;
+    int kind;
+    uint32_t f = d->fmt;
+    if (lay == PIX_U8X4 && (f == 6 || f == 14 || f == 50 || f == 62))
+        kind = DIRECT_8888;
+    else if (lay == PIX_RGB10A2 && (f == 7 || f == 54))
+        kind = DIRECT_2101010;
+    else if (lay == PIX_F32X4 && f == 32)
+        kind = DIRECT_HALF4;
+    else if (lay == PIX_F32X4 && f == 36)
+        kind = DIRECT_F32;
+    else
+        return 0;
+    /* one copy of the loop per pair, swap mode and red / blue exchange: the per-texel work folds into a few
+     * instructions (the 8_8_8_8 one runs at about a nanosecond per texel) */
+#define DIRECT_ROWS(k, e)                                                                                             \
+    (d->swap_rb ? direct_rows(cp, d, px, x0, y0, w, h, k, 1, e) : direct_rows(cp, d, px, x0, y0, w, h, k, 0, e))
+#define DIRECT_ENDIAN(k)                                                                                              \
+    (d->endian == 0   ? DIRECT_ROWS(k, 0)                                                                             \
+     : d->endian == 1 ? DIRECT_ROWS(k, 1)                                                                             \
+     : d->endian == 2 ? DIRECT_ROWS(k, 2)                                                                             \
+                      : DIRECT_ROWS(k, 3))
+    switch (kind) {
+    case DIRECT_8888: DIRECT_ENDIAN(DIRECT_8888); break;
+    case DIRECT_2101010: DIRECT_ENDIAN(DIRECT_2101010); break;
+    case DIRECT_HALF4: direct_rows(cp, d, px, x0, y0, w, h, DIRECT_HALF4, d->swap_rb, d->endian); break;
+    default: direct_rows(cp, d, px, x0, y0, w, h, DIRECT_F32, d->swap_rb, d->endian); break;
+    }
+#undef DIRECT_ENDIAN
+#undef DIRECT_ROWS
+    return 1;
+}
+
+/* A resolved rectangle into guest memory: px is a host picture of w x h texels as read_raw leaves it (layout lay, top
+ * row first, rows of w texels) and holds the guest pixels (x0..x0+w-1, y0..y0+h-1) of the resolve, written to the
+ * tiled texture d describes. Needs cp->wmem or cp->write32 (and read32 or mem for partial dwords). Returns 0, with
+ * nothing written, when the destination format is not one a resolve can write. Callable from anywhere that has the
+ * picture (a resolve, or later a deferred one written from its host copy). */
+static int resolve_write(const xenos_cp *cp, const resolve_dest *d, const uint8_t *px, int lay, int x0, int y0, int w,
+                         int h)
+{
+    return resolve_write_direct(cp, d, px, lay, x0, y0, w, h) || resolve_write_float(cp, d, px, lay, x0, y0, w, h);
+}
+
+/* A depth resolve's rectangle into guest memory: 24_8 (depth dv in the high 24 bits, stencil sv, or 0 when sv is NULL,
+ * in the low 8), tiled 32-bit texels, w x h values top row first for the guest pixels at (x0, y0) */
+static void depth_write(const xenos_cp *cp, uint32_t base, uint32_t pitch_aligned, uint32_t endian, const uint32_t *dv,
+                        const uint8_t *sv, int x0, int y0, int w, int h)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            size_t at = (size_t)y * w + x;
+            uint32_t v = dv[at] << 8 | (sv ? sv[at] : 0);
+            uint32_t a = base + (uint32_t)tiled2d(x0 + x, y0 + y, pitch_aligned, 2);
+            if (a & 3) {
+                uint8_t b4[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+                put_bytes(cp, a, b4, 4, endian);
+            } else {
+                gpu_store(cp, a, gpu_swap(v, endian));
+            }
+        }
 }
 
 /* the source surface of a resolve: render target src (0-3) or depth (4), as last bound, else as the registers say */
@@ -3072,7 +3307,7 @@ static const char DEPTH_FS[] =
     " uint v = uint(clamp(texelFetch(d, q, 0).r, 0.0, 1.0) * 16777215.0 + 0.5);\n"
     " c = vec4(float(v & 255u), float((v >> 8) & 255u), float(v >> 16), 0.0) / 255.0; }\n";
 
-static uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
+static const uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
 {
     if (!g->dprog && !g->dprog_failed) {
         GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "depth resolve vs");
@@ -3127,15 +3362,14 @@ static uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0, int w
     g->glBindVertexArray(g->vao);
     g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
     size_t n = (size_t)w * h;
-    uint8_t *b = malloc(n * 4);
-    uint32_t *out = b ? malloc(n * 4) : NULL;
-    if (out) {
+    uint32_t *out = scratch_buf(g, SCRATCH_PIXELS, n * 4);
+    if (out) { /* in place: value i is made of bytes 4i..4i+2, read before they are overwritten */
+        uint8_t *b = (uint8_t *)out;
         g->glReadBuffer(GL_COLOR_ATTACHMENT0);
         g->glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b);
         for (size_t i = 0; i < n; i++)
             out[i] = b[4 * i] | (uint32_t)b[4 * i + 1] << 8 | (uint32_t)b[4 * i + 2] << 16;
     }
-    free(b);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     g->glViewport(0, 0, g->tw * g->scale, g->th * g->scale);
@@ -3457,7 +3691,7 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
 static const char STENCIL_FS[] =
     "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
 
-static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
+static const uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
 {
     if (!g->sprog && !g->sprog_failed) {
         GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "stencil resolve vs");
@@ -3491,12 +3725,10 @@ static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int 
         g->stex_w = hw, g->stex_h = hh;
     }
     size_t n = (size_t)w * h;
-    uint8_t *out = calloc(n, 1), *rows = malloc((size_t)hw * h * sc * 4);
-    if (!out || !rows) {
-        free(out);
-        free(rows);
+    uint8_t *out = scratch_buf(g, SCRATCH_STENCIL, n), *rows = scratch_buf(g, SCRATCH_ROWS, (size_t)hw * h * sc * 4);
+    if (!out || !rows)
         return NULL;
-    }
+    memset(out, 0, n);
     static const GLenum b0 = GL_COLOR_ATTACHMENT0;
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->stex, 0);
@@ -3526,7 +3758,6 @@ static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int 
                 if (rows[((size_t)y * sc * hw + (size_t)(x0 + x) * sc) * 4])
                     out[(size_t)y * w + x] |= (uint8_t)(1u << bit);
     }
-    free(rows);
     g->glDisable(GL_STENCIL_TEST);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
@@ -3570,25 +3801,13 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         uint32_t pitch = cp->regs[0x231A] & 0x3FFF, height = (cp->regs[0x231A] >> 16) & 0x3FFF;
         uint32_t base = cp->regs[0x2319] & 0x1FFFFFFFu;
         uint32_t pitch_aligned = (pitch + 31) & ~31u;
-        uint8_t probe[16];
-        static const float zero[4] = {0, 0, 0, 0};
-        int bpp = encode_texel(fmt, zero, probe);
-        unsigned bpp_log2 = bpp == 1 ? 0 : bpp == 2 ? 1 : bpp == 4 ? 2 : bpp == 8 ? 3 : 4;
-        float *px = bpp && endian < 4 && cp->write32 && cp->read32
-                        ? read_pixels(g, s->tex, s->ifmt, x0, y0, x1 - x0, y1 - y0)
-                        : NULL;
+        int bpp = dest_bytes(fmt);
+        const uint8_t *px = bpp && endian < 4 && cp->write32 && cp->read32
+                                ? read_raw(g, s->tex, s->ifmt, x0, y0, x1 - x0, y1 - y0)
+                                : NULL;
         if (px) {
-            float k = bias ? ldexpf(1.0f, bias) : 1.0f;
-            for (int y = y0; y < y1; y++)
-                for (int x = x0; x < x1; x++) {
-                    const float *p = px + ((size_t)(y - y0) * (x1 - x0) + (x - x0)) * 4;
-                    float c[4] = {(swap_rb ? p[2] : p[0]) * k, p[1] * k, (swap_rb ? p[0] : p[2]) * k, p[3] * k};
-                    uint8_t b[16];
-                    int n = encode_texel(fmt, c, b);
-                    uint32_t off = (uint32_t)tiled2d(x, y, pitch_aligned, bpp_log2);
-                    put_bytes(cp, base + off, b, n, endian);
-                }
-            free(px);
+            const resolve_dest d = {base, pitch_aligned, fmt, endian, (int)swap_rb, bias};
+            resolve_write(cp, &d, px, pix_layout(s->ifmt), x0, y0, x1 - x0, y1 - y0);
             g->st.resolves++;
             g->epoch++;
             if (g->nresolved < 16)
@@ -3646,23 +3865,15 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
     } else if (cmd <= 1) { /* depth out: 24_8 (depth in the high 24 bits, stencil in the low 8), tiled 32-bit */
         uint32_t info = cp->regs[0x231B], fmt = (info >> 7) & 63, endian = info & 7;
         uint32_t pitch = cp->regs[0x231A] & 0x3FFF, base = cp->regs[0x2319] & 0x1FFFFFFFu;
-        uint32_t *dv = (fmt == 22 || fmt == 6 || fmt == 33) && endian < 4 && cp->write32 && cp->read32
+        const uint32_t *dv = (fmt == 22 || fmt == 6 || fmt == 33) && endian < 4 && cp->write32 && cp->read32
                            ? read_depth(g, s, x0, y0, x1 - x0, y1 - y0)
                            : NULL;
         if (dv) {
             uint32_t pitch_aligned = (pitch + 31) & ~31u;
-            uint8_t *sv = read_stencil(g, s, x0, y0, x1 - x0, y1 - y0);
+            const uint8_t *sv = read_stencil(g, s, x0, y0, x1 - x0, y1 - y0);
             if (!sv)
                 unsupported(g, "stencil of a depth resolve (written as 0)");
-            for (int y = y0; y < y1; y++)
-                for (int x = x0; x < x1; x++) {
-                    size_t at = (size_t)(y - y0) * (x1 - x0) + (x - x0);
-                    uint32_t d = dv[at] << 8 | (sv ? sv[at] : 0);
-                    uint8_t b4[4] = {(uint8_t)d, (uint8_t)(d >> 8), (uint8_t)(d >> 16), (uint8_t)(d >> 24)};
-                    put_bytes(cp, base + (uint32_t)tiled2d(x, y, pitch_aligned, 2), b4, 4, endian);
-                }
-            free(dv);
-            free(sv);
+            depth_write(cp, base, pitch_aligned, endian, dv, sv, x0, y0, x1 - x0, y1 - y0);
             g->st.resolves++;
             g->st.depth_resolves++;
             g->epoch++;
@@ -4185,18 +4396,20 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
             g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R + (GLenum)c, sel < 6 ? swz[sel] : GL_ZERO);
         }
         if (g->readback) {
-            float *px = read_pixels(g, g->frame_tex, is_float_fmt(src_fmt) ? GL_RGBA16F : GL_RGBA8, 0, 0, fw, fh);
+            GLenum rf = is_float_fmt(src_fmt) ? GL_RGBA16F : GL_RGBA8;
+            const uint8_t *px = read_raw(g, g->frame_tex, rf, 0, 0, fw, fh);
+            int lay = pix_layout(rf);
             memset(g->frame, 0, (size_t)g->width * g->height * 4);
             for (int y = 0; px && y < fh && y < g->height; y++)
                 for (int x = 0; x < fw && x < g->width; x++) {
-                    const float *p = px + ((size_t)y * fw + x) * 4;
+                    float p[4];
+                    pix_float(lay, px + ((size_t)y * fw + x) * pix_bytes(lay), p);
                     uint8_t *o = g->frame + ((size_t)y * g->width + x) * 4;
                     for (int c = 0; c < 4; c++) {
                         uint32_t sel = (swizzle >> (3 * c)) & 7;
                         o[c] = sel < 4 ? (uint8_t)unorm(p[sel], 8) : sel == 5 ? 255 : 0;
                     }
                 }
-            free(px);
         }
     } else if (!done && g->readback) {
         memset(g->frame, 0, (size_t)g->width * g->height * 4);
