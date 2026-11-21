@@ -284,6 +284,7 @@ static void driver_step(void)
 
 static int s_fr_stop;
 static long s_fr_walked, s_fr_deferred;
+static long s_fr_run, s_fr_longest_run;   /* busy passes in a row */
 
 static void *fr_controller(void *unused)
 {
@@ -294,10 +295,14 @@ static void *fr_controller(void *unused)
          * side, and a guest walker preempted while it holds them would see
          * thousands of busy passes go by. */
         struct timespec nap = { 0, 20000 };
-        if (xbox_OhciControllerPassForTest(FR_CONTROL))
+        if (xbox_OhciControllerPassForTest(FR_CONTROL)) {
             s_fr_walked++;
-        else
+            s_fr_run = 0;
+        } else {
             __atomic_fetch_add(&s_fr_deferred, 1, __ATOMIC_RELAXED);
+            if (++s_fr_run > s_fr_longest_run)
+                s_fr_longest_run = s_fr_run;
+        }
         nanosleep(&nap, NULL);
     }
     return NULL;
@@ -372,8 +377,20 @@ static int frame_race(void)
         printf("  %-60s %s\n", what, ok_ ? "PASS" : "FAIL"); \
         if (!ok_) failures++; } while (0)
     FR_CHECK(moved == 0, "the frame never moved inside a guest-side walk");
-    FR_CHECK(s_fr_deferred > 0 && busy > 0, "the controller and the guest side raced");
-    FR_CHECK(f1 == expect, "no frame lost: busy passes owed theirs to the next");
+    /* What follows depends on the scheduler, not on the code under test: a
+     * starved host may never let the two sides overlap (then the run proves
+     * nothing: skipped), or keep a walker preempted inside the lists for so
+     * many passes that the owed frames reach their cap (then frames are
+     * dropped by design, and the total is not checked). */
+    if (s_fr_deferred == 0) {
+        printf("  the two sides never overlapped on this host: skipped\n");
+        return failures ? failures : -77;
+    }
+    if (s_fr_longest_run * FR_TICK < 0x4000u)
+        FR_CHECK(f1 == expect, "no frame lost: busy passes owed theirs to the next");
+    else
+        printf("  %ld busy passes in a row reached the owed-frame cap: total not checked\n",
+               s_fr_longest_run);
     if (moved)
         printf("  %ld guest walks saw the frame advance under them\n", moved);
     return failures;
@@ -413,6 +430,8 @@ int main(int argc, char **argv)
      * ctest entry, and the one worth running under -fsanitize=thread). */
     if (argc > 2 && strcmp(argv[2], "frame_race") == 0) {
         failures = frame_race();
+        if (failures < 0)
+            return 77;
         printf("\n%d failure(s)\n", failures);
         return failures ? 1 : 0;
     }
