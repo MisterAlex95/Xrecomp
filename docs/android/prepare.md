@@ -97,7 +97,7 @@ Readers ignore fields they do not know. `tools/prepare/pack.py` (`read`, `check`
 | `c_mb`, `obj_mb`, `pack_mb`, `cpus` | Sizes of the C, the objects, the libraries in the pack; the CPU count. |
 | `peak_rss_mb` | Each compile's own peak resident set (`wait4`'s `ru_maxrss`, one per clang): max, p90, median. Absent where the host has no `wait4`. |
 | `tools_peak_mb` | The largest pipeline tool (disasm, lift: `RUSAGE_CHILDREN` before the lift's compiles start, and the lifter's own peak). |
-| `early`, `lift_peak_mb` | Files compiled while the lifter ran (« The compile starts during the lift »), and the lifter's own peak resident set (`wait4`). Absent when none / unknown. |
+| `early`, `lift_peak_mb` | Files compiled while the lifter ran (« The compile starts during the lift »), and the lifter's own peak resident set (`wait4`; like `peak_rss_mb`, never below the Prepare process's own size, which a child starts from: SpikeOut's 0.21 GB lifter shows 267). Absent when none / unknown. |
 | `held_s` | Wall time the device log held every compile (`jobs` 0: critical heat, or a background Prepare while the game ran). |
 | `thermal` | From the device log (below): samples, the hottest status, seconds at severe or above, the fewest jobs allowed, the battery's hottest temperature, up to 24 points of the curve `[seconds into the run, status]`. Absent without a device log (a host). |
 
@@ -282,7 +282,10 @@ objects, their keys and `libtitle.so` are byte for byte those of a compile after
 - *Jobs.* The lifter counts as one: at most `min(--jobs, the device log's jobs) - 1` early compiles, so `--jobs 1`,
   a severe device (1) or a hold (0) compile nothing during the lift, as before, and the thermal drop applies to them
   as to the others (read before each start). One starts only while `MemAvailable` leaves the per-job 512 MB beside
-  the 3 GB reserve (the lifters' peaks: `x360_tools.recomp` 0.26 GB on Warhammer, `tools.recomp` below).
+  the 3 GB reserve (the lifters' peaks: `x360_tools.recomp` 0.26 GB on Warhammer, `tools.recomp` 0.21 GB on SpikeOut, both measured
+  alone). A re-lift that writes the same C (an app update, the self-healing loop) compiles nothing early: a file
+  whose object the cache already has under the key `compile_all` will compute (the headers as they are, or the
+  digests `keys.json` remembers) is skipped.
 - *In place.* An object's key and bytes hold its source's path, so every console lifts into `gen/` itself (emptied
   first) instead of `gen.new` then a rename; the lift stamp is still dropped first and written only after the
   lifter succeeded (XBA-138).
@@ -724,6 +727,24 @@ The compile itself was not the lever here: Warhammer's 233 files keep 8 jobs bus
 wall of 230 s, alone on the host) and an empty file with `xenon_rt.h` compiles in 0.02 s, so fewer or other files
 would not shorten it. What a phone's Prepare spends where is to be measured on the device (the `prepare` spans,
 XBA-341).
+
+**The compile during the lift (2026-11-21).** The same titles and setup (`xba-deps` with the NDK 28 clang, `--opt 2`,
+the host shared with other work: load 10-45, so single pairs move by ±10 %), wall time of the whole Prepare, base and
+overlap run one after the other; C, objects and `libtitle.so` byte for byte the same in every pair:
+
+| Title, jobs | Before | After | Files compiled during the lift |
+|---|---|---|---|
+| SpikeOut (Xbox; lift + compile + pack, analysis done), 8 jobs | 152, 112, 134 s | 127, 91, 87 s | 77 of 83 |
+| SpikeOut, 5 jobs | 171, 120 s | 117, 97 s | 77 of 83 |
+| Warhammer (Xbox 360; the whole Prepare), 8 jobs | 300, 278, 270 s | 250, 256, 252 s | 25-26 of 233 |
+| Warhammer, 5 jobs | 399, 428 s | 413 (*), 361 s | 13-14 of 233 |
+
+(*) before early compiles still running at the lift's end stopped holding the others back. The Xbox lift writes its
+first chunk a few seconds in and nearly all of them during the translation (`ChunkStream`'s forecast was right for
+every chunk it wrote), so nearly the whole compile hides behind the ~75 s lift when the jobs keep up: SpikeOut's
+compile step fell from 43-74 s to 4 s. `x360_tools.recomp` writes its first file only after ~24 s of discovery
+and the leaders pass, then the rest over ~23 s: what can hide is about (jobs - 1) × 23 s of compile, 15-20 s of
+Warhammer's ~250 s at 8 jobs (the measured pairs are within the host's noise of that).
 
 **On a Thor (Snapdragon 8 Gen 2: 1× X3 3.2 GHz, 4× A715/A710 2.8 GHz, 3× A510), a rough estimate.** Per thread,
 clang runs at about 0.6× a Zen 5 core on the X3 and 0.4× on an A715/A710 (published SPECint-class ratios; clang is
