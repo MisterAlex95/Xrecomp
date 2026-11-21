@@ -403,7 +403,7 @@ class XenonLifter(FnLifter):
         if i.name in CR_CMPS:
             m = CR_CMP.match(t)
             if m and int(m.group(1)) == n and "c->cr" not in m.group(2):
-                return "cf_ = %s;" % m.group(2)
+                return "cf_ = %s;" % re.sub(r"\bppc_cmp", "xe_cmp", m.group(2), count=1)
             return None
         k = t.rfind(" RC_CR0(")
         if n == 0 and k >= 0 and t.endswith(");") and t.count("RC_CR0(") == 1 and not CR_SET.search(t):

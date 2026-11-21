@@ -33,6 +33,15 @@ static inline uint32_t ppc_cmpu64(uint64_t a, uint64_t b, uint32_t so)
     return (a < b ? PPC_CR_LT : a > b ? PPC_CR_GT : PPC_CR_EQ) | (so & 1);
 }
 
+/* The same fields without branches (x360_tools/xenon.py: a compare whose field a conditional branch tests right after
+ * it): `field & PPC_CR_LT` folds back to `a < b`, so the compiler branches on the relation itself. */
+#define XE_CMP_FIELD(a, b, so)                                                                                         \
+    ((uint32_t)((a) < (b)) << 3 | (uint32_t)((a) > (b)) << 2 | (uint32_t)((a) == (b)) << 1 | ((so) & 1))
+static inline uint32_t xe_cmps(int32_t a, int32_t b, uint32_t so) { return XE_CMP_FIELD(a, b, so); }
+static inline uint32_t xe_cmpu(uint32_t a, uint32_t b, uint32_t so) { return XE_CMP_FIELD(a, b, so); }
+static inline uint32_t xe_cmps64(int64_t a, int64_t b, uint32_t so) { return XE_CMP_FIELD(a, b, so); }
+static inline uint32_t xe_cmpu64(uint64_t a, uint64_t b, uint32_t so) { return XE_CMP_FIELD(a, b, so); }
+
 /* Carry out of a + b + cin (64-bit mode: XER[CA] is the carry out of bit 0). */
 static inline uint32_t ppc_carry64(uint64_t a, uint64_t b, uint32_t cin)
 {

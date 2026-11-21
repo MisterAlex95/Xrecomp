@@ -584,7 +584,7 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 /* Record forms: titles run in 32-bit mode (MSR[SF] = 0), CR0 compares the low word of the result with 0 (xenon_ops.h
  * xe_carry says more). */
 /* RC_CR0V: the CR0 field alone (x360_tools/xenon.py: a record form whose CR0 a conditional branch tests at once) */
-#define RC_CR0V(v) ppc_cmps((int32_t)(uint32_t)(v), 0, c->xer_so)
+#define RC_CR0V(v) xe_cmps((int32_t)(uint32_t)(v), 0, c->xer_so)
 #define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, RC_CR0V(v)))
 /* OE forms (XBA-284): OV is the overflow, SO sticks */
 #define RC_OE(ov)                                                                                                      \

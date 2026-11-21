@@ -1,11 +1,10 @@
 """Dead CR stores (xenon.py XenonLifter._plan_cr): the guest state must be the same, byte for byte, wherever it can be
-seen. Random functions of compares, record forms, CR readers (mfcr, CR logic) and conditional branches (forward, and
-counted loops back) are lifted with and without the fusion and run under the runtime's RC_BLOCK (XE_RUNTIME) with a
-time slice of 1, 2, 3, 5 blocks and an unlimited one, so that a slice ends at every block boundary, on the dead edges'
-own RC_BLOCK_X too. The state after every return to the dispatcher (all GPRs, CR, XER, CTR, LR, PC, the instruction
-count) must be the same in both builds."""
+seen. Random functions of compares, record forms (OE ones too), CR readers (mfcr, CR logic), XER writes, fcmpu, vector
+record compares, traps and conditional branches (forward, and counted loops back) are lifted with and without the
+fusion and run under the runtime's RC_BLOCK (XE_RUNTIME) with a time slice of 1, 2, 3, 5 blocks and an unlimited one,
+so that a slice ends at every block boundary, on the dead edges' own RC_BLOCK_X too. The state after every return to
+the dispatcher (all GPRs, CR, XER, CTR, LR, PC, the instruction count) must be the same in both builds."""
 
-import os
 import random
 import shutil
 import subprocess
@@ -121,8 +120,13 @@ def random_function(rng, n=40):
                                     A.xor(rd, ra, rb, 1), A.extsw(rd, ra, 1))))
             if rng.random() < 0.6:
                 body.append(("bc", rng.choice((12, 4)), rng.randint(0, 3)))
-        elif k < 0.52:
+        elif k < 0.49:
             body.append(A.mfcr(rd))
+        elif k < 0.52:  # SO into CR0: an OE record form, XER written; other fields' setters; a trap (never taken)
+            body.append(rng.choice((A.add(rd, ra, rb, 1) | 1 << 10, A.mtspr(1, ra),
+                                    (63 << 26) | (crf << 23) | (rng.randint(0, 3) << 16) | (rng.randint(0, 3) << 11),
+                                    (4 << 26) | (1 << 21) | (2 << 16) | (3 << 11) | 0x400 | 0x086,
+                                    A.twi(4, ra, -12345))))
         elif k < 0.56:
             body.append(A.crxor(rng.randint(0, 31), rng.randint(0, 31), rng.randint(0, 31)))
         elif k < 0.62:  # a counted loop back to here: r20 / r21 count down
@@ -212,6 +216,6 @@ def test_fusion_off_is_the_old_c(monkeypatch):
     on = XenonLifter(None, decode, F, "f", comments=False).function()
     assert "cf_" not in off and "c->cr = ppc_cr_set(c->cr, 6, ppc_cmps(" in off
     # the loop's back edge stores nothing on its way (the block sets cr6 again first); the way out stores it
-    assert "cf_ = ppc_cmps(" in on
+    assert "cf_ = xe_cmps(" in on
     assert "RC_BLOCK_X(0x82001000u, 2, c->cr = ppc_cr_set(c->cr, 6, cf_)); goto L_82001000_b;" in on
     assert "} c->cr = ppc_cr_set(c->cr, 6, cf_);" in on
