@@ -269,6 +269,8 @@ typedef struct texture {
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
     int swap_rb;      /* that copy's: red and blue are the other way round from the memory the fetch constant reads */
     int levels;       /* mip levels uploaded */
+    int copy_w, copy_h; /* a copy's texture: its host size and internal format (kept for the next copy that fits) */
+    GLenum copy_ifmt;
     uint32_t gen;     /* the copy's generation it was taken from (rt_copy.gen) */
     uint32_t lo, hi;  /* decoded from memory: the physical bytes its levels lie in (lazy resolves flush over them) */
 } texture;
@@ -2819,16 +2821,23 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
                 t = victim;
                 memcpy(t->key, fc, sizeof t->key);
             }
-            if (t->tex)
+            /* another copy's picture in a texture of this size and format: the blit below overwrites all of it, the
+             * texture object is kept (a new 1080p texture per copy change is a reallocation and a render pass more) */
+            int hw = (int)w * g->scale, hh = (int)h * g->scale;
+            int keep = t->tex && t->copy && t->copy_w == hw && t->copy_h == hh && t->copy_ifmt == rc->ifmt;
+            if (t->tex && !keep)
                 g->glDeleteTextures(1, &t->tex);
-            GLenum tf = GL_RGBA, tt = GL_UNSIGNED_BYTE;
-            if (rc->ifmt == GL_RGB10_A2)
-                tt = GL_UNSIGNED_INT_2_10_10_10_REV;
-            else if (rc->ifmt == GL_RGBA16F || rc->ifmt == GL_RG16F)
-                tf = rc->ifmt == GL_RG16F ? GL_RG : GL_RGBA, tt = GL_HALF_FLOAT;
-            else if (rc->ifmt == GL_R32F || rc->ifmt == GL_RG32F)
-                tf = rc->ifmt == GL_R32F ? GL_RED : GL_RG, tt = GL_FLOAT;
-            t->tex = new_texture(g, rc->ifmt, tf, tt, (int)w * g->scale, (int)h * g->scale);
+            if (!keep) {
+                GLenum tf = GL_RGBA, tt = GL_UNSIGNED_BYTE;
+                if (rc->ifmt == GL_RGB10_A2)
+                    tt = GL_UNSIGNED_INT_2_10_10_10_REV;
+                else if (rc->ifmt == GL_RGBA16F || rc->ifmt == GL_RG16F)
+                    tf = rc->ifmt == GL_RG16F ? GL_RG : GL_RGBA, tt = GL_HALF_FLOAT;
+                else if (rc->ifmt == GL_R32F || rc->ifmt == GL_RG32F)
+                    tf = rc->ifmt == GL_R32F ? GL_RED : GL_RG, tt = GL_FLOAT;
+                t->tex = new_texture(g, rc->ifmt, tf, tt, hw, hh);
+                t->copy_w = hw, t->copy_h = hh, t->copy_ifmt = rc->ifmt;
+            }
             blit_tex(g, rc->tex, t->tex, 0, 0, (int)w, (int)h, 0, 0);
             t->copy = 1 + (int)(rc - g->copies);
             t->swap_rb = rc->swap_rb;
