@@ -211,6 +211,7 @@ struct x360_machine {
     x360_thunk *thunks;
     unsigned nthunks;
     uint32_t thunk_lo, thunk_hi;
+    uint16_t *thunk_tab;      /* index + 1 into thunks by (pc - thunk_lo) / 4, 0 = none; NULL: binary search */
     uint32_t vars[2][4096];   /* guest address of each variable export, by library and ordinal (0: none) */
 
     xe_rc_fn *fn_tab;         /* lifted code by (pc - code_lo) / 4 */

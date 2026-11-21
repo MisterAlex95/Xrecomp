@@ -388,6 +388,10 @@ const x360_thunk *x360_thunk_at(x360_machine *x, uint32_t pc)
 {
     if (pc < x->thunk_lo || pc >= x->thunk_hi)
         return NULL;
+    if (x->thunk_tab) {
+        unsigned i = (pc & 3) ? 0 : x->thunk_tab[(pc - x->thunk_lo) >> 2];
+        return i ? &x->thunks[i - 1] : NULL;
+    }
     unsigned lo = 0, hi = x->nthunks;
     while (lo < hi) {
         unsigned mid = (lo + hi) / 2;
@@ -1102,6 +1106,7 @@ void x360_destroy(x360_machine *x)
     free(x->pad_script);
     x360_mem_free(x);
     free(x->thunks);
+    free(x->thunk_tab);
     free(x->fn_tab);
     free(x);
 }
