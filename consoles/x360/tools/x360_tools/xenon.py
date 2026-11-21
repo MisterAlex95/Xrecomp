@@ -28,7 +28,9 @@ with no op_ method (traps, mtmsrd, the base's rare system ones) are handed to th
 recompiler's stats count them (`unlifted`).
 """
 
-from tools.ppc.isa import TRAP, Decoder, sext
+import re
+
+from tools.ppc.isa import BCCTR, BCLR, BCOND, BRANCH, TRAP, Decoder, sext
 from tools.ppc.lift import RA0, FnLifter, R, hx, mask
 
 M64 = (1 << 64) - 1
@@ -346,7 +348,145 @@ OE_OTHER = {
 }
 
 
+# Dead CR stores (perf/x360-dead-cr). A compare (or a record form) whose field the conditional branch right after it tests
+# leaves the field in a local (cf_) and the branch tests that; each edge out of the block writes the field into c->cr,
+# except an edge into a block of the function that sets the same field again before anything can see CR: that edge
+# runs the block's RC_BLOCK itself with the store on its way-out path (xenon_rt.h RC_BLOCK_X, taken when the slice ends
+# there) and jumps past the block's own RC_BLOCK. So c->cr holds exactly what it holds without this wherever it can be
+# seen (a slice end, every exit, call, RC_INTERP, mfcr and the other CR readers), and a loop's back edge or a
+# compare-and-branch chain stores nothing on its hot path. What may sit between the two instructions, and before the
+# field is set again in the next block: instructions whose C touches no CR field but other fields' ppc_cr_set /
+# RC_CR0, and neither leaves the function nor hands an instruction to the interpreter (CR_OPAQUE).
+CR_SET = re.compile(r"c->cr = ppc_cr_set\(c->cr, (\d), ")
+CR_CMP = re.compile(r"^c->cr = ppc_cr_set\(c->cr, (\d), (.*)\);$")
+CR_OPAQUE = ("RC_EXIT", "RC_INTERP", "RC_CALL", "RC_STWCX", "RC_STDCX", "RC_IDLE", "RC_NOT_COVERED", "RC_CHECK",
+             "return", "goto", "c->pc")
+CR_CMPS = ("cmp", "cmpi", "cmpl", "cmpli")
+
+
 class XenonLifter(FnLifter):
+    FUSE_CR = True  # tests compare against False (the C before, byte for byte)
+    cr_fuse = cr_prod = {}  # _plan_cr fills its own (function())
+    cr_land = frozenset()
+
+    def function(self):
+        self._plan_cr()
+        text = FnLifter.function(self)
+        if self.cr_fuse:
+            text = text.replace("    RC_PROLOGUE;\n", "    RC_PROLOGUE;\n    uint32_t cf_;\n", 1)
+        return text
+
+    # ---- dead CR stores ----
+    def _block(self, a):
+        """The addresses of the block at leader a, as function() cuts it."""
+        out = [a]
+        while out[-1] + 4 in self.f.addrs and out[-1] + 4 not in self.leaders:
+            out.append(out[-1] + 4)
+        return out
+
+    def _cr_role(self, i, n):
+        """What instruction i does to CR field n: "kill" (sets it without reading CR, nothing else seen), "clear"
+        (leaves it, no CR reader, no way out of the function) or "opaque"."""
+        if i.kind in (BRANCH, BCOND, BCLR, BCCTR) or self.needs_interp(i) or self.checks_after(i) or i.name in TRAPS:
+            return "opaque"
+        t = self._cr_text(i)
+        if any(k in t for k in CR_OPAQUE):
+            return "opaque"
+        sets = [int(f) for f in CR_SET.findall(t)] + [0] * t.count("RC_CR0(")
+        if t.count("c->cr") != 2 * len(CR_SET.findall(t)):
+            return "opaque"  # a read of CR (mfcr, CR logic, mcrf, mtcrf)
+        return "kill" if n in sets else "clear"
+
+    def _cr_producer(self, i, n):
+        """The C of i with field n going to cf_ instead of c->cr, or None."""
+        t = self._cr_text(i)
+        if i.name in CR_CMPS:
+            m = CR_CMP.match(t)
+            if m and int(m.group(1)) == n and "c->cr" not in m.group(2):
+                return "cf_ = %s;" % m.group(2)
+            return None
+        k = t.rfind(" RC_CR0(")
+        if n == 0 and k >= 0 and t.endswith(");") and t.count("RC_CR0(") == 1 and not CR_SET.search(t):
+            return t[:k] + " cf_ = RC_CR0V(" + t[k + 8:]
+        return None
+
+    def _cr_text(self, i):
+        """The C of i as it is without the fusion (not a branch: no side effects on the lifter's counts)."""
+        t = self._cr_texts.get(i.addr)
+        if t is None:
+            t = self._cr_texts[i.addr] = FnLifter.insn(self, i)
+        return t
+
+    def _cr_dead_at(self, a, n):
+        """Field n is set again in the block at leader a before anything can see CR."""
+        for x in self._block(a):
+            r = self._cr_role(self.decode(x), n)
+            if r != "clear":
+                return r == "kill"
+        return False
+
+    def _plan_cr(self):
+        self.cr_fuse = {}   # bc address -> (field, {edge target: block size when the store is dead there})
+        self.cr_prod = {}   # producer address -> its C
+        self.cr_land = set()  # leaders a dead edge jumps into (past their RC_BLOCK)
+        self._cr_texts = {}
+        if not self.FUSE_CR:
+            return
+        for s in sorted(self.leaders):
+            blk = self._block(s)
+            i = self.decode(blk[-1])
+            if i.kind != BCOND or i.lk or not (i.rd & 4) or (i.rd & 16) or self.is_poll_loop(i):
+                continue
+            n = i.ra >> 2
+            prod = None
+            for a in reversed(blk[:-1]):
+                j = self.decode(a)
+                r = self._cr_role(j, n)
+                if r == "kill":
+                    c = self._cr_producer(j, n)
+                    if c is not None:
+                        prod = (a, c)
+                    break
+                if r != "clear":
+                    break
+            if prod is None:
+                continue
+            dead = {}
+            for t in (i.target, i.addr + 4):
+                if t in self.f.addrs and t in self.leaders and self._cr_dead_at(t, n):
+                    dead[t] = len(self._block(t))
+                    self.cr_land.add(t)
+            self.cr_prod[prod[0]] = prod[1]
+            self.cr_fuse[i.addr] = (n, dead)
+        self._cr_texts = None
+
+    def insn(self, i):
+        c = self.cr_prod.get(i.addr)
+        return c if c is not None else FnLifter.insn(self, i)
+
+    def block_head(self, a, insns):
+        h = FnLifter.block_head(self, a, insns)
+        return h + "\nL_%08X_b:;" % a if a in self.cr_land else h
+
+    def _cr_edge(self, t, n, dead, fall):
+        st = "c->cr = ppc_cr_set(c->cr, %d, cf_)" % n
+        if t in dead:
+            return "RC_BLOCK_X(%s, %d, %s); goto L_%08X_b;" % (hx(t), dead[t], st, t)
+        if fall:
+            return st + ";"  # the next block's label follows (or the RC_EXIT after the run)
+        return "%s; %s" % (st, self.go(t) if t in self.f.addrs else "RC_EXIT(%s);" % hx(t))
+
+    def op_bc(self, i):
+        fz = self.cr_fuse.get(i.addr)
+        if fz is None:
+            return FnLifter.op_bc(self, i)
+        n, dead = fz
+        test = "(cf_ & %du)" % (8 >> (i.ra & 3))
+        if not (i.rd & 8):
+            test = "!" + test
+        return "if (%s) { %s } %s" % (test, self._cr_edge(i.target, n, dead, False),
+                                      self._cr_edge(i.addr + 4, n, dead, True))
+
     @staticmethod
     def cond(i):
         """32-bit mode: bdnz and the other CTR-decrementing branches test the low word of CTR."""

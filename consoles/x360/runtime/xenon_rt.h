@@ -424,19 +424,24 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
     xe_cpu *c = m_->cur;                                                                                               \
     (void)c
 #define XE_EE_GRACE 65536 /* blocks a thread with MSR[EE] clear may run past its slice before it is preempted anyway */
-#define RC_BLOCK(pc_, n)                                                                                               \
+/* RC_BLOCK_X: RC_BLOCK with flush_ evaluated on the way out only (x360_tools/xenon.py, dead CR stores: the lifter
+ * jumps past a block's own RC_BLOCK with the CR field its predecessor left pending, and writes it here) */
+#define RC_BLOCK_X(pc_, n, flush_)                                                                                     \
     do {                                                                                                               \
         m_->rc_native += (n);                                                                                          \
         if (--m_->slice < 0 && ((c->msr & 0x8000u) || m_->slice < -XE_EE_GRACE)) {                                     \
             c->pc = (pc_);                                                                                             \
+            flush_;                                                                                                    \
             return;                                                                                                    \
         }                                                                                                              \
     } while (0)
+#define RC_BLOCK(pc_, n) RC_BLOCK_X(pc_, n, (void)0)
 #else
 #define RC_PROLOGUE                                                                                                    \
     xe_cpu *c = &m_->cpu;                                                                                              \
     (void)c
 #define RC_BLOCK(pc_, n) (m_->rc_native += (n))
+#define RC_BLOCK_X(pc_, n, flush_) (m_->rc_native += (n))
 #endif
 #define RC_EXIT(pc_)                                                                                                   \
     do {                                                                                                               \
@@ -578,7 +583,9 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
     } while (0)
 /* Record forms: titles run in 32-bit mode (MSR[SF] = 0), CR0 compares the low word of the result with 0 (xenon_ops.h
  * xe_carry says more). */
-#define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, ppc_cmps((int32_t)(uint32_t)(v), 0, c->xer_so)))
+/* RC_CR0V: the CR0 field alone (x360_tools/xenon.py: a record form whose CR0 a conditional branch tests at once) */
+#define RC_CR0V(v) ppc_cmps((int32_t)(uint32_t)(v), 0, c->xer_so)
+#define RC_CR0(v) (c->cr = ppc_cr_set(c->cr, 0, RC_CR0V(v)))
 /* OE forms (XBA-284): OV is the overflow, SO sticks */
 #define RC_OE(ov)                                                                                                      \
     do {                                                                                                               \
