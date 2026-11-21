@@ -151,14 +151,15 @@ instructions per frame) and one range test per inline store, the MI repeat mode 
 
 **Around lifted code (XBA-295).** The rest of a bench frame, profiled whole: the dispatcher (`n64_recomp_run`, 10 %),
 the AI's resampler (`n64_ai_advance`, 9 % on x86-64 and 4 % on arm64 with the AI idle; 27 % of an idle homebrew
-frame), the tail above (3.4 %), COP1 arithmetic (1.3 %), the slice loop (0.7 %); the RSP, the RDP and the VI are below
-0.1 % on the bench. The resampler now skips its sums once the last 32 DAC samples were 0 (`ai_quiet`: the sums are +0
+frame), the tail above (3.4 %), COP1 arithmetic (1.3 %), the slice loop (0.7 %); the RDP about 0.2 %, the VI 0.1 %,
+the RSP idle on the bench. The resampler now skips its sums once the last 32 DAC samples were 0 (`ai_quiet`: the sums are +0
 whatever the taps), and a dispatcher hit on a line checks only the page counters of the entry's pages; together the
 bench went from 6.178M to 5.649M instructions per frame on x86-64, 5.440M to 5.166M on arm64. Sound that plays still
 runs the full 32-tap filter (about 240k (arm64) to 550k (x86-64) instructions per frame). Elsewhere the split differs:
 a libdragon program that polls while it writes audio buffers dispatches 110k times a frame (the dispatcher 38-40 % of
-its frame, about 105-120 instructions a dispatch), and libdragon's test ROM in its rspq tests spends 60 % in the RSP
-interpreter (`n64_rsp_run`). Moving the dispatcher's search and hash out of line saved 6 % of the dispatcher on x86-64
+its frame, about 105-120 instructions a dispatch; the line check took it from 14.79M to 13.26M on x86-64), libdragon's
+test ROM spends 60 % in the RSP interpreter (`n64_rsp_run`) in its rspq tests and, in its rdpq tests, 55 % in the
+dispatcher against about 10 % in the software RDP and 2 % in the RSP. Moving the dispatcher's search and hash out of line saved 6 % of the dispatcher on x86-64
 but cost 2.4 % on arm64: not taken.
 
 ## Limits
