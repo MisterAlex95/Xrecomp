@@ -24,7 +24,7 @@ of time** from the original game code, running against a runtime that stands in 
 And you don't need a PC for it: point the Android app at a game you dumped, press **Prepare**, wait 20–30 minutes
 once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the phone.
 
-<p align="center"><a href="docs/images/xrecomp-teaser.mp4"><img src="docs/images/xrecomp-teaser.gif" width="800" alt="XRecomp teaser: KotOR, Crash Bandicoot, Prepare on the device, the library, Ocarina of Time, Pokémon Pinball, dual screen"></a><br><sub>26 s teaser · <a href="docs/images/xrecomp-teaser.mp4">watch the 1080p video (MP4)</a></sub></p>
+<p align="center"><a href="docs/images/xrecomp-teaser.mp4"><img src="docs/images/xrecomp-teaser.gif" width="800" alt="XRecomp teaser: KotOR, Crash Bandicoot, the library, Ocarina of Time, Pokémon Pinball, dual screen"></a><br><sub>24 s teaser · <a href="docs/images/xrecomp-teaser.mp4">watch the 1080p video (MP4)</a></sub></p>
 
 <table>
   <tr>
