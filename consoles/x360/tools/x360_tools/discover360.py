@@ -158,13 +158,35 @@ VMX_ST = ("stvx", "stvx128")
 VMX_LD = ("lvx", "lvx128")
 
 
+class _LazyRun:
+    """_run(view, dec, a, limit) decoded as it is read, front to back: every `li r11, d` is a candidate and most stop
+    after two instructions, where the whole run decoded up to 130 (a sixth of a title's lift). at(k) is run[k], or
+    None past its end."""
+    __slots__ = ("view", "dec", "a", "limit", "ok", "insns")
+
+    def __init__(self, view, dec, a, limit):
+        self.view, self.dec, self.a, self.limit = view, dec, a, limit
+        self.ok = 0         # the first `ok` words are in code
+        self.insns = []
+
+    def at(self, k):
+        while self.ok <= k:
+            if self.ok >= self.limit or not self.view.in_code(self.a + 4 * self.ok):
+                return None
+            self.ok += 1
+        while len(self.insns) <= k:
+            b = self.a + 4 * len(self.insns)
+            self.insns.append(self.dec.decode(self.view.u32(b), b))
+        return self.insns[k]
+
+
 def _match_vmx(view, dec, a):
-    run = _run(view, dec, a, 2 * 64 + 2)
+    run = _LazyRun(view, dec, a, 2 * 64 + 2)
     regs, disps, entries = [], [], {}
     k = 0
     kind = None
-    while k + 1 < len(run):
-        li, m = run[k], run[k + 1]
+    while run.at(k + 1) is not None:
+        li, m = run.at(k), run.at(k + 1)
         if not (li.name == "addi" and li.ra == 0 and li.rd == 11):
             break
         if m.name in VMX_ST:
@@ -181,12 +203,12 @@ def _match_vmx(view, dec, a):
         disps.append(li.simm)
         entries[li.addr] = m.ext.vd
         k += 2
-    if kind is None or k >= len(run):
+    if kind is None or run.at(k) is None:
         return None
     last = 127 if regs and regs[-1] > 31 else 31
     if not _regular(regs, disps, last):
         return None
-    b = run[k]
+    b = run.at(k)
     if not (b.name == "bclr" and (b.rd & 0x14) == 0x14 and not b.lk):
         return None
     return Helper(kind, a, b.addr, entries, [b.addr])

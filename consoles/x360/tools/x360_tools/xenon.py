@@ -398,7 +398,18 @@ class XenonLifter(FnLifter):
     def op_mtmsr(self, i):
         return self.op_mtmsrd(i)
 
+    _interp_memo = {}
+
     def needs_interp(self, i):
+        # The answer depends only on these fields and the class (its op_ methods): the lift asks several times per
+        # instruction, millions of times a title
+        k = (type(self), i.name, i.kind, i.op, i.oe, i.rec)
+        r = self._interp_memo.get(k)
+        if r is None:
+            r = self._interp_memo[k] = self._needs_interp(i)
+        return r
+
+    def _needs_interp(self, i):
         n = i.name
         if n in TRAPS:
             return False  # op_tw / op_twi / op_td / op_tdi: the test, the interpreter when it traps
