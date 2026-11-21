@@ -355,6 +355,7 @@ void x360_render_perf_get(x360_machine *x, x360_render_perf *out)
 {
     memset(out, 0, sizeof *out);
     out->guest_cpu_ns = x->perf.guest_cpu_ns, out->dispatches = x->perf.dispatches, out->turns = x->perf.turns;
+    out->idle = x->perf.idle;
     if (!x->gpu)
         return;
     out->gpu_ns = x->gpu->cp_ns;
@@ -398,9 +399,9 @@ int x360_render_perf_format_guest(const x360_render_perf *now, const x360_render
     char gt[32] = "n/a";
     if (now->gpu_timer && D(gpu_time_frames))
         snprintf(gt, sizeof gt, "%.1f ms", (double)D(gpu_time_ns) / (double)D(gpu_time_frames) / 1e6);
-    return snprintf(out, n, "guest %.1f ms (%.0f k dispatches, %.0f turns), swaps %.1f/s (%llu > 20 ms), gpu-time %s, "
+    return snprintf(out, n, "guest %.1f ms (%.0f k dispatches, %.0f turns, %.0f idle), swaps %.1f/s (%llu > 20 ms), gpu-time %s, "
                     "loads %.1f per %s",
-                    (double)D(guest_cpu_ns) * k / 1e6, (double)D(dispatches) * k / 1e3, (double)D(turns) * k,
+                    (double)D(guest_cpu_ns) * k / 1e6, (double)D(dispatches) * k / 1e3, (double)D(turns) * k, (double)D(idle) * k,
                     seconds > 0 ? (double)D(guest_swaps) / seconds : 0.0, (unsigned long long)D(long_swaps), gt,
                     (double)D(loads) * k, unit);
 #undef D
@@ -567,6 +568,10 @@ static void raise_irq(x360_machine *x, struct x360_gpu *g, uint32_t source)
  * the split, at the same point of the poll: right after the packets ran) */
 static void gpu_take_irq(struct x360_gpu *g)
 {
+    /* nearly every turn there is none: a plain load first, not a locked exchange (a flag set meanwhile is taken at
+     * the next poll, as if it had come a moment later; without the GPU thread nothing sets it between two polls) */
+    if (!__atomic_load_n(&g->link.irq, __ATOMIC_RELAXED))
+        return;
     uint32_t f = __atomic_exchange_n(&g->link.irq, 0, __ATOMIC_ACQUIRE);
     if (f & LINK_IRQ_SRC0)
         g->irq_pending[0] = 1;
@@ -867,6 +872,9 @@ int x360_gpu_overlap(x360_machine *x, int (*job)(x360_machine *, uint64_t), uint
     pthread_mutex_lock(&o->mu);
     o->lockstep = ls && *ls == '1';
     o->gl = pthread_self();
+    /* the GL thread reads and writes guest memory while the guest runs on the worker: sync, lwsync and eieio in lifted
+     * code are real fences (xe_machine.rc_fence), set before the job is handed over (the lock publishes it) */
+    x->m.rc_fence = 1;
     o->job = job, o->arg = arg, o->job_done = 0, o->job_pending = 1;
     __atomic_store_n(&o->active, 1, __ATOMIC_RELEASE);
     pthread_cond_signal(&o->job_cv);

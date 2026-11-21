@@ -388,6 +388,10 @@ const x360_thunk *x360_thunk_at(x360_machine *x, uint32_t pc)
 {
     if (pc < x->thunk_lo || pc >= x->thunk_hi)
         return NULL;
+    if (x->thunk_tab) {
+        unsigned i = (pc & 3) ? 0 : x->thunk_tab[(pc - x->thunk_lo) >> 2];
+        return i ? &x->thunks[i - 1] : NULL;
+    }
     unsigned lo = 0, hi = x->nthunks;
     while (lo < hi) {
         unsigned mid = (lo + hi) / 2;
@@ -682,6 +686,7 @@ int x360_run(x360_machine *x, uint64_t insns)
             }
         }
         if (picked < 0) {
+            x->perf.idle++;
             /* WP-22 stage 2, unpaced: the GL thread's posted work first (a fence or interrupt a thread waits on),
              * then the jump; a paced frame (run_until) keeps its one frame of pipeline. Off the GPU thread: 0. */
             if (!x->run_until && x360_gpu_wait_posted(x))
@@ -793,6 +798,7 @@ static void host_run_thread(x360_machine *x, int k)
     lm.rt = x;
     lm.cur = c;
     lm.rc_stop = UINT64_MAX; /* WP-16: the loop below has no budget of its own, as RC_CALL then sees it */
+    lm.rc_fence = 1;         /* the other workers run guest code at the same time: sync is a real fence */
     lm.rc_fn_tab = x->m.rc_fn_tab;
     lm.rc_code_lo = x->m.rc_code_lo, lm.rc_code_span = x->m.rc_code_span;
     lm.rc_thunk_lo = x->m.rc_thunk_lo, lm.rc_thunk_span = x->m.rc_thunk_span;
@@ -1034,6 +1040,7 @@ int x360_set_host_threads(x360_machine *x, int on)
     pthread_cond_init(&h->main, NULL);
     uint64_t now = x360_now(x);
     x->host = h;
+    x->m.rc_fence = 1; /* the workers have their own machines (host_run_thread sets theirs): this one too, to be sure */
     x->host_t0 = host_now_100ns() - now + x->time_skip; /* the clock goes on from where it was */
     return 0;
 }
@@ -1102,6 +1109,7 @@ void x360_destroy(x360_machine *x)
     free(x->pad_script);
     x360_mem_free(x);
     free(x->thunks);
+    free(x->thunk_tab);
     free(x->fn_tab);
     free(x);
 }

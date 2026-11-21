@@ -209,6 +209,17 @@ int x360_load(x360_machine *x, const uint8_t *d, size_t size, char *why, size_t 
         if (x->nthunks) {
             x->thunk_lo = x->thunks[0].addr;
             x->thunk_hi = x->thunks[x->nthunks - 1].addr + 16;
+            /* the dispatcher's import-call look-up: one table read instead of a binary search per call (thunks are
+             * word-aligned code a few KB apart; anything else keeps the search) */
+            uint32_t span = (x->thunk_hi - x->thunk_lo) / 4;
+            int aligned = !(x->thunk_lo & 3) && x->nthunks < 0xFFFF && span <= (1u << 20);
+            for (unsigned t = 0; t < x->nthunks && aligned; t++)
+                aligned = !(x->thunks[t].addr & 3);
+            free(x->thunk_tab);
+            x->thunk_tab = aligned ? calloc(span, sizeof *x->thunk_tab) : NULL;
+            if (x->thunk_tab)
+                for (unsigned t = x->nthunks; t-- > 0;) /* the first of equal addresses wins, as in the search */
+                    x->thunk_tab[(x->thunks[t].addr - x->thunk_lo) / 4] = (uint16_t)(t + 1);
         }
     }
     return 0;

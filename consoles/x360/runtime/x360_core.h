@@ -114,6 +114,7 @@ typedef struct x360_render_perf {
                              * the scheduler's polls) */
     uint64_t dispatches;    /* lifted functions entered from the dispatcher */
     uint64_t turns;         /* scheduler turns (a thread run until its slice ends, it blocks or ends) */
+    uint64_t idle;          /* idle sweeps: no thread was ready (the scheduler jumps the clock to the next deadline) */
     uint64_t guest_swaps;   /* swaps the command processor ran (unlike swaps, not reset by a state load) */
     uint64_t long_swaps;    /* of them, those more than 20 ms of virtual time after the one before */
     uint64_t loads;         /* attachments loaded at the start of a render pass (a tiler's reads from memory) */
@@ -127,7 +128,7 @@ void x360_render_perf_get(x360_machine *x, x360_render_perf *out);
 int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
                             const char *unit, char *out, size_t n);
 /* WP-19, the second line: now - since over `seconds` of wall time, per frame of the caller's unit: "guest 7.2 ms
- * (191 k dispatches, 469 turns), swaps 60.0/s (0 > 20 ms), gpu-time 12.3 ms, loads 14.0 per frame" (guest: the
+ * (191 k dispatches, 469 turns, 0 idle), swaps 60.0/s (0 > 20 ms), gpu-time 12.3 ms, loads 14.0 per frame" (guest: the
  * scheduler turns' thread CPU time; gpu-time: the host GPU's per frame it measured, "n/a" without a timer; loads:
  * attachments loaded at the start of a render pass). Returns what snprintf returns. */
 int x360_render_perf_format_guest(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
