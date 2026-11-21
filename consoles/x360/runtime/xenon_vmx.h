@@ -370,8 +370,20 @@ static inline xe_v128 xv_sr(xe_v128 a, xe_v128 b)
 }
 
 /* merges of bytes / halfwords: the high (lo = 0) or low (lo = 1) halves of a and b interleaved */
-static inline xe_v128 xv_mrgb(xe_v128 a, xe_v128 b, int lo)
+XV_HOT xe_v128 xv_mrgb(xe_v128 a, xe_v128 b, int lo)
 {
+#if XV_LE && XV_VEC
+    /* the loop below with constant indices: host byte (2i) ^ 3 from a's (i + 8 lo) ^ 3, (2i + 1) ^ 3 from b's */
+    xv_u8x16 x, y, z;
+    memcpy(&x, &a, 16);
+    memcpy(&y, &b, 16);
+    if (lo)
+        z = XV_SHUF(xv_u8x16, x, y, 26, 10, 27, 11, 24, 8, 25, 9, 30, 14, 31, 15, 28, 12, 29, 13);
+    else
+        z = XV_SHUF(xv_u8x16, x, y, 18, 2, 19, 3, 16, 0, 17, 1, 22, 6, 23, 7, 20, 4, 21, 5);
+    memcpy(&a, &z, 16);
+    return a;
+#endif
 #if XV_LE
     xe_v128 m;
     for (int i = 0; i < 8; i++) {
@@ -388,8 +400,20 @@ static inline xe_v128 xv_mrgb(xe_v128 a, xe_v128 b, int lo)
     return r;
 }
 
-static inline xe_v128 xv_mrgh(xe_v128 a, xe_v128 b, int lo)
+XV_HOT xe_v128 xv_mrgh(xe_v128 a, xe_v128 b, int lo)
 {
+#if XV_LE && XV_VEC
+    /* host halfword (2i) ^ 1 from a's (i + 4 lo) ^ 1, (2i + 1) ^ 1 from b's */
+    xv_u16x8 x, y, z;
+    memcpy(&x, &a, 16);
+    memcpy(&y, &b, 16);
+    if (lo)
+        z = XV_SHUF(xv_u16x8, x, y, 13, 5, 12, 4, 15, 7, 14, 6);
+    else
+        z = XV_SHUF(xv_u16x8, x, y, 9, 1, 8, 0, 11, 3, 10, 2);
+    memcpy(&a, &z, 16);
+    return a;
+#endif
 #if XV_LE
     xe_v128 m;
     for (int i = 0; i < 4; i++) {
@@ -429,8 +453,55 @@ static inline xe_v128 xv_mulh(xe_v128 a, xe_v128 b, int odd, int sgn)
 
 /* packs: vA's elements, then vB's, each narrowed; mode 0 modulo, 1 unsigned -> unsigned saturating, 2 signed ->
  * unsigned saturating, 3 signed -> signed saturating. */
-static inline xe_v128 xv_pkh(xe_v128 a, xe_v128 b, int mode, uint32_t *vscr)
+XV_HOT xe_v128 xv_pkh(xe_v128 a, xe_v128 b, int mode, uint32_t *vscr)
 {
+    /* SIMD: a's lanes then b's narrowed in host order, then each word's two halfwords swapped (result host byte j is
+     * PowerPC byte j ^ 3, the narrowed PowerPC halfword j ^ 3 = host halfword j ^ 2). VSCR[SAT] once, set when any
+     * lane is out of range: x > 255 unsigned for modes 1 and 2 (a signed lane in 0 .. 255 is one below 256 unsigned),
+     * x + 128 > 255 for mode 3; i.e. a non-zero high byte in the OR of all lanes. */
+#if XV_NEON
+    uint16x8_t x = vreinterpretq_u16_u8(xv_q(a)), y = vreinterpretq_u16_u8(xv_q(b)), hi;
+    uint8x16_t n;
+    if (mode == 0) {
+        n = vcombine_u8(vmovn_u16(x), vmovn_u16(y));
+    } else {
+        if (mode == 1)
+            n = vcombine_u8(vqmovn_u16(x), vqmovn_u16(y));
+        else if (mode == 2)
+            n = vcombine_u8(vqmovun_s16(vreinterpretq_s16_u16(x)), vqmovun_s16(vreinterpretq_s16_u16(y)));
+        else
+            n = vreinterpretq_u8_s8(
+                vcombine_s8(vqmovn_s16(vreinterpretq_s16_u16(x)), vqmovn_s16(vreinterpretq_s16_u16(y))));
+        if (mode == 3)
+            hi = vorrq_u16(vaddq_u16(x, vdupq_n_u16(0x80)), vaddq_u16(y, vdupq_n_u16(0x80)));
+        else
+            hi = vorrq_u16(x, y);
+        if (vmaxvq_u16(hi) > 0xFF)
+            *vscr |= XV_VSCR_SAT;
+    }
+    return xv_unq(vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(n))));
+#elif XV_SSE2
+    __m128i x = xv_x(a), y = xv_x(b), n, hi;
+    if (mode == 0) {
+        __m128i lo8 = _mm_set1_epi16(0xFF);
+        n = _mm_packus_epi16(_mm_and_si128(x, lo8), _mm_and_si128(y, lo8));
+    } else {
+        if (mode == 1) { /* min(x, 255) unsigned (SSE2 has no pminuw): x - (x -sat 255) */
+            __m128i m = _mm_set1_epi16(0xFF);
+            n = _mm_packus_epi16(_mm_sub_epi16(x, _mm_subs_epu16(x, m)), _mm_sub_epi16(y, _mm_subs_epu16(y, m)));
+        } else if (mode == 2)
+            n = _mm_packus_epi16(x, y);
+        else
+            n = _mm_packs_epi16(x, y);
+        if (mode == 3)
+            hi = _mm_or_si128(_mm_add_epi16(x, _mm_set1_epi16(0x80)), _mm_add_epi16(y, _mm_set1_epi16(0x80)));
+        else
+            hi = _mm_or_si128(x, y);
+        if (_mm_movemask_epi8(_mm_cmpeq_epi16(_mm_srli_epi16(hi, 8), _mm_setzero_si128())) != 0xFFFF)
+            *vscr |= XV_VSCR_SAT;
+    }
+    return xv_unx(_mm_shufflehi_epi16(_mm_shufflelo_epi16(n, 0xB1), 0xB1));
+#endif
 #if XV_LE
     xe_v128 p;
     for (int i = 0; i < 16; i++) {

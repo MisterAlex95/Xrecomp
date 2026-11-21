@@ -196,6 +196,57 @@ typedef uint32_t xv_u32x4 __attribute__((vector_size(16)));
 #else
 #define XV_HOT static inline
 #endif
+/* XV_NEON / XV_SSE2 / XV_SSSE3: the host SIMD the compiler targets, for the ops the vector extensions cannot say
+ * (vperm's variable byte shuffle, the saturating packs): NEON on every aarch64, SSE2 on every x86-64, SSSE3 only where
+ * the build enables it (-mssse3 or a -march that has it). Elsewhere, and with -DXV_SCALAR, the plain C. */
+#if XV_LE && XV_VEC && defined(__aarch64__) && defined(__ARM_NEON)
+#define XV_NEON 1
+#include <arm_neon.h>
+XV_HOT uint8x16_t xv_q(xe_v128 v)
+{
+    uint8x16_t q;
+    memcpy(&q, &v, 16);
+    return q;
+}
+XV_HOT xe_v128 xv_unq(uint8x16_t q)
+{
+    xe_v128 v;
+    memcpy(&v, &q, 16);
+    return v;
+}
+#else
+#define XV_NEON 0
+#endif
+#if XV_LE && XV_VEC && defined(__SSE2__)
+#define XV_SSE2 1
+#include <emmintrin.h>
+XV_HOT __m128i xv_x(xe_v128 v)
+{
+    __m128i x;
+    memcpy(&x, &v, 16);
+    return x;
+}
+XV_HOT xe_v128 xv_unx(__m128i x)
+{
+    xe_v128 v;
+    memcpy(&v, &x, 16);
+    return v;
+}
+#else
+#define XV_SSE2 0
+#endif
+#if XV_SSE2 && defined(__SSSE3__)
+#define XV_SSSE3 1
+#include <tmmintrin.h>
+#else
+#define XV_SSSE3 0
+#endif
+/* XV_SHUF: a shuffle of two vectors' lanes by constant indices (b's lanes after a's) */
+#if XV_VEC && (defined(__clang__) || __GNUC__ >= 12)
+#define XV_SHUF(T, a, b, ...) __builtin_shufflevector((T)(a), (T)(b), __VA_ARGS__)
+#elif XV_VEC
+#define XV_SHUF(T, a, b, ...) __builtin_shuffle((T)(a), (T)(b), (T){__VA_ARGS__})
+#endif
 
 XV_HOT xe_v128 xv_words(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
 {
@@ -452,15 +503,28 @@ static inline xe_v128 xv_sel(xe_v128 a, xe_v128 b, xe_v128 ctl)
     return r;
 }
 
-static inline xe_v128 xv_perm(xe_v128 a, xe_v128 b, xe_v128 ctl)
+XV_HOT xe_v128 xv_perm(xe_v128 a, xe_v128 b, xe_v128 ctl)
 {
+    /* PowerPC byte k of a:b is host byte k ^ 3 of a:b (k ^ 3 keeps k < 16 in a): result host byte j = PowerPC byte
+     * j ^ 3 takes host byte (ctl host byte j & 31) ^ 3 of a:b, a table look-up with the index fixed up */
+#if XV_NEON
+    uint8x16x2_t t = {{xv_q(a), xv_q(b)}};
+    return xv_unq(vqtbl2q_u8(t, veorq_u8(vandq_u8(xv_q(ctl), vdupq_n_u8(31)), vdupq_n_u8(3))));
+#elif XV_SSSE3
+    __m128i i = _mm_xor_si128(_mm_and_si128(xv_x(ctl), _mm_set1_epi8(31)), _mm_set1_epi8(3));
+    __m128i inb = _mm_cmpgt_epi8(i, _mm_set1_epi8(15)); /* pshufb reads the index's low 4 bits (and bit 7, clear) */
+    return xv_unx(_mm_or_si128(_mm_andnot_si128(inb, _mm_shuffle_epi8(xv_x(a), i)),
+                               _mm_and_si128(inb, _mm_shuffle_epi8(xv_x(b), i))));
+#endif
 #if XV_LE
-    /* byte i of the result is byte (ctl's byte i & 31) of a:b, bytes in PowerPC order (u8[i ^ 3]) */
+    /* the same look-up from a:b in one array: no branch per byte (a data-dependent branch, mispredicted half the
+     * time) */
+    uint8_t ab[32];
+    memcpy(ab, &a, 16);
+    memcpy(ab + 16, &b, 16);
     xe_v128 r;
-    for (int i = 0; i < 16; i++) {
-        unsigned k = ctl.u8[i ^ 3] & 31u;
-        r.u8[i ^ 3] = k < 16 ? a.u8[k ^ 3] : b.u8[(k - 16) ^ 3];
-    }
+    for (int j = 0; j < 16; j++)
+        r.u8[j] = ab[(ctl.u8[j] & 31u) ^ 3u];
     return r;
 #endif
     uint8_t src[32], c[16], out[16];

@@ -13,6 +13,7 @@ project(console_x360_tests C)
 #   x360_pad_map     the title key and a host pad as a 360 controller (x360_runtime.h's pure helpers; XBA-280)
 #   x360_vmx_ref     the VMX helpers as packs build them (host-order lanes, vector ops) equal the same helpers as plain
 #                    C (-DXV_SCALAR) on random and edge vectors, VSCR[SAT] included (the interpreter shares them)
+#   x360_vmx_ref_ssse3  the same built with -mssse3 (x86-64: the pshufb vperm)
 #   x360_window      the renderer on a window's context (xenos_gl_attach at scale 2, the frame texture presented,
 #                    the drawable captured): needs a display (xvfb-run -a ctest -R x360_window), 77 without
 #   x360_play        the test title played by x360_play headless, frame by frame, to its end (run_play.sh;
@@ -73,6 +74,21 @@ target_compile_options(x360_vmx_ref_test PRIVATE -Wall -Wextra -Wno-unused-funct
 target_link_libraries(x360_vmx_ref_test PRIVATE m)
 add_test(NAME x360_vmx_ref COMMAND x360_vmx_ref_test)
 set_tests_properties(x360_vmx_ref PROPERTIES TIMEOUT 120)
+# x86-64: the same with -mssse3, for the pshufb vperm the default (SSE2) build leaves out (aarch64 has one build: NEON)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    include(CheckCCompilerFlag)
+    check_c_compiler_flag(-mssse3 X360_HAVE_MSSSE3)
+    if(X360_HAVE_MSSSE3)
+        add_executable(x360_vmx_ref_ssse3_test x360_vmx_ref_test.c x360_vmx_ref_scalar.c)
+        target_include_directories(x360_vmx_ref_ssse3_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime
+                                                                   ${CMAKE_CURRENT_SOURCE_DIR}/../../gc/runtime)
+        target_compile_options(x360_vmx_ref_ssse3_test PRIVATE -Wall -Wextra -Wno-unused-function -ffp-contract=off
+                                                               -mssse3)
+        target_link_libraries(x360_vmx_ref_ssse3_test PRIVATE m)
+        add_test(NAME x360_vmx_ref_ssse3 COMMAND x360_vmx_ref_ssse3_test)
+        set_tests_properties(x360_vmx_ref_ssse3 PROPERTIES TIMEOUT 120)
+    endif()
+endif()
 
 add_executable(xenos_texture_hash_test xenos_texture_hash_test.c)
 target_link_libraries(xenos_texture_hash_test PRIVATE x360_core)
