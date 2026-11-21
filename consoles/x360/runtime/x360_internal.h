@@ -450,7 +450,15 @@ X360_CRYPT_CALLS(X360_DECLARE_FILE_CALL)
 void x360_k_VdNop0(x360_machine *x, x360_thread *t, xe_cpu *c);
 int x360_gpu_init(x360_machine *x);
 void x360_gpu_free(x360_machine *x);
+/* the GPU in two halves (WP-22, x360_gpu.c): x360_gpu_poll is the post half (guest thread) and, in stage 1, calls the
+ * run half (x360_gpu_run: the command processor and the renderer up to the posted write pointer) right after it.
+ * x360_gpu_drain: what was posted run to its end (flush_resolves: lazy resolves written too) and the run half's
+ * interrupts queued; called before a state is saved or loaded and by x360_render_flush. */
 void x360_gpu_poll(x360_machine *x);
+int x360_gpu_run(x360_machine *x);
+void x360_gpu_drain(x360_machine *x, int flush_resolves);
+/* on: x360_gpu_poll posts without running (x360_gpu_run / _drain do): stage 2's hook, and tests of the seam */
+void x360_gpu_set_deferred(x360_machine *x, int on);
 uint64_t x360_gpu_next_event(x360_machine *x);
 void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks);
 #define X360_DECLARE_XAM_CALL(name) void x360_x_##name(x360_machine *x, x360_thread *t, xe_cpu *c);

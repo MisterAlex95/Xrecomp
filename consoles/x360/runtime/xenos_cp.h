@@ -10,7 +10,15 @@
  * The register file is kept, draws and swaps are counted and traced, and handed to a renderer when one is attached
  * (draw_hook / swap_hook: xenos_gl.c, GLES 3.0). Packet formats and semantics follow Xenia's xenos.h /
  * command_processor.cc (BSD);
- * the opcode values are the R400-family PM4 ones they list. The state is plain data (save states). */
+ * the opcode values are the R400-family PM4 ones they list. The state is plain data (save states).
+ *
+ * What the CPU side can see of a run (WP-22: x360_gpu.c runs this as the "run half", which a later stage moves off
+ * the guest thread): only stores through write32 / wmem (the read pointer write-back at the end of each
+ * xenos_cp_set_wptr, MEM_WRITE, REG_TO_MEM, COND_WRITE to memory, EVENT_WRITE_SHD / _EXT / _ZPD, scratch register
+ * write-back, the renderer's resolves and memory export) and the interrupt callback (PM4_INTERRUPT). Everything else
+ * it reads or writes is this struct, or guest memory read through read32 / mem (packets, indirect buffers, IM_LOAD,
+ * LOAD_ALU_CONSTANT, WAIT_REG_MEM / COND_WRITE / EVENT_WRITE_ZPD polls, the renderer's textures, vertices, indices and
+ * front buffer). Nothing here calls the CPU side synchronously and expects an answer. */
 #ifndef XENOS_CP_H
 #define XENOS_CP_H
 

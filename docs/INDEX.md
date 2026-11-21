@@ -17,6 +17,7 @@ stuck in.
 - [Environment Variables](runtime/environment-variables.md) — Every `RECOMP_*` switch: default, effect, and the source file that reads it
 - [Feature matrix](runtime/feature-matrix.md) — Which feature each console has (states, rewind, cheats, upscaling, frame generation...) on each host, from the code (XBA-274)
 - [XMV movies](runtime/xmv.md) — The runtime's portable XMV decoder (WMV2 + Xbox ADPCM) and the hook a title layer binds in place of the XDK's movie player
+- [Xbox 360 GPU thread](runtime/x360-gpu-thread.md) — The GPU's post / run halves (WP-22 stage 1), every place the command processor meets guest-visible state, and the design of a GPU thread (stages 2-4) with its determinism trade-off
 - [Contributing](../CONTRIBUTING.md) — Setup, where to focus, code style, how to submit
 - [Upstream README](upstream/README.md) — xboxrecomp's own README: background, library table, FAQ, community ports, test notes
 - [Releases](releases/README.md) — XRecomp releases: notes per version, how a release is made
