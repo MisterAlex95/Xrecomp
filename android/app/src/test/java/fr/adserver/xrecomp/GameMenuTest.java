@@ -128,6 +128,17 @@ public class GameMenuTest {
         /** XBA-197: Add a code asked (the game's key), and the name the fake dialog then adds. */
         final List<String> cheatAdds = new ArrayList<>();
         String cheatToAdd;
+        /** XBA-339: the frame file the next capture gives, the log, the line the fake dialog types (null: Cancel). */
+        File frame, log;
+        String typed;
+        final List<String> asked = new ArrayList<>();
+        @Override public File captureFrame() { return frame; }
+        @Override public File reportLog() { return log; }
+        @Override public void askReportText(String current, java.util.function.Consumer<String> done) {
+            asked.add(current);
+            if (typed != null)
+                done.accept(typed);
+        }
         @Override public void addCheat(Console con, String key, java.util.function.Consumer<String> added) {
             cheatAdds.add(key);
             if (cheatToAdd != null) {
@@ -1477,6 +1488,170 @@ public class GameMenuTest {
         press(KeyEvent.KEYCODE_BUTTON_B);
         menu.row(GameMenu.Item.QUIT).performClick();
         assertEquals(activity.getString(R.string.MENU_QUIT_CONFIRM_SUB), menu.row(GameMenu.Item.QUIT).subtitle);
+    }
+
+    // ---- Report a problem (XBA-339) and breadcrumbs (XBA-340) -------------------------------------------------------
+
+    private File framePng(int w, int h) throws Exception {
+        File f = new File(activity.getCacheDir(), "frame-" + System.nanoTime() + ".png");
+        android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        new Canvas(b).drawColor(0xFF2E6FB8);
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(f)) {
+            b.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, o);
+        }
+        return f;
+    }
+
+    private List<String> crumbNames() {
+        List<String> out = new ArrayList<>();
+        for (Breadcrumbs.Crumb c : Breadcrumbs.read(Breadcrumbs.file(activity), Breadcrumbs.KEEP))
+            out.add(c.name);
+        return out;
+    }
+
+    /**
+     * The menu's Report a problem: the line is required, the screenshot unticked by default and previewed when ticked
+     * (the exact bytes sent), unticking takes it away; Send posts one feedback with the log and the run's breadcrumbs.
+     */
+    @Test
+    public void reportAProblemFromTheMenu() throws Exception {
+        List<byte[]> posted = new ArrayList<>();
+        CrashReport.transport = (url, h, body) -> {
+            posted.add(body);
+            return 200;
+        };
+        try {
+            menu.reportWork = Runnable::run;
+            host.log = new File(activity.getCacheDir(), "game-test.log");
+            TestSupport.write(host.log, "presenting\nopened /storage/emulated/0/Games/Halo.iso\n");
+            Breadcrumbs.startRun(activity, "console", "xbox");
+            menu.open("Back");
+            assertNotNull(menu.row(GameMenu.Item.REPORT));
+            menu.row(GameMenu.Item.REPORT).performClick();
+            idle(20);
+            assertEquals(activity.getString(R.string.MENU_HINT_BACK), menu.backHintForTest());
+            CrashReport d = menu.reportDraftForTest();
+            assertNotNull("the log gathered", d);
+            assertNull("unticked by default", d.image);
+            assertEquals(activity.getString(R.string.MENU_OFF), menu.row(GameMenu.Item.REPORT_SHOT).value);
+            assertTrue("Send waits for the line", menu.row(GameMenu.Item.REPORT_SEND).dim);
+
+            menu.row(GameMenu.Item.REPORT_SEND).performClick();   // no line yet: the dialog, nothing sent
+            assertEquals(1, host.asked.size());
+            assertTrue(posted.isEmpty());
+
+            host.typed = "Black  screen\nafter the logo";
+            menu.row(GameMenu.Item.REPORT_TEXT).performClick();
+            assertEquals("Black screen after the logo", menu.row(GameMenu.Item.REPORT_TEXT).subtitle);
+            assertFalse(menu.row(GameMenu.Item.REPORT_SEND).dim);
+
+            host.frame = framePng(1920, 1080);
+            menu.row(GameMenu.Item.REPORT_SHOT).performClick();
+            idle(20);
+            assertEquals(activity.getString(R.string.MENU_ON), menu.row(GameMenu.Item.REPORT_SHOT).value);
+            assertNotNull("previewed", d.image);
+            assertTrue(d.image.length <= CrashReport.SHOT_MAX);
+            assertFalse("the frame file goes", host.frame.exists());
+            android.graphics.Bitmap pv = android.graphics.BitmapFactory.decodeByteArray(d.image, 0, d.image.length);
+            assertEquals(640, pv.getWidth());
+            assertTrue(d.summary(), d.summary().contains("screenshot.jpg"));
+
+            menu.row(GameMenu.Item.REPORT_SHOT).performClick();   // unticked: gone
+            idle(20);
+            assertNull(d.image);
+
+            host.frame = framePng(640, 480);
+            menu.row(GameMenu.Item.REPORT_SHOT).performClick();
+            idle(20);
+            assertNotNull(d.image);
+            menu.row(GameMenu.Item.REPORT_SEND).performClick();
+            idle(20);
+            assertEquals(1, posted.size());
+            List<Object[]> it = CrashReportTest.items(posted.get(0));
+            assertEquals("feedback", ((org.json.JSONObject)it.get(1)[0]).getString("type"));
+            org.json.JSONObject ev = new org.json.JSONObject(new String((byte[])it.get(1)[1],
+                                                                        java.nio.charset.StandardCharsets.UTF_8));
+            assertEquals("Black screen after the logo",
+                         ev.getJSONObject("contexts").getJSONObject("feedback").getString("message"));
+            assertEquals("game", ev.getJSONObject("tags").getString("from"));
+            org.json.JSONArray bc = ev.getJSONObject("breadcrumbs").getJSONArray("values");
+            assertEquals("game_start", bc.getJSONObject(0).getString("message"));
+            assertEquals("menu_open", bc.getJSONObject(1).getString("message"));
+            assertEquals("game.log", ((org.json.JSONObject)it.get(2)[0]).getString("filename"));
+            assertFalse(new String((byte[])it.get(2)[1], java.nio.charset.StandardCharsets.UTF_8).contains("/storage/"));
+            assertEquals("image/jpeg", ((org.json.JSONObject)it.get(3)[0]).getString("content_type"));
+            assertEquals(activity.getString(R.string.REPORT_SENT), menu.flashText());
+            assertSame("back on the main page", menu.row(GameMenu.Item.REPORT), menu.focusedRow());
+            assertNull(menu.reportDraftForTest());
+        } finally {
+            CrashReport.transport = CrashReport.HTTP;
+            Breadcrumbs.file(activity).delete();
+        }
+    }
+
+    /** No frame to take: the box unticks itself and says so; nothing is attached. */
+    @Test
+    public void reportWithoutAFrame() {
+        CrashReport.transport = (url, h, body) -> 200;
+        try {
+            menu.reportWork = Runnable::run;
+            menu.open("Back");
+            menu.row(GameMenu.Item.REPORT).performClick();
+            idle(20);
+            menu.row(GameMenu.Item.REPORT_SHOT).performClick();
+            idle(20);
+            assertEquals(activity.getString(R.string.MENU_OFF), menu.row(GameMenu.Item.REPORT_SHOT).value);
+            assertEquals(activity.getString(R.string.REPORT_PROBLEM_SHOT_NONE), menu.flashText());
+            assertNull(menu.reportDraftForTest().image);
+        } finally {
+            CrashReport.transport = CrashReport.HTTP;
+        }
+    }
+
+    /** 4:3 and square single screens: every row of the Report page is reachable with the D-pad, Send included. */
+    @Test
+    public void reportPageOnSmallScreens() throws Exception {
+        for (String q : new String[] { "en-w1024dp-h768dp-land-mdpi", "en-w720dp-h720dp-mdpi" }) {
+            menu.release();
+            RuntimeEnvironment.setQualifiers(q);
+            build();
+            menu.reportWork = Runnable::run;
+            host.frame = framePng(640, 480);
+            menu.open("Back");
+            menu.row(GameMenu.Item.REPORT).performClick();
+            idle(20);
+            host.typed = "No sound";
+            menu.row(GameMenu.Item.REPORT_TEXT).performClick();
+            menu.row(GameMenu.Item.REPORT_SHOT).performClick();
+            idle(50);
+            for (int i = 0; i < 6 && menu.focusedRow() != menu.row(GameMenu.Item.REPORT_SEND); i++)
+                press(KeyEvent.KEYCODE_DPAD_DOWN);
+            assertSame(q, menu.row(GameMenu.Item.REPORT_SEND), menu.focusedRow());
+            shot("report-" + (q.contains("1024") ? "4x3" : "1x1"));
+        }
+    }
+
+    /** The menu's actions leave their breadcrumbs: no name, a setting once with its last value. */
+    @Test
+    public void menuActionsLeaveBreadcrumbs() {
+        Breadcrumbs.startRun(activity);
+        host.states = true;
+        menu.open("Select+Start");
+        menu.row(GameMenu.Item.STATE_SAVE).performClick();
+        menu.rowsForTest().get(0).performClick();   // slot 1: saves and closes
+        menu.open("Back");
+        menu.row(GameMenu.Item.FAST_FORWARD).performClick();
+        menu.close();
+        host.event = new int[] { 7, GameMenu.EV_LOADED, 2, GameMenu.STATE_OK };   // a quick load (the pad's chord)
+        menu.pollStateEvent();
+        List<String> names = crumbNames();
+        assertEquals(List.of("game_start", "menu_open", "savestate_save", "menu_close", "menu_open", "fast_forward",
+                             "menu_close", "savestate_load"), names);
+        List<Breadcrumbs.Crumb> all = Breadcrumbs.read(Breadcrumbs.file(activity), Breadcrumbs.KEEP);
+        assertEquals(List.of("via", "combo"), all.get(1).data);
+        assertEquals(List.of("slot", "1", "result", "ok", "via", "menu"), all.get(2).data);
+        assertEquals(List.of("slot", "2", "result", "ok", "via", "hotkey"), all.get(7).data);
+        Breadcrumbs.file(activity).delete();
     }
 
     // ---- Live picture, Restart to apply ----------------------------------------------------------------------------

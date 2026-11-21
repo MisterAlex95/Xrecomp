@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- « Signaler un problème » (XBA-339) : la page du menu en jeu et la feuille du lanceur (ProblemReport). -->
+<resources>
+    <string name="REPORT_PROBLEM">Signaler un problème</string>
+    <string name="REPORT_PROBLEM_DETAIL">Un écran noir, des images cassées, pas de son : dites-le en une ligne. Elle part chez les développeurs d’XRecomp avec le journal du dernier jeu et ses derniers événements, une fois que vous avez vu ce qui part et choisi Envoyer.</string>
+    <string name="REPORT_PROBLEM_HINT">Qu’est-ce qui ne va pas ? (une ligne)</string>
+    <string name="REPORT_PROBLEM_TEXT">Ce qui ne va pas</string>
+    <string name="REPORT_PROBLEM_TEXT_NONE">Obligatoire : touchez pour l’écrire</string>
+    <string name="REPORT_PROBLEM_SHOT">Ajouter une capture d’écran</string>
+    <string name="REPORT_PROBLEM_SHOT_SUB">L’image du jeu, montrée ci-dessous avant que rien ne parte</string>
+    <string name="REPORT_PROBLEM_SHOT_NONE">Aucune image du jeu à ajouter</string>
+    <string name="REPORT_PROBLEM_SHOT_TAKING">Capture de l’image…</string>
+    <string name="REPORT_PROBLEM_PREPARING">Récupération du journal…</string>
+    <string name="REPORT_PROBLEM_EXPLAIN">Part seulement si vous choisissez Envoyer : votre ligne, le journal du jeu et ses derniers événements (aucun nom, seulement ce qui a été fait), sans dossiers, adresses ni liens. Aucune donnée de jeu, aucun compte, aucune adresse e-mail.</string>
+    <string name="REPORT_PROBLEM_NO_TEXT">Écrivez d’abord ce qui ne va pas.</string>
+    <string name="REPORT_PROBLEM_RUNNING">Un jeu tourne : utilisez Signaler un problème dans son menu.</string>
+</resources>

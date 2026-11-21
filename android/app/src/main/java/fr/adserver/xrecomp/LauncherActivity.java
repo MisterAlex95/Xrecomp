@@ -3087,6 +3087,9 @@ public class LauncherActivity extends Activity {
             if (CrashReport.available(this))
                 listRow(list, getString(R.string.REPORT_LAST_GAME), getString(R.string.REPORT_LAST_GAME_DETAIL),
                         this::reportLastGame);
+            if (CrashReport.available(this))   // XBA-339
+                listRow(list, getString(R.string.REPORT_PROBLEM), getString(R.string.REPORT_PROBLEM_DETAIL),
+                        this::reportProblem);
             MenuRow about = listRow(list, getString(R.string.ABOUT), getString(R.string.ABOUT_TEXT),
                                     () -> go(Screen.ABOUT));
             about.setValue(version());
@@ -5725,6 +5728,65 @@ public class LauncherActivity extends Activity {
     }
 
     private CrashReport reportShown;
+
+    /**
+     * « Report a problem » (Settings › Advanced, XBA-339): one line, the last game's log and its breadcrumbs. No
+     * screenshot here: the launcher's process has no game frame (the in-game menu's page has the checkbox).
+     */
+    private void reportProblem() {
+        if (gameRunning()) {
+            setNote(getString(R.string.REPORT_PROBLEM_RUNNING), NOTE_INFO);
+            return;
+        }
+        new Thread(() -> {
+            File f = LogProvider.lastGameLogFile(this);
+            boolean ok = LogProvider.dumpLastGame(this, f);
+            CrashReport r = ProblemReport.build(this, ProblemReport.FROM_LAUNCHER, GameStore.sessionTid(this), null,
+                                                "", ok ? f : null, LogProvider.LAST_GAME_LOG, null);
+            runOnUiThread(() -> problemSheet(r));
+        }, "report-problem").start();
+    }
+
+    /** The sheet: what is sent, the line (required, the keyboard's dialog), Send, Cancel. Nothing leaves without Send. */
+    private void problemSheet(CrashReport r) {
+        Widgets.Sheet s = openSheet(R.string.REPORT_PROBLEM);
+        s.addText(getString(R.string.REPORT_PROBLEM_EXPLAIN), 4);
+        TextView sum = s.addText(r.summary(), 5);
+        sum.setTextColor(Theme.TEXT);
+        ((LinearLayout.LayoutParams)sum.getLayoutParams()).topMargin = Theme.S2;
+        MenuRow text = new MenuRow(this), send = new MenuRow(this);
+        text.set(getString(R.string.REPORT_PROBLEM_TEXT), null);
+        send.set(getString(R.string.REPORT_SEND), null);
+        Runnable refresh = () -> {
+            text.setSubtitle(r.feedback.isEmpty() ? getString(R.string.REPORT_PROBLEM_TEXT_NONE) : r.feedback);
+            sum.setText(r.summary());
+            send.setDim(r.feedback.isEmpty());
+            send.invalidate();
+        };
+        refresh.run();
+        Runnable ask = () -> ProblemReport.askText(this, r.feedback, t -> {
+            r.feedback = ProblemReport.clean(t);
+            refresh.run();
+            send.requestFocus();
+        });
+        text.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, text);
+        text.setOnClickListener(v -> ask.run());
+        s.addRow(text);
+        send.onPress = () -> feedback.play(UiFeedback.Cue.SELECT, send);
+        send.setOnClickListener(v -> {
+            if (r.feedback.isEmpty()) {
+                ask.run();
+                return;
+            }
+            closeSheet(false);
+            sendReport(r);
+        });
+        s.addRow(send);
+        sheetRow(getString(R.string.CANCEL), () -> restoreFocus(false));
+        sheetReady();
+        reportShown = r;
+        Log.i(TAG, "launcher: report a problem offered");
+    }
 
     CrashReport reportShownForTest() {
         return reportShown;

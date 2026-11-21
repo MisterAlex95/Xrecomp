@@ -121,6 +121,7 @@ public class ShellActivity extends SDLActivity {
         if (mBrokenLibraries)
             return;   // SDLActivity shows its error dialog and finishes
         playBegin();
+        startCrumbs(console, rom != null);
         SystemBars.hide(this);   // full screen: no status bar, no gesture pill (XBA-99)
         applyGameTheme();
         menu = new GameMenu(this, new MenuHost());
@@ -331,6 +332,7 @@ public class ShellActivity extends SDLActivity {
         RecompConfig game = GameSettings.load(this, tid);
         boolean lsfg = getResources().getBoolean(R.bool.xba_lsfg);
         GameSettings.Env env = GameSettings.runEnv(c, cfg, game, Locale.getDefault(), lsfg);
+        startEnv = env;
         for (String[] kv : env.vars) {
             try {
                 if (kv[1] != null)
@@ -343,6 +345,48 @@ public class ShellActivity extends SDLActivity {
         }
         Log.i(LauncherActivity.TAG, env.logLine((tid != null ? tid : "(no title)") + " (" + c.id + ")"));
         return c;
+    }
+
+    /** What applyGameSettings exported, for the run's first breadcrumb. */
+    private GameSettings.Env startEnv;
+    /** XBA-340: the controller count, a breadcrumb when it changes. */
+    private GameCrumbs.Pads pads;
+    private android.hardware.input.InputManager.InputDeviceListener padListener;
+    private boolean startedOnce;
+
+    /**
+     * XBA-340: the run's breadcrumbs start (console, renderer, internal resolution, controllers, how many mods), and
+     * the controllers are watched from here on.
+     */
+    private void startCrumbs(Console console, boolean romLaunch) {
+        String tid = romLaunch ? GameStore.launchedTitleId(this) : GameLanguage.runningTitleId(this);
+        File ext = GameStore.externalFilesDir(this);
+        int n = PadDevices.connected(this).size();
+        GameCrumbs.start(this, console, startEnv, n,
+                         ext == null ? 0 : GameCrumbs.enabledMods(new File(ext, "mods"), console, tid));
+        pads = new GameCrumbs.Pads(n);
+        android.hardware.input.InputManager im =
+                (android.hardware.input.InputManager)getSystemService(Context.INPUT_SERVICE);
+        if (im == null)
+            return;
+        padListener = new android.hardware.input.InputManager.InputDeviceListener() {
+            @Override public void onInputDeviceAdded(int id) { padsChanged(); }
+            @Override public void onInputDeviceRemoved(int id) { padsChanged(); }
+            @Override public void onInputDeviceChanged(int id) { padsChanged(); }
+        };
+        im.registerInputDeviceListener(padListener, new android.os.Handler(Looper.getMainLooper()));
+    }
+
+    private void padsChanged() {
+        if (pads != null)
+            pads.changed(this, PadDevices.connected(this).size());
+    }
+
+    /** XBA-340: memory pressure, as a breadcrumb (not the trip to the background, not a repeat). */
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        GameCrumbs.trim(this, level);
     }
 
     /** RECOMP_PS1_PAD=analog in recomp.cfg: the PS1 on-screen pad gets the DualShock's two sticks. */
@@ -421,6 +465,9 @@ public class ShellActivity extends SDLActivity {
     @Override
     protected void onStart() {
         super.onStart();
+        if (startedOnce)
+            GameCrumbs.pause(this, false);   // XBA-340: back on screen
+        startedOnce = true;
         if (companion != null)
             companion.start();
         if (touch != null)
@@ -450,6 +497,7 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     protected void onStop() {
+        GameCrumbs.pause(this, true);   // XBA-340: off screen (the launcher, another app, the screen off)
         fpsLog.removeCallbacks(fpsTick);
         playOnScreen(false);
         fpsLog.removeCallbacks(coverShot);
@@ -504,6 +552,13 @@ public class ShellActivity extends SDLActivity {
 
     @Override
     protected void onDestroy() {
+        if (padListener != null) {
+            android.hardware.input.InputManager im =
+                    (android.hardware.input.InputManager)getSystemService(Context.INPUT_SERVICE);
+            if (im != null)
+                im.unregisterInputDeviceListener(padListener);
+            padListener = null;
+        }
         if (menu != null)
             menu.release();
         super.onDestroy();
@@ -846,6 +901,7 @@ public class ShellActivity extends SDLActivity {
 
         @Override
         public void quit() {
+            GameCrumbs.end(ShellActivity.this, "quit");   // before the native quit ends the process
             overlayOff();
             playOnScreen(false);
             if (gameApp())   // a game's own app closes: Android's home screen, not its launcher
@@ -869,6 +925,34 @@ public class ShellActivity extends SDLActivity {
         @Override
         public void restartGame() {
             ShellActivity.this.restartGame(null);   // as the title's quick reboot: a new process, the same game
+        }
+
+        /** XBA-339: the frame the game shows, as the runtime's BMP in the cache (the caller deletes it), or null. */
+        @Override
+        public File captureFrame() {
+            File bmp = new File(getCacheDir(), "report-shot.bmp");
+            boolean ok;
+            try {
+                ok = CompanionNative.nativeScreenshot(bmp.getPath());
+            } catch (UnsatisfiedLinkError e) {
+                ok = false;
+            }
+            Log.i(LauncherActivity.TAG, "shell: report: frame " + (ok ? "taken" : "not available"));
+            if (!ok)
+                bmp.delete();
+            return ok ? bmp : null;
+        }
+
+        /** XBA-339: this process's logcat, as « Share log » writes it (LogProvider.gameLogFile). */
+        @Override
+        public File reportLog() {
+            File f = LogProvider.gameLogFile(ShellActivity.this);
+            return LogProvider.dumpOwnLogcat(f) ? f : null;
+        }
+
+        @Override
+        public void askReportText(String current, java.util.function.Consumer<String> done) {
+            ProblemReport.askText(ShellActivity.this, current, done);
         }
     }
 
@@ -1127,6 +1211,7 @@ public class ShellActivity extends SDLActivity {
      */
     @SuppressWarnings("unused")
     public void openGamePicker(String gameDir) {
+        GameCrumbs.end(this, "no_data");
         runOnUiThread(() -> {
             Intent i = new Intent(this, LauncherActivity.class)
                     .putExtra(LauncherActivity.EXTRA_NO_GAME_DATA, gameDir)
@@ -1143,6 +1228,7 @@ public class ShellActivity extends SDLActivity {
      */
     @SuppressWarnings("unused")
     public void openLauncherBadPack(String reason) {
+        GameCrumbs.end(this, "bad_pack");
         runOnUiThread(() -> {
             Intent i = new Intent(this, LauncherActivity.class)
                     .putExtra(LauncherActivity.EXTRA_BAD_PACK, reason == null ? "" : reason)
@@ -1165,6 +1251,7 @@ public class ShellActivity extends SDLActivity {
     public void titleExited(String why) {
         String w = why == null ? "" : why;
         Log.i(LauncherActivity.TAG, "shell: the game exited by itself (" + w + "), back to the launcher");
+        GameCrumbs.end(this, "title_exit");
         openLauncherAndFinish(titleExitedIntent(this, w));
     }
 
@@ -1178,6 +1265,7 @@ public class ShellActivity extends SDLActivity {
     public void prepareImage(String image) {
         String img = image == null ? "" : image;
         Log.i(LauncherActivity.TAG, "shell: the game launches " + img + ", not prepared yet, back to the launcher");
+        GameCrumbs.end(this, "image_launch");
         openLauncherAndFinish(prepareImageIntent(this, img));
     }
 
@@ -1227,6 +1315,7 @@ public class ShellActivity extends SDLActivity {
      */
     @SuppressWarnings("unused")
     public void restartGame(String unused) {
+        GameCrumbs.end(this, "restart");
         runOnUiThread(() -> {
             Log.i(LauncherActivity.TAG, "shell: quick reboot, asking the launcher to restart the game");
             startActivity(new Intent(this, LauncherActivity.class)
