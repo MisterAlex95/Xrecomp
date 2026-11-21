@@ -95,6 +95,7 @@ typedef struct xenos_gl_stats {
     uint64_t rect_lists_read_back;
     /* WP-17 (RECOMP_X360_TILER): attachment sets invalidated before being overwritten whole (magenta: cleared) */
     uint64_t tiler_invalidated;
+    uint64_t pending_clears;       /* WP-17: resolve clears left for the next pass that binds their surface */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

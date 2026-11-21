@@ -307,6 +307,14 @@ typedef struct surface {
     int samples;
     int ms_dirty;                          /* rb has what tex does not yet */
     int ms_reload;                         /* tex has what rb does not yet */
+    /* WP-17: a resolve's clear not done yet: done on the draw framebuffer at the start of the next pass that binds
+     * the surface (bind_targets), or through rfbo before anything else reads or writes the surface (pclear_flush);
+     * on rb when the surface has one, else on tex, as resolve_copy did it at once before */
+    int pclear;
+    int pc_x0, pc_y0, pc_x1, pc_y1;        /* guest pixels */
+    float pc_colour[4];                    /* a colour surface's clear value */
+    float pc_depth;                        /* a depth surface's */
+    int pc_stencil;
 } surface;
 
 /* what a resolve wrote to guest memory, kept as a host picture too (the front buffer at the internal resolution,
@@ -1860,6 +1868,8 @@ static int fmt_wide(uint32_t fmt)
 
 static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound);
 static void surface_reload(xenos_gl *g, surface *s);
+static void pclear_flush(xenos_gl *g, const surface *cs);
+static void pclear_bound(xenos_gl *g, int si, int slot);
 static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint rb);
 static void deferred_clears_flush(xenos_gl *g, int si, int use_ms);
 
@@ -1895,6 +1905,7 @@ static void surface_flush(xenos_gl *g, surface *s)
 {
     if (!s->rb || !s->ms_dirty)
         return;
+    pclear_flush(g, s); /* on rb: before rb is read */
     GLenum att = s->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
     int hw = s->w * g->scale, hh = s->h * g->scale;
     g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
@@ -1950,6 +1961,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             if (s->h >= need_h)
                 return i;
             /* taller: a new texture, the old rows copied to the top */
+            pclear_flush(g, s);
             surface_flush(g, s);
             GLenum tf, tt;
             surface n = *s;
@@ -2132,6 +2144,13 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
          * changed here or elsewhere (a surface deleted or grown, a state loaded) since it was last found complete */
         if (changed || !g->fbo_checked)
             g->fbo_checked = g->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (g->fbo_checked && g->tiler != TILER_OFF) { /* WP-17: pending clears first (they came before) */
+            for (int i = 0; i < 4; i++)
+                if (want[i] >= 0)
+                    pclear_bound(g, want[i], i);
+            if (ds >= 0)
+                pclear_bound(g, ds, -1);
+        }
         if (g->fbo_checked && g->ndclear) { /* the stale rows, on the attachment each surface is bound at */
             int k = g->scale;
             g->glEnable(GL_SCISSOR_TEST);
@@ -2146,6 +2165,11 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
                     continue;
                 }
                 g->glScissor(0, g->dclear[c].y0 * k, d->w * k, (g->dclear[c].y1 - g->dclear[c].y0) * k);
+                if (g->tiler != TILER_OFF && !g->dclear[c].y0 && g->dclear[c].y1 >= d->h) {
+                    /* WP-17: all of it: invalidated and cleared whole (a tiler loads nothing) */
+                    tiler_discard(g, d->kind == 2 ? 0 : 1u << slot, d->kind == 2);
+                    g->glDisable(GL_SCISSOR_TEST);
+                }
                 if (d->kind == 2) {
                     g->glDepthMask(1);
                     g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
@@ -2155,6 +2179,7 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
                     g->glColorMask(1, 1, 1, 1);
                     g->glClearBufferfv(0x1800 /* GL_COLOR */, slot, zero);
                 }
+                g->glEnable(GL_SCISSOR_TEST);
             }
             g->glDisable(GL_SCISSOR_TEST);
             g->ndclear = 0;
@@ -4178,6 +4203,8 @@ static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, i
     int dc = alias_class(g, d), sc = alias_class(g, s);
     if (dc < 0 || sc < 0 || fmt_wide(d->fmt & 255) != fmt_wide(s->fmt & 255) || !alias_program(g))
         return 0;
+    pclear_flush(g, s);
+    pclear_flush(g, d);
     static const GLenum b0 = GL_COLOR_ATTACHMENT0;
     int k = g->scale;
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
@@ -4209,6 +4236,8 @@ static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, i
 /* rows y0..y1 of depth surface d from depth surface s */
 static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy, int y0, int y1)
 {
+    pclear_flush(g, s);
+    pclear_flush(g, d);
     int k = g->scale, hw = d->w * k;
     g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
     g->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, s->tex, 0);
@@ -4226,6 +4255,7 @@ static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy,
  * multisampled buffer rb when that is what is drawn into from now on */
 static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint rb)
 {
+    pclear_flush(g, d); /* in their order */
     int k = g->scale;
     GLenum att = d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
@@ -4256,6 +4286,83 @@ static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
 }
 
+/* WP-17: a surface's pending clear done now, through rfbo (its buffer: rb when it has one, else tex) */
+static void pclear_flush(xenos_gl *g, const surface *cs)
+{
+    surface *s = &g->surf[cs - g->surf];
+    if (!s->pclear)
+        return;
+    s->pclear = 0;
+    int k = g->scale, depth = s->kind == 2;
+    GLenum att = depth ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    if (s->rb)
+        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, s->rb);
+    else
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, s->tex, 0);
+    g->glEnable(GL_SCISSOR_TEST);
+    g->glScissor(s->pc_x0 * k, s->pc_y0 * k, (s->pc_x1 - s->pc_x0) * k, (s->pc_y1 - s->pc_y0) * k);
+    if (depth) {
+        g->glDepthMask(1);
+        g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+        g->glClearBufferfi(GL_DEPTH_STENCIL, 0, s->pc_depth, s->pc_stencil);
+    } else {
+        static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+        g->glDrawBuffers(1, &b0);
+        g->glColorMask(1, 1, 1, 1);
+        g->glClearBufferfv(0x1800 /* GL_COLOR */, 0, s->pc_colour);
+    }
+    g->glDisable(GL_SCISSOR_TEST);
+    if (s->rb)
+        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, att, GL_RENDERBUFFER, 0);
+    else
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, att, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+}
+
+/* WP-17: a resolve's clear of rectangle (x0, y0)-(x1, y1) of surface si left pending (bookkeeping as if done). A
+ * pending one it does not hold is done first. */
+static void pclear_set(xenos_gl *g, int si, int x0, int y0, int x1, int y1, const float *colour, float depth,
+                       int stencil)
+{
+    surface *s = &g->surf[si];
+    if (s->pclear && !(x0 <= s->pc_x0 && y0 <= s->pc_y0 && x1 >= s->pc_x1 && y1 >= s->pc_y1))
+        pclear_flush(g, s);
+    s->pclear = 1;
+    s->pc_x0 = x0, s->pc_y0 = y0, s->pc_x1 = x1, s->pc_y1 = y1;
+    if (colour)
+        memcpy(s->pc_colour, colour, sizeof s->pc_colour);
+    s->pc_depth = depth, s->pc_stencil = stencil;
+    g->st.pending_clears++;
+}
+
+/* WP-17: in bind_targets, the pending clear of surface si where the draw framebuffer has it (colour draw buffer
+ * `slot`, or the depth / stencil attachment for -1): scissored, or the whole attachment invalidated and cleared */
+static void pclear_bound(xenos_gl *g, int si, int slot)
+{
+    surface *s = &g->surf[si];
+    if (!s->pclear)
+        return;
+    s->pclear = 0;
+    int k = g->scale;
+    if (!s->pc_x0 && !s->pc_y0 && s->pc_x1 >= s->w && s->pc_y1 >= s->h) {
+        tiler_discard(g, slot >= 0 ? 1u << slot : 0, slot < 0);
+        g->glDisable(GL_SCISSOR_TEST);
+    } else {
+        g->glEnable(GL_SCISSOR_TEST);
+        g->glScissor(s->pc_x0 * k, s->pc_y0 * k, (s->pc_x1 - s->pc_x0) * k, (s->pc_y1 - s->pc_y0) * k);
+    }
+    if (slot < 0) {
+        g->glDepthMask(1);
+        g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+        g->glClearBufferfi(GL_DEPTH_STENCIL, 0, s->pc_depth, s->pc_stencil);
+    } else {
+        g->glColorMask(1, 1, 1, 1);
+        g->glClearBufferfv(0x1800 /* GL_COLOR */, slot, s->pc_colour);
+    }
+    g->glDisable(GL_SCISSOR_TEST);
+}
+
 static void alias_clear(xenos_gl *g, const surface *d, int y0, int y1)
 {
     alias_clear_to(g, d, y0, y1, 0);
@@ -4283,6 +4390,7 @@ static void deferred_clears_flush(xenos_gl *g, int si, int use_ms)
  * had contents). */
 static void surface_reload(xenos_gl *g, surface *s)
 {
+    pclear_flush(g, s); /* rb takes tex: the clear first, on rb, as it came first */
     int hw = s->w * g->scale, hh = s->h * g->scale, depth = s->kind == 2;
     s->ms_reload = 0;
     s->ms_dirty = 0;
@@ -4541,6 +4649,7 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
         unsupported(g, "resolve of constant one"); /* the clears below still happen; 3 is no copy at all */
     int si = resolve_source(g, cp, src);
     surface *s = &g->surf[si];
+    pclear_flush(g, s); /* WP-17: an earlier resolve's clear, before the copy reads the picture */
     surface_flush(g, s); /* multisampled: the samples averaged into the picture the copy reads */
     x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
     x1 = x1 > s->w ? s->w : x1, y1 = y1 > s->h ? s->h : y1;
@@ -4662,8 +4771,9 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
 cleared:;
     int clear_c = (ctl >> 8) & 1, clear_d = (ctl >> 9) & 1;
     if (clear_c || clear_d) {
-        /* a surface the draw FBO has attached (complete, its buffer the one cleared here: the multisampled one when
-         * the surface has one) is cleared there, through its draw buffer: no pass through rfbo (WP-11) */
+        /* WP-17: left pending, done by the next pass that draws into the surface (pclear_set). RECOMP_X360_TILER=0:
+         * now, on the draw FBO when it has the surface attached (complete, its buffer the one cleared here: the
+         * multisampled one when the surface has one), through its draw buffer: no pass through rfbo (WP-11) */
         if (clear_c && src < 4) { /* the resolved render target (none when the source is depth) */
             float colour[4];
             clear_colour(s->fmt, cp->regs[0x231E], cp->regs[0x231F], colour);
@@ -4672,28 +4782,32 @@ cleared:;
                     surface_reload(g, s);
                 s->ms_dirty = 1;
             }
-            int slot = -1;
-            for (int i = 0; i < 4; i++)
-                slot = g->cur[i] == si ? i : slot;
-            if (slot < 0 || !g->fbo_checked || (s->rb && !g->cur_ms))
-                slot = -1;
-            if (slot >= 0) {
-                g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+            if (g->tiler != TILER_OFF) {
+                pclear_set(g, si, x0, y0, x1, y1, colour, 0.0f, 0);
             } else {
-                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-                if (s->rb)
-                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
-                else
-                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
-                static const GLenum b0 = GL_COLOR_ATTACHMENT0;
-                g->glDrawBuffers(1, &b0);
+                int slot = -1;
+                for (int i = 0; i < 4; i++)
+                    slot = g->cur[i] == si ? i : slot;
+                if (slot < 0 || !g->fbo_checked || (s->rb && !g->cur_ms))
+                    slot = -1;
+                if (slot >= 0) {
+                    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+                } else {
+                    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                    if (s->rb)
+                        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->rb);
+                    else
+                        g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->tex, 0);
+                    static const GLenum b0 = GL_COLOR_ATTACHMENT0;
+                    g->glDrawBuffers(1, &b0);
+                }
+                g->glEnable(GL_SCISSOR_TEST);
+                g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+                g->glColorMask(1, 1, 1, 1);
+                g->glClearBufferfv(0x1800 /* GL_COLOR */, slot >= 0 ? slot : 0, colour);
+                if (slot < 0)
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
             }
-            g->glEnable(GL_SCISSOR_TEST);
-            g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
-            g->glColorMask(1, 1, 1, 1);
-            g->glClearBufferfv(0x1800 /* GL_COLOR */, slot >= 0 ? slot : 0, colour);
-            if (slot < 0)
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
             s->written = ++g->write_clock;
             s->dirty_h = y1 > s->dirty_h ? y1 : s->dirty_h;
         }
@@ -4706,27 +4820,34 @@ cleared:;
                     surface_reload(g, ds);
                 ds->ms_dirty = 1;
             }
-            int attached = g->cur_ds == di && g->fbo_checked && (!ds->rb || g->cur_ms);
-            if (attached) {
-                g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+            float depth = (float)(dc >> 8) / 16777215.0f;
+            if (g->tiler != TILER_OFF) {
+                pclear_set(g, di, x0, y0, x1, y1, NULL, depth, (GLint)(dc & 0xFF));
             } else {
-                g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
-                if (ds->rb)
-                    g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ds->rb);
-                else
-                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex, 0);
-            }
-            g->glEnable(GL_SCISSOR_TEST);
-            g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
-            g->glDepthMask(1);
-            g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
-            if (attached) {
-                g->glClearBufferfi(GL_DEPTH_STENCIL, 0, (float)(dc >> 8) / 16777215.0f, (GLint)(dc & 0xFF));
-            } else {
-                g->glClearDepthf((float)(dc >> 8) / 16777215.0f);
-                g->glClearStencil((GLint)(dc & 0xFF));
-                g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-                g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+                int attached = g->cur_ds == di && g->fbo_checked && (!ds->rb || g->cur_ms);
+                if (attached) {
+                    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+                } else {
+                    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+                    if (ds->rb)
+                        g->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                                                     ds->rb);
+                    else
+                        g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds->tex,
+                                                  0);
+                }
+                g->glEnable(GL_SCISSOR_TEST);
+                g->glScissor(x0 * sc, y0 * sc, (x1 - x0) * sc, (y1 - y0) * sc);
+                g->glDepthMask(1);
+                g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+                if (attached) {
+                    g->glClearBufferfi(GL_DEPTH_STENCIL, 0, depth, (GLint)(dc & 0xFF));
+                } else {
+                    g->glClearDepthf(depth);
+                    g->glClearStencil((GLint)(dc & 0xFF));
+                    g->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+                    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+                }
             }
             g->surf[di].written = ++g->write_clock;
             g->surf[di].dirty_h = y1 > g->surf[di].dirty_h ? y1 : g->surf[di].dirty_h;
@@ -5350,6 +5471,7 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
     }
     if (!done && !src && g->cur[0] >= 0 && g->surf[g->cur[0]].tex) { /* render target 0 as it stands */
         surface *s = &g->surf[g->cur[0]];
+        pclear_flush(g, s);
         surface_flush(g, s);
         src = s->tex, src_fmt = s->ifmt;
         fw = fw < s->w ? fw : s->w, fh = fh < s->h ? fh : s->h;
