@@ -9,7 +9,9 @@
  * LIB.so: the title's code, x360_tools.recomp's C built with -DXE_RUNTIME -shared (xe_rc_resume, xe_rc_image_crc).
  * --disc: the title's disc (game:, d:, \Device\Cdrom0), a disc image or a directory; --data: a writable directory for
  * cache: / hdd:. --render: draw with the GLES 3.0 renderer, shaders from SHADER_CACHE (bringup's WORKDIR/shaders),
- * the first --frame-limit N (default 30) swaps written to --frames DIR as PPM, a WxH target (default 1280x720).
+ * the first --frame-limit N (default 30) swaps written to --frames DIR as PPM, a WxH target (default 1280x720); the
+ * log's "render: perf" line gives the GPU's time per swap of the run (x360_render_perf_format). On the Mac,
+ * X360_ANGLE_DIR=DIR takes ANGLE's libEGL / libGLESv2 from DIR (the Android emulator's lib64/gles_angle).
  * --audio FILE.wav: the audio the title submits (render driver frames, 6 channels, 48 kHz, float; XMA voices
  * silent). --save-state: write a save state when
  * the run stops (budget or end); --load-state: start from one. --pad-script FILE: timed controller states (see
@@ -229,7 +231,10 @@ int main(int argc, char **argv)
         }
         fprintf(log, "x360_run: state loaded from %s\n", load_state);
     }
+    x360_render_perf perf0, perf1;
+    x360_render_perf_get(x, &perf0);
     int st = x360_run(x, insns);
+    x360_render_perf_get(x, &perf1);
     if (save_state && (st == X360_BUDGET || st == X360_EXITED)) {
         size_t cap = x360_state_size(x);
         uint8_t *blob = malloc(cap);
@@ -255,6 +260,11 @@ int main(int argc, char **argv)
     if (stats)
         x360_gpu_opcode_histogram(x, log);
     x360_render_stats(x, log);
+    if (perf1.swaps > perf0.swaps) { /* the runtime's perf line's gpu field, per swap of this run */
+        char line[256];
+        x360_render_perf_format(&perf1, &perf0, perf1.swaps - perf0.swaps, "swap", line, sizeof line);
+        fprintf(log, "render: perf over %llu swaps: %s\n", (unsigned long long)(perf1.swaps - perf0.swaps), line);
+    }
     if (missedp) {
         FILE *f = fopen(missedp, "w");
         if (f) {

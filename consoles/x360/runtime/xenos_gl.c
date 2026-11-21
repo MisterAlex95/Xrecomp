@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "xenos_gl.h"
 
@@ -312,6 +313,7 @@ struct xenos_gl {
     EGLBoolean (*eglDestroyContext)(EGLDisplay, EGLContext);
     EGLBoolean (*eglTerminate)(EGLDisplay);
     void *egl_lib, *gles_lib;
+    int angle; /* loaded from X360_ANGLE_DIR: its default display, not the surfaceless one */
     EGLDisplay dpy;
     EGLContext ctx;
     int attached;             /* on the caller's current context (xenos_gl_attach): no EGL of our own */
@@ -422,6 +424,30 @@ static void *open_first(const char *const *names)
     return NULL;
 }
 
+/* X360_ANGLE_DIR: DIR/NAME.dylib (.so off Apple), loaded global so libEGL finds libGLESv2 */
+static void *open_in(const char *dir, const char *name)
+{
+#ifdef __APPLE__
+    static const char ext[] = ".dylib";
+#else
+    static const char ext[] = ".so";
+#endif
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s%s", dir, name, ext);
+    void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (!h)
+        fprintf(stderr, "xenos_gl: X360_ANGLE_DIR: %s\n", dlerror());
+    return h;
+}
+
+/* the perf counters' clock (xenos_gl_stats' *_ns): a vDSO call, a few per resolve */
+static uint64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
 static void fail(char *why, size_t n, const char *msg)
 {
     if (why && n)
@@ -433,8 +459,15 @@ static int load_gl(xenos_gl *g, char *why, size_t why_n)
 {
     static const char *const egl_names[] = {"libEGL.so.1", "libEGL.so", NULL};
     static const char *const gles_names[] = {"libGLESv2.so.2", "libGLESv3.so", "libGLESv2.so", NULL};
-    g->egl_lib = open_first(egl_names);
-    g->gles_lib = open_first(gles_names);
+    const char *angle = getenv("X360_ANGLE_DIR");
+    if (angle && *angle) { /* a directory holding ANGLE's libEGL / libGLESv2 (the Mac: the Android emulator's) */
+        g->gles_lib = open_in(angle, "libGLESv2");
+        g->egl_lib = open_in(angle, "libEGL");
+        g->angle = 1;
+    } else {
+        g->egl_lib = open_first(egl_names);
+        g->gles_lib = open_first(gles_names);
+    }
     if (!g->egl_lib || !g->gles_lib) {
         fail(why, why_n, "no libEGL / libGLESv2");
         return 0;
@@ -628,8 +661,12 @@ xenos_gl *xenos_gl_create_scaled(const char *cache_dir, int width, int height, i
         xenos_gl_destroy(g);
         return NULL;
     }
-    g->dpy = g->eglGetPlatformDisplayEXT ? g->eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL)
-                                         : NULL;
+    if (g->angle) { /* ANGLE: its default display, used without a window (no surfaceless platform there) */
+        EGLDisplay (*get_display)(void *) = (EGLDisplay (*)(void *))dlsym(g->egl_lib, "eglGetDisplay");
+        g->dpy = get_display ? get_display(NULL) : NULL;
+    } else
+        g->dpy = g->eglGetPlatformDisplayEXT ? g->eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL)
+                                             : NULL;
     EGLint maj, min;
     if (!g->dpy || !g->eglInitialize(g->dpy, &maj, &min)) {
         g->dpy = NULL;
@@ -3535,7 +3572,17 @@ static uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int 
     return out;
 }
 
+static void resolve_copy(xenos_gl *g, const xenos_cp *cp);
+
+/* a resolve, timed whole (resolve_ns); resolve_copy times its read back and its write */
 static void resolve(xenos_gl *g, const xenos_cp *cp)
+{
+    uint64_t t0 = mono_ns();
+    resolve_copy(g, cp);
+    g->st.resolve_ns += mono_ns() - t0;
+}
+
+static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
 {
     uint32_t c0 = cp->regs[0x4800], c1 = cp->regs[0x4801];
     float v[6];
@@ -3574,10 +3621,13 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
         static const float zero[4] = {0, 0, 0, 0};
         int bpp = encode_texel(fmt, zero, probe);
         unsigned bpp_log2 = bpp == 1 ? 0 : bpp == 2 ? 1 : bpp == 4 ? 2 : bpp == 8 ? 3 : 4;
+        uint64_t tr = mono_ns();
         float *px = bpp && endian < 4 && cp->write32 && cp->read32
                         ? read_pixels(g, s->tex, s->ifmt, x0, y0, x1 - x0, y1 - y0)
                         : NULL;
         if (px) {
+            uint64_t tw = mono_ns();
+            g->st.resolve_read_ns += tw - tr;
             float k = bias ? ldexpf(1.0f, bias) : 1.0f;
             for (int y = y0; y < y1; y++)
                 for (int x = x0; x < x1; x++) {
@@ -3589,6 +3639,8 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                     put_bytes(cp, base + off, b, n, endian);
                 }
             free(px);
+            g->st.resolve_write_ns += mono_ns() - tw;
+            g->st.resolved_pixels += (uint64_t)(x1 - x0) * (uint64_t)(y1 - y0);
             g->st.resolves++;
             g->epoch++;
             if (g->nresolved < 16)
@@ -3646,12 +3698,15 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
     } else if (cmd <= 1) { /* depth out: 24_8 (depth in the high 24 bits, stencil in the low 8), tiled 32-bit */
         uint32_t info = cp->regs[0x231B], fmt = (info >> 7) & 63, endian = info & 7;
         uint32_t pitch = cp->regs[0x231A] & 0x3FFF, base = cp->regs[0x2319] & 0x1FFFFFFFu;
+        uint64_t tr = mono_ns();
         uint32_t *dv = (fmt == 22 || fmt == 6 || fmt == 33) && endian < 4 && cp->write32 && cp->read32
                            ? read_depth(g, s, x0, y0, x1 - x0, y1 - y0)
                            : NULL;
         if (dv) {
             uint32_t pitch_aligned = (pitch + 31) & ~31u;
             uint8_t *sv = read_stencil(g, s, x0, y0, x1 - x0, y1 - y0);
+            uint64_t tw = mono_ns();
+            g->st.resolve_read_ns += tw - tr;
             if (!sv)
                 unsupported(g, "stencil of a depth resolve (written as 0)");
             for (int y = y0; y < y1; y++)
@@ -3663,6 +3718,8 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
                 }
             free(dv);
             free(sv);
+            g->st.resolve_write_ns += mono_ns() - tw;
+            g->st.resolved_pixels += (uint64_t)(x1 - x0) * (uint64_t)(y1 - y0);
             g->st.resolves++;
             g->st.depth_resolves++;
             g->epoch++;
@@ -3746,6 +3803,7 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
         float *buf = calloc((size_t)wid * rows, 16);
         if (!buf)
             return 0;
+        g->st.vertices_fetched += count;
         for (uint32_t v = 0; v < count; v++)
             if (!fetch_vertex(cp, c0 & ~3u, c1 & 3, at, v, &buf[4 * v])) {
                 free(buf);
@@ -3896,6 +3954,7 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
 
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
 {
+    g->st.draw_calls++;
     if (g->reset_pending)
         do_reset(g);
     if ((cp->regs[0x2208] & 7) == 6) { /* eDRAM mode "copy": a resolve */
@@ -3983,6 +4042,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     }
     /* vertices: every attribute converted to vec4, interleaved */
     uint32_t nv = max_index + 1, na = (uint32_t)p->nattr;
+    g->st.vertices_fetched += na ? nv : 0;
     float *vb = na ? malloc((size_t)nv * na * 16) : NULL;
     if (na && !vb) {
         free(idx);

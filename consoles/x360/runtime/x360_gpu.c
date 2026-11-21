@@ -12,8 +12,10 @@
  * (and the KTHREAD's) processor byte says it, since Direct3D's handler clears the bit of the CPU it runs on
  * (lbz 0x10C(r13)) from the word the ring then waits on. The vertical blank runs as CPU 2. VdSwap puts the front
  * buffer's fetch constant and the swap token in the ring; the front buffer of each swap is recorded (and traced). */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "x360_internal.h"
 #include "xenos_cp.h"
@@ -36,7 +38,15 @@ struct x360_gpu {
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
     xenos_gl *gl;         /* --render: the GLES renderer (host state: not in save states) */
+    uint64_t cp_ns;       /* wall time running the ring's packets (draws and resolves included): the perf line's gpu */
 };
+
+static uint64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
 
 static void gl_draw(void *ctx, const xenos_cp *cp, const xenos_draw *d)
 {
@@ -175,6 +185,36 @@ void x360_render_counts(x360_machine *x, uint64_t *drawn, uint64_t *frames, uint
     if (x->gpu && x->gpu->gl)
         xenos_gl_get_stats(x->gpu->gl, &s);
     *drawn = s.drawn, *frames = s.frames, *front_buffer_frames = s.front_buffer_frames;
+}
+
+void x360_render_perf_get(x360_machine *x, x360_render_perf *out)
+{
+    memset(out, 0, sizeof *out);
+    if (!x->gpu)
+        return;
+    out->gpu_ns = x->gpu->cp_ns;
+    out->swaps = x->gpu->cp.swaps;
+    if (!x->gpu->gl)
+        return;
+    xenos_gl_stats s;
+    xenos_gl_get_stats(x->gpu->gl, &s);
+    out->resolve_ns = s.resolve_ns, out->read_ns = s.resolve_read_ns, out->write_ns = s.resolve_write_ns;
+    out->draws = s.draw_calls, out->resolves = s.resolves, out->pixels = s.resolved_pixels;
+    out->vertices = s.vertices_fetched;
+}
+
+int x360_render_perf_format(const x360_render_perf *now, const x360_render_perf *since, uint64_t frames,
+                            const char *unit, char *out, size_t n)
+{
+#define D(f) (now->f >= since->f ? now->f - since->f : 0) /* a counter behind the snapshot: none in this window */
+    double k = frames ? 1.0 / (double)frames : 0.0, ms = k / 1e6;
+    return snprintf(out, n,
+                    "gpu %.1f (resolve %.1f: read %.1f write %.1f; %.0f draws, %.1f resolves, %.1f Mpx, "
+                    "%.1f k vertices) ms/%s",
+                    (double)D(gpu_ns) * ms, (double)D(resolve_ns) * ms, (double)D(read_ns) * ms,
+                    (double)D(write_ns) * ms, (double)D(draws) * k, (double)D(resolves) * k,
+                    (double)D(pixels) * k / 1e6, (double)D(vertices) * k / 1e3, unit);
+#undef D
 }
 
 uint64_t x360_render_programs(x360_machine *x)
@@ -323,7 +363,9 @@ void x360_gpu_poll(x360_machine *x)
         uint32_t w = x360_r32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR);
         if (w != g->last_wptr || g->cp.stalled) {
             g->last_wptr = w;
+            uint64_t t0 = mono_ns();
             xenos_cp_set_wptr(&g->cp, w);
+            g->cp_ns += mono_ns() - t0;
         }
     }
     if (g->irq_callback && now >= g->next_vblank) {

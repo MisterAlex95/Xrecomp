@@ -411,6 +411,23 @@ static void stage(const char *what)
     fflush(stdout);
 }
 
+/* The perf line's gpu field (host_perf_config.extra): the renderer's counters over the line's window, per guest frame.
+ * The command processor runs inside the emu stage: emu minus gpu is the guest CPU and the runtime. */
+typedef struct gpu_perf {
+    x360_machine *x;
+    x360_render_perf line, run; /* the totals when the line's window and the run started */
+} gpu_perf;
+
+static void gpu_perf_extra(void *ctx, const struct host_perf_figures *f, int run, char *out, size_t n)
+{
+    gpu_perf *gp = ctx;
+    x360_render_perf now;
+    x360_render_perf_get(gp->x, &now);
+    x360_render_perf_format(&now, run ? &gp->run : &gp->line, f->guest_frames, "frame", out, n);
+    if (!run)
+        gp->line = now;
+}
+
 int x360_runtime_run(const x360_runtime_opts *o)
 {
     if (!o || !o->xex || !o->pack_lib || !*o->pack_lib) {
@@ -562,6 +579,10 @@ int x360_runtime_run(const x360_runtime_opts *o)
         .rest = "other", .rest_kind = HOST_PERF_OTHER,
     };
     hp_cfg.frame_ns = FRAME_NS;
+    gpu_perf gp = {.x = x};
+    x360_render_perf_get(x, &gp.line);
+    gp.run = gp.line;
+    hp_cfg.extra = gpu_perf_extra, hp_cfg.extra_ctx = &gp;
     host_perf hp;
     host_perf_init(&hp, &hp_cfg, t0);
 

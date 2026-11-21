@@ -56,6 +56,8 @@ extern "C" {
  * and presenting the picture, anything else (sound). */
 enum { HOST_PERF_EMU = 0, HOST_PERF_RENDER = 1, HOST_PERF_OTHER = 2 };
 
+struct host_perf_figures;
+
 typedef struct host_perf_config {
     const char *console;                      /* the log lines' prefix: "gba" -> "gba: perf ..." */
     const char *unit;                         /* the guest frame rate's unit in the speed field: "fps", "VI/s" */
@@ -66,6 +68,10 @@ typedef struct host_perf_config {
     int kind[HOST_PERF_STAGES];               /* HOST_PERF_EMU / RENDER / OTHER */
     const char *rest;                         /* the time no stage covers (NULL: "other") */
     int rest_kind;
+    /* Optional: the runtime's own figures, appended to the logged lines as "; <text>" (not to the live figures).
+     * Called with the window's figures (run = 1: the run's line); writes nothing to leave the line as it is. */
+    void (*extra)(void *ctx, const struct host_perf_figures *f, int run, char *out, size_t n);
+    void *extra_ctx;
 } host_perf_config;
 
 /* Running totals since host_perf_init. */
