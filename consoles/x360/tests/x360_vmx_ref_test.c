@@ -1,5 +1,6 @@
 /* x360_vmx_ref: the VMX helpers as the packs build them (host-order lanes, GCC / clang vector ops: xenon_ops.h XV_LE /
- * XV_VEC) against the same helpers as plain C (x360_vmx_ref_scalar.c, -DXV_SCALAR): equal results and VSCR on
+ * XV_VEC; NEON / SSE2 / SSSE3 intrinsics: XV_NEON / XV_SSE2 / XV_SSSE3; build it with -mssse3 for the SSSE3 vperm)
+ * against the same helpers as plain C (x360_vmx_ref_scalar.c, -DXV_SCALAR): equal results and VSCR on
  * random vectors and on the edges (saturation bounds, the sticky SAT bit, shift counts 0 / 15 and above, permute
  * controls with bits 5-7 set). The interpreter runs the same helpers, so the interpreter-vs-lifted tests cannot see a
  * mistake in them: this test can. */
@@ -67,6 +68,22 @@ static const char *const bin_names[] = {
     XV_REF_BIN(XV_REF_NAME)};
 static const char *const sat_names[] = {XV_REF_SAT(XV_REF_NAME)};
 
+/* halfword lanes for a pack mode, mostly in its range (VSCR[SAT] stays as it was), now and then one at or past an
+ * edge of it */
+static xe_v128 pack_vec(int mode)
+{
+    static const int16_t lo[4] = {-32768, 0, 0, -128}, hi[4] = {32767, 255, 255, 127};
+    static const uint16_t out[] = {0x0100, 0x0101, 0x7FFF, 0x8000, 0xFFFF, 0xFF7F, 0xFF80, 0x0080, 0x00FF, 0x007F};
+    xe_v128 v;
+    for (int k = 0; k < 8; k++) {
+        int span = hi[mode] - lo[mode] + 1;
+        v.u16[k] = (uint16_t)(lo[mode] + (int)(rnd() % (uint32_t)span));
+    }
+    if (rnd() % 4 == 0)
+        v.u16[rnd() & 7] = out[rnd() % (sizeof out / sizeof out[0])];
+    return v;
+}
+
 int main(void)
 {
     const xv_ref_set *F = &xv_ref_fast, *R = &xv_ref_scalar;
@@ -91,6 +108,12 @@ int main(void)
             uint32_t vf = vin, vr = vin;
             xe_v128 f = F->pkh(a, b, m, &vf), r = R->pkh(a, b, m, &vr);
             cmpv("xv_pkh", n * 4 + m, a, b, c, f, r, vf, vr);
+        }
+        for (int m = 0; m < 4; m++, checks++) { /* lanes in the mode's range: the SAT bit only where one is not */
+            xe_v128 pa = pack_vec(m), pb = pack_vec(m);
+            uint32_t vf = vin, vr = vin;
+            xe_v128 f = F->pkh(pa, pb, m, &vf), r = R->pkh(pa, pb, m, &vr);
+            cmpv("xv_pkh in range", n * 4 + m, pa, pb, c, f, r, vf, vr);
         }
         cmpv("xv_perm", n, a, b, c, F->perm(a, b, c), R->perm(a, b, c), 0, 0);
         xe_v128 d = a; /* denormals, zeros and normals of both signs, NJ on and off */
