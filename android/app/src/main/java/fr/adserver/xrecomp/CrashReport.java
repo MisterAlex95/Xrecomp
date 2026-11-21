@@ -115,6 +115,18 @@ final class CrashReport {
     /** Shared storage, SD cards, USB drives: the folders go (spaces and all), the file name stays (up to a space). */
     private static final Pattern STORAGE = Pattern.compile(
             "(?:/storage|/sdcard|/mnt|/data/media|/data/user/\\d+|/data/data)(?:/[^/\\n\\t\"<>:]+(?=/))*/([^/\\s\"<>:]+)");
+    /**
+     * Desktop logs (XBA-342, the same patterns as the macOS launcher's CrashReport.swift): the Mac launcher's data
+     * folder keeps its names, like APP_DIR; a home folder (/Users/NAME, /home/NAME, C:\Users\NAME) keeps only the
+     * file name, and a bare home folder goes whole.
+     */
+    private static final Pattern MAC_APP_DIR = Pattern.compile(
+            "(?:/Users/[^/\\s\"<>:]+|~)/Library/Application Support/xboxrecomp/");
+    private static final Pattern HOME_DIR = Pattern.compile(
+            "(?:/Users|/home)/(?:[^/\\n\\t\"<>:]+(?=/)|[^/\\s\"<>:]+)(?:/[^/\\n\\t\"<>:]+(?=/))*(?:/([^/\\s\"<>:]+))?");
+    private static final Pattern WIN_HOME_DIR = Pattern.compile(
+            "[A-Za-z]:[\\\\/](?i:users)[\\\\/](?:[^\\\\/\\n\\t\"<>:]+(?=[\\\\/])|[^\\\\/\\s\"<>:]+)"
+            + "(?:[\\\\/][^\\\\/\\n\\t\"<>:]+(?=[\\\\/]))*(?:[\\\\/]([^\\\\/\\s\"<>:]+))?");
 
     /** Text safe to send: see the class comment. */
     static String scrub(String s) {
@@ -130,6 +142,18 @@ final class CrashReport {
         Matcher m = STORAGE.matcher(s);
         while (m.find())
             m.appendReplacement(out, Matcher.quoteReplacement("<path>/" + m.group(1)));
+        m.appendTail(out);
+        s = MAC_APP_DIR.matcher(out.toString()).replaceAll("<app:xboxrecomp>/");
+        s = homes(HOME_DIR, s);
+        return homes(WIN_HOME_DIR, s);
+    }
+
+    /** A home folder path → « <path>/file », or « <path> » when it names no file. */
+    private static String homes(Pattern p, String s) {
+        StringBuffer out = new StringBuffer();
+        Matcher m = p.matcher(s);
+        while (m.find())
+            m.appendReplacement(out, Matcher.quoteReplacement(m.group(1) == null ? "<path>" : "<path>/" + m.group(1)));
         m.appendTail(out);
         return out.toString();
     }

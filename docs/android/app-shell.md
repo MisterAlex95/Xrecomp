@@ -3156,7 +3156,9 @@ The log is `prepare.log` or the dump of « Share the last game's log », trimmed
 the cut said in the file).
 
 Everything is scrubbed first: shared storage, SD card and USB paths keep only the file name (`<path>/Halo.iso`), the
-app's own folders keep their names (`<app:fr.adserver.xrecomp.shell>/files/…`), URLs lose their host and login
+app's own folders keep their names (`<app:fr.adserver.xrecomp.shell>/files/…`), desktop home folders (`/Users/<name>/…`,
+`/home/<name>/…`, `C:\Users\<name>\…`, XBA-342, the macOS launcher's patterns) keep only the file name and the Mac
+launcher's data folder its names (`<app:xboxrecomp>/…`), URLs lose their host and login
 (`smb://<host>/…`), magnet links, IPv4 / IPv6 and e-mail addresses go. No game data is ever read into a report.
 
 Offline or refused (not 2xx): one retry, then the envelope waits in `files/reports/` (the newest 5) and leaves after
