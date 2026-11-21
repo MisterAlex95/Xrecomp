@@ -559,12 +559,21 @@ final class CrashReport {
         return m.group(2) == null ? lib : lib + " " + m.group(2);
     }
 
+    /** Every item's release (« xrecomp@<version> ») and environment (a debug or a release build). */
+    static String release(Context c) {
+        return "xrecomp@" + c.getString(R.string.xba_version);
+    }
+
+    static String environment(Context c) {
+        return (c.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 ? "debug"
+                                                                                                       : "release";
+    }
+
     private static CrashReport base(Context c, String kind) {
         CrashReport r = new CrashReport();
         r.kind = kind;
-        r.release = "xrecomp@" + c.getString(R.string.xba_version);
-        r.environment = (c.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-                        ? "debug" : "release";
+        r.release = release(c);
+        r.environment = environment(c);
         r.tags.put("kind", kind);
         r.tags.put("device", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL);
         r.tags.put("android", String.valueOf(android.os.Build.VERSION.SDK_INT));

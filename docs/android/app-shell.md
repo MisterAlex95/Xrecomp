@@ -3171,6 +3171,68 @@ Check on the device (Alex):
    second issue, « Game: native crash … », with `last-game.log` and the top frame.
 5. Airplane mode, send a report: « Could not send … ». Network back, send another: both arrive.
 
+## Automatic reports and release health (XBA-336)
+
+**Settings › Advanced › Privacy** (its value: On / Off; hidden without a DSN and in a game's own app, which has no
+INTERNET permission) opens a sheet: the « What is sent » text (`AUTO_REPORTS_WHAT`), **Send reports automatically**
+(off by default), and while it is on **Also on mobile data** (off: Wi-Fi and other unmetered networks only) and
+**Reset install id**.
+
+With it off, nothing leaves without a tap on Send, as in XBA-335. After a crash (native or Java), a « not responding »
+end or a failed Prepare, the « Good to know » bubble *Help fix crashes* offers it (**Send reports automatically** /
+**Not now**), once per app version, never while another sheet is open.
+
+With it on:
+
+| Item | When | What it holds |
+|---|---|---|
+| Crash report | a game run ended in a crash or « not responding » | the envelope « Send report » sends (`CrashReport.game`, same scrubbing): how it ended, the game's name and key, console, device model, Android and app version, the scrubbed `last-game.log`, the run's breadcrumbs |
+| Prepare failure report | the launcher shows a failed Prepare (the Preparing screen with **Send report**; once per title and failure, after the option was turned on) | the envelope of `CrashReport.prepare` with `prepare.log`, scrubbed |
+| Session (release health) | every game run, once it has ended | `sid` (random, per run), `did` (the random install id), `init` true, `started`, `timestamp`, `status` (`exited`, `crashed` or `abnormal`), `errors` (1 for a crash), `duration` (launch to the process's end), `attrs.release` (`xrecomp@<version>`) and `attrs.environment`. Nothing else: no title, no device, no user |
+
+Nothing identifies a device but the install id: a UUID made when the option is turned on, replaced by **Reset**,
+deleted when the option is turned off. No e-mail, account, Android ID or IP is ever sent (the server sees the
+connection's address, as for any request; the client does not put it in an item).
+
+`AutoReports.java`:
+- *A run's end.* The game runs in the package's main process; on each resume the launcher reads that process's newest
+  `ApplicationExitInfo` records. A run is one launch (`GameStore.lastPlayed`); its end is the newest exit record after
+  it (a quick reboot's first process is not a run of its own). No record yet: the run is not over, nothing is
+  written. Each end is counted once (`files/telemetry/counted` keeps the last exit's timestamp). Status: native crash
+  or Java exception → `crashed`; exit with status 0, stopped by the user, or ended by the launcher itself
+  (`endRunningGame` notes the pid and its launch, since starting another game replaces `lastPlayed`) → `exited`;
+  anything else (not responding, killed for memory, another signal, a failing exit) → `abnormal`.
+- *What waits.* A run waits in `files/telemetry/runs/` as sid, start, end and status only; its session envelope is
+  built when it leaves, with the install id of that moment. A crash's report is built when the end is seen (the log is
+  fresh then) into `files/telemetry/outbox/`. At most 10 of each, none older than 7 days. Turning the option on starts
+  counting from then (an earlier run or Prepare failure never leaves); turning it off deletes both folders and cancels
+  the job.
+- *Sending.* `ReportJobService` (`:launcher`, JobScheduler, no WorkManager): on an unmetered network, or any with
+  « Also on mobile data »; not persisted across a reboot (the launcher schedules it again on resume while something
+  waits). Every item goes through `CrashReport.sendAuto`, so through `Telemetry.allowed`; never through
+  `CrashReport.send`, whose `files/reports/` queue is for what the player sent. A network failure: the job's back-off
+  tries again; the gate closed: it waits for the next resume.
+- *Kill switch.* The server's 403 (or a « disabled » answer) stops automatic sending until the next app version,
+  its 429 backs off for Retry-After or an hour (`Telemetry.answered`). What waits stays until it is old.
+
+Check on the device (Alex):
+1. Fresh install: Settings › Advanced › Privacy says Off; the sheet shows « What is sent », the option Off, no mobile
+   data or Reset row.
+2. Crash a game (the option off), come back to the launcher: the « Good to know » bubble *Help fix crashes* shows;
+   nothing new on rustrak.adserver.fr. Crash again: no bubble (once per version).
+3. Settings › Advanced › Privacy › turn it on (Wi-Fi on): the mobile data and Reset rows appear. Crash a game, come
+   back to the launcher: within a minute an issue « Game: native crash … » appears without any tap, with
+   `last-game.log`.
+4. Play a game and quit it normally, then crash one: Rustrak › Releases › `xrecomp@<version>` shows the runs
+   (sessions) with one crashed, crash-free rate below 100 %.
+5. Wi-Fi off, mobile data on, crash a game: nothing leaves until Wi-Fi is back (or « Also on mobile data » is
+   turned on).
+6. Make a Prepare fail with the option on: a « PrepareFailed » issue appears by itself, once (leave and come back to
+   the failed screen: no second one).
+7. Turn the option off: the note says the install id and waiting reports are deleted; crash a game: nothing is sent.
+8. From the launcher, start a game, go back to the launcher (Home), pick another game and play: the first run
+   counts as `exited`, not `abnormal` (Rustrak's release health, abnormal count unchanged).
+
 ## Library check (XBA-130)
 
 « Check my library » (library › Options (Y), shown with the on-device toolchain) gives the state of the whole library
