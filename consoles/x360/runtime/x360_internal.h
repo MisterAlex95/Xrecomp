@@ -97,25 +97,28 @@ typedef struct x360_seh {
 } x360_seh;
 
 typedef struct x360_thread {
-    xe_cpu cpu;
+    /* what the scheduler's sweep reads of every thread, every turn, first: in the cache lines before cpu (2.6 KB) */
     int state;
+    int wait_kind, wait_all, wait_count;
+    int wait_timed;
+    int wait_alertable, alerted; /* XBA-296 */
+    int apc_stage;               /* XBA-296: 0: no APC running */
+    uint32_t apc_head;           /* XBA-296: queued KAPCs (guest list) */
+    uint64_t wait_deadline;      /* virtual time, 100 ns, when wait_timed */
+    uint32_t wait_obj[X360_MAX_WAIT];
+    xe_cpu cpu;
     int suspend;
     uint32_t id, handle;
     uint32_t kthread, pcr, tls_static, tls_slots;
     uint32_t stack_base, stack_limit;
-    int wait_kind, wait_all, wait_count;
-    uint32_t wait_obj[X360_MAX_WAIT];
-    uint64_t wait_deadline; /* virtual time, 100 ns, when wait_timed */
-    int wait_timed;
     uint32_t exit_code;
     int interrupt; /* runs a graphics interrupt callback (x360_gpu.c) */
     int interp;    /* XBA-283: its time slice ran out inside interpreted code (not state: re-entry is not a miss) */
     x360_seh seh;  /* XBA-282: the exception being dispatched, if any */
     /* XBA-296 (x360_kdpc.c; save states: section KOBJ) */
-    int wait_alertable, alerted;
     uint32_t irql;
-    uint32_t apc_head, apc_tail, apc_cur, apc_scratch; /* queued KAPCs (guest list), the one running, its arguments */
-    int apc_stage, apc_konly, apc_rewait;              /* 0: none running; the wait to go back to afterwards */
+    uint32_t apc_tail, apc_cur, apc_scratch; /* queued KAPCs' tail (apc_head above), the one running, its arguments */
+    int apc_konly, apc_rewait;               /* the wait to go back to after an APC (apc_stage above) */
     uint32_t apc_ret_pc, apc_ret_r3;
     uint64_t apc_ret_lr, apc_ret_r1;
     uint32_t queue;                     /* the KQUEUE this thread serves */
@@ -268,6 +271,7 @@ struct x360_machine {
      * and the scheduler's polls */
     struct {
         uint64_t dispatches, turns, guest_cpu_ns;
+        uint64_t idle; /* scheduler sweeps that found no thread ready (the clock then jumps to the next deadline) */
     } perf;
     x360_hle_fn hle[2][4096]; /* every export with an HLE, by library and ordinal (x360_kernel_init; not state) */
     x360_kobj kobj;

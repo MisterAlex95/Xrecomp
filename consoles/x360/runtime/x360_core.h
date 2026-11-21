@@ -114,6 +114,7 @@ typedef struct x360_render_perf {
                              * the scheduler's polls) */
     uint64_t dispatches;    /* lifted functions entered from the dispatcher */
     uint64_t turns;         /* scheduler turns (a thread run until its slice ends, it blocks or ends) */
+    uint64_t idle;          /* idle sweeps: no thread was ready (the scheduler jumps the clock to the next deadline) */
     uint64_t guest_swaps;   /* swaps the command processor ran (unlike swaps, not reset by a state load) */
     uint64_t long_swaps;    /* of them, those more than 20 ms of virtual time after the one before */
     uint64_t loads;         /* attachments loaded at the start of a render pass (a tiler's reads from memory) */

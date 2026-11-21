@@ -327,9 +327,13 @@ void x360_xma_poll(x360_machine *x)
     x360_xma *m = x->xma;
     if (!m || !m->array)
         return;
-    /* the APU registers: kicks enable contexts, clears reset them */
+    /* the APU registers: kicks enable contexts, clears reset them. Nearly every turn all 20 words are 0: their OR
+     * first, without a branch per word (WP-32's per-word test then runs only when one is set) */
+    uint32_t any = 0;
+    for (int r = 0; r < 10; r++)
+        any |= x360_r32(x, APU_MMIO + 4 * (0x650u + (uint32_t)r)) | x360_r32(x, APU_MMIO + 4 * (0x6A0u + (uint32_t)r));
     int changed = 0;
-    for (int r = 0; r < 10; r++) { /* little-endian, as the title's stwbrx wrote them */
+    for (int r = 0; any && r < 10; r++) { /* little-endian, as the title's stwbrx wrote them */
         uint32_t kick = __builtin_bswap32(x360_r32(x, APU_MMIO + 4 * (0x650u + (uint32_t)r)));
         uint32_t clear = __builtin_bswap32(x360_r32(x, APU_MMIO + 4 * (0x6A0u + (uint32_t)r)));
         if (!(kick | clear))

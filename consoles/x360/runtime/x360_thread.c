@@ -686,6 +686,7 @@ int x360_run(x360_machine *x, uint64_t insns)
             }
         }
         if (picked < 0) {
+            x->perf.idle++;
             /* WP-22 stage 2, unpaced: the GL thread's posted work first (a fence or interrupt a thread waits on),
              * then the jump; a paced frame (run_until) keeps its one frame of pipeline. Off the GPU thread: 0. */
             if (!x->run_until && x360_gpu_wait_posted(x))
