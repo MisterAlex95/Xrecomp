@@ -411,6 +411,8 @@ struct xenos_gl {
     GLuint dsprog;            /* depth resolves: the pass that packs depth and stencil (WP-38) */
     GLint dsprog_at;
     int dsprog_failed;
+    int ds_mode;              /* WP-38: 0 packed, not checked yet; 1 packed, checked (ds_selftest); -1 split read-backs */
+    int ds_bad;               /* what ds_selftest found (words that differ, -1 when a path is missing), -1 before */
     int rtex_w, rtex_h;
     GLenum rtex_fmt;
     void *scratch[6];         /* reused buffers (scratch_buf: SCRATCH_SLOTS): grown, never shrunk */
@@ -1084,6 +1086,13 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     if (!g->rects_gpu && rects_want_gpu)
         fprintf(g->log, "xenos_gl: rectangle lists read back (uniform block size %d, offset alignment %d)\n", ublock,
                 ualign);
+    /* WP-38: packed (default: depth and stencil packed on the GPU, one read-back, once ds_selftest agrees) | split
+     * (depth, then the stencil, read back apart: the path before) */
+    const char *ds_env = getenv("RECOMP_X360_DEPTH_RESOLVE");
+    g->ds_mode = ds_env && !strcmp(ds_env, "split") ? -1 : 0;
+    g->ds_bad = -1;
+    if (g->ds_mode < 0)
+        fprintf(stderr, "xenos: depth resolves read back split (RECOMP_X360_DEPTH_RESOLVE=split)\n");
     const char *tiler_env = getenv("RECOMP_X360_TILER"); /* on (default) | 0 | magenta (WP-17) */
     g->tiler = !tiler_env || !*tiler_env ? TILER_ON : !strcmp(tiler_env, "0") ? TILER_OFF
              : !strcmp(tiler_env, "magenta")                       ? TILER_MAGENTA
@@ -1410,6 +1419,7 @@ void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s)
     s->passes = pc.passes, s->hashed_bytes = hashed_bytes;
     s->loads = pc.loads, s->gpu_timer = g->gpu_timer;
     s->rect_selftest = g->rects_captured;
+    s->ds_selftest = g->ds_bad;
 }
 
 /* ---- shaders ---- */
@@ -5866,6 +5876,55 @@ static const uint32_t *read_depth_stencil(xenos_gl *g, const surface *s, int x0,
     return out;
 }
 
+/* WP-38: the packed path checked against the split one, once, before the first depth resolve uses it: a 16 x 16
+ * depth-stencil target (at the internal scale) cleared guest pixel by guest pixel to the 256 stencil values and as
+ * many depths, read both ways; any word that differs (a GPU whose blending is not exact in 8 bits) and depth resolves
+ * stay split. Logged ("depth resolves packed OK" / "BROKEN (n of 256 words differ)"). Returns the words that differ,
+ * -1 when a path is missing. */
+static int ds_selftest(xenos_gl *g)
+{
+    enum { N = 16 };
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
+    int sc = g->scale;
+    surface t;
+    memset(&t, 0, sizeof t);
+    t.w = N, t.h = N, t.depth = 1;
+    t.tex = new_texture(g, GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, N * sc, N * sc);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.tex, 0);
+    static const GLenum none = 0 /* GL_NONE */;
+    g->glDrawBuffers(1, &none);
+    g->glDepthMask(1);
+    g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+    g->glEnable(GL_SCISSOR_TEST);
+    for (int i = 0; i < N * N; i++) {
+        g->glScissor(i % N * sc, i / N * sc, sc, sc);
+        g->glClearBufferfi(GL_DEPTH_STENCIL, 0, (float)((uint32_t)i * 65793u & 0xFFFFFFu) / 16777215.0f, i ^ 0x5A);
+    }
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+    uint32_t packed[N * N];
+    const uint32_t *pv = read_depth_stencil(g, &t, 0, 0, N, N);
+    int bad = -1;
+    if (pv) {
+        memcpy(packed, pv, sizeof packed); /* read_depth reuses the buffer */
+        const uint32_t *dv = read_depth(g, &t, 0, 0, N, N);
+        const uint8_t *sv = dv ? read_stencil(g, &t, 0, 0, N, N) : NULL;
+        if (sv) {
+            bad = 0;
+            for (int i = 0; i < N * N; i++)
+                bad += packed[i] != (dv[i] | (uint32_t)sv[i] << 24);
+        }
+    }
+    g->glDeleteTextures(1, &t.tex);
+    if (bad)
+        fprintf(g->log, "xenos_gl: depth resolves packed BROKEN (%d of %d words differ): split read-backs\n", bad, N * N);
+    else
+        fprintf(g->log, "xenos_gl: depth resolves packed OK\n");
+    return bad;
+}
+
 static void resolve_copy(xenos_gl *g, const xenos_cp *cp);
 
 /* a resolve, timed whole (resolve_ns); resolve_copy times its read back and its write */
@@ -6024,16 +6083,18 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
         uint32_t pitch = cp->regs[0x231A] & 0x3FFF, base = cp->regs[0x2319] & 0x1FFFFFFFu;
         uint64_t tr = mono_ns();
         int ok = (fmt == 22 || fmt == 6 || fmt == 33) && endian < 4 && cp->write32 && cp->read32;
+        uint32_t pitch_aligned = (pitch + 31) & ~31u;
+        if (ok && g->npending) { /* before the read-backs: the lazy pictures written go through the same buffers */
+            uint32_t h = (cp->regs[0x231A] >> 16) & 0x3FFF;
+            h = h > (uint32_t)y1 ? h : (uint32_t)y1;
+            flush_range(g, cp, base, base + pitch_aligned * ((h + 31) & ~31u) * 4);
+        }
+        if (ok && !g->ds_mode)
+            g->ds_mode = (g->ds_bad = ds_selftest(g)) ? -1 : 1;
         /* WP-38: depth and stencil packed on the GPU, one read-back; else depth, then the stencil (read_stencil) */
-        const uint32_t *dsv = ok ? read_depth_stencil(g, s, x0, y0, x1 - x0, y1 - y0) : NULL;
+        const uint32_t *dsv = ok && g->ds_mode > 0 ? read_depth_stencil(g, s, x0, y0, x1 - x0, y1 - y0) : NULL;
         const uint32_t *dv = ok && !dsv ? read_depth(g, s, x0, y0, x1 - x0, y1 - y0) : NULL;
         if (dsv || dv) {
-            uint32_t pitch_aligned = (pitch + 31) & ~31u;
-            if (g->npending) {
-                uint32_t h = (cp->regs[0x231A] >> 16) & 0x3FFF;
-                h = h > (uint32_t)y1 ? h : (uint32_t)y1;
-                flush_range(g, cp, base, base + pitch_aligned * ((h + 31) & ~31u) * 4);
-            }
             const uint8_t *sv = dsv ? NULL : read_stencil(g, s, x0, y0, x1 - x0, y1 - y0);
             uint64_t tw = mono_ns();
             g->st.resolve_read_ns += tw - tr;

@@ -1623,6 +1623,10 @@ int main(int argc, char **argv)
                     CHECK(0, "depth + stencil resolve at (%d, %d): %08X, want %08X", x, y, got, exp);
             }
         CHECK(!bad, "depth + stencil resolve: %d words wrong", bad);
+        xenos_gl_stats ds;
+        xenos_gl_get_stats(g, &ds);
+        CHECK(getenv("RECOMP_X360_DEPTH_RESOLVE") || ds.ds_selftest == 0,
+              "depth resolves: the packed path and the split one disagree on %d of 256 words", ds.ds_selftest);
     }
 
     /* eDRAM aliasing: draw into one format, resolve the same tiles as another: the raw bits must come through */
