@@ -443,6 +443,7 @@ struct xenos_gl {
     int copy_hash_full;       /* WP-12: RECOMP_X360_COPY_HASH=full, every check of a copy's memory hashes all of it */
     int tiler;                /* WP-17: TILER_OFF (RECOMP_X360_TILER=0), TILER_ON (default), TILER_MAGENTA (=magenta) */
     int depth_untouched;      /* WP-17 / WP-28: unless RECOMP_X360_UNUSED_DEPTH=stamped, see bind_targets */
+    int rects_captured;       /* WP-29: vertices of 3 the start-up self-test's transform feedback captured (rects_selftest) */
     int vx, vy;               /* WP-28: the draw goes to an MSAA view's single-sampled stand-in (bind_targets): each guest
                                * pixel of the view is vx x vy pixels of the bound surface; 1 x 1 otherwise */
     int npending;             /* copies with pending set */
@@ -1044,6 +1045,9 @@ static void gpu_timer_frame(xenos_gl *g)
         g->glBeginQueryT(GL_TIME_ELAPSED_EXT, g->tq[(g->tq_head + g->tq_n) % GPU_TIMER_QUERIES]), g->tq_active = 1;
 }
 
+static void rects_selftest(xenos_gl *g);
+static void rect_line(xenos_gl *g, FILE *f);
+
 static int setup(xenos_gl *g, char *why, size_t why_n)
 {
     g->max_tex = 4096;
@@ -1130,6 +1134,7 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
         fail(why, why_n, "out of memory");
         return 0;
     }
+    rects_selftest(g);
     return 1;
 }
 
@@ -1376,6 +1381,8 @@ void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames)
 void xenos_gl_set_log(xenos_gl *g, void *file)
 {
     g->log = file ? file : stderr;
+    if (g->log != stderr && g->ready)
+        rect_line(g, g->log); /* (WP-29: setup's self-test, in this log too) */
 }
 
 const uint8_t *xenos_gl_frame(const xenos_gl *g, int *width, int *height)
@@ -1393,6 +1400,7 @@ void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s)
     s->missing_shaders = (uint32_t)g->nmissing;
     s->passes = pc.passes, s->hashed_bytes = hashed_bytes;
     s->loads = pc.loads, s->gpu_timer = g->gpu_timer;
+    s->rect_selftest = g->rects_captured;
 }
 
 /* ---- shaders ---- */
@@ -5725,6 +5733,103 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
 /* rp kind 3 (WP-10): the capture stays on the GPU and the second pass reads it as uniform blocks of RECT_CHUNK
  * rectangles; kind 2: it is read back and the triangles are made here. The capture's vertex attributes are turned
  * off before a kind 3 pass: it has none. */
+/* WP-29: rectangle lists (every Direct3D clear) go through a transform feedback capture of the vertex shader's
+ * outputs, as points (draw_rects). On the Mac harness (ANGLE over Apple's GL) the capture holds the first vertex and
+ * zeros, so every clear draws nothing. Checked once at start-up, the same way draw_rects captures (the shared vertex
+ * array, gl_Position and 15 vectors interleaved, points, rasterizer discard): three known vertices drawn,
+ * the capture read back and compared. Only logged ("rect lists OK" / "BROKEN (n of 3 vertices captured)"); never
+ * fails the renderer. The GL state it touches is put back (or the shadows told). */
+static void rect_line(xenos_gl *g, FILE *f)
+{
+    if (g->rects_captured == 3)
+        fprintf(f, "xenos_gl: rect lists OK\n");
+    else
+        fprintf(f, "xenos_gl: rect lists BROKEN (%d of 3 vertices captured)\n", g->rects_captured);
+}
+
+static void rects_selftest(xenos_gl *g)
+{
+    enum { V = RECT_VARYINGS, N = 3 };
+    static const char vs[] =
+        "#version 300 es\nin vec4 xe_v0;\nout vec4 xe_i0, xe_i1, xe_i2, xe_i3, xe_i4, xe_i5, xe_i6, xe_i7, xe_i8, xe_i9, "
+        "xe_i10, xe_i11, xe_i12, xe_i13, xe_i14;\nvoid main() {\n gl_Position = xe_v0;\n xe_i0 = xe_v0 + 1.0; "
+        "xe_i1 = xe_v0 + 2.0; xe_i2 = xe_v0 + 3.0; xe_i3 = xe_v0 + 4.0; xe_i4 = xe_v0 + 5.0; xe_i5 = xe_v0 + 6.0; "
+        "xe_i6 = xe_v0 + 7.0; xe_i7 = xe_v0 + 8.0; xe_i8 = xe_v0 + 9.0; xe_i9 = xe_v0 + 10.0; xe_i10 = xe_v0 + 11.0; "
+        "xe_i11 = xe_v0 + 12.0; xe_i12 = xe_v0 + 13.0; xe_i13 = xe_v0 + 14.0; xe_i14 = xe_v0 + 15.0;\n}\n";
+    static const char *const vary[V] = {"gl_Position", "xe_i0", "xe_i1", "xe_i2",  "xe_i3",  "xe_i4",  "xe_i5",  "xe_i6",
+                                        "xe_i7",       "xe_i8", "xe_i9", "xe_i10", "xe_i11", "xe_i12", "xe_i13", "xe_i14"};
+    static const float in[N][4] = {{0.25f, 0.5f, 0.75f, 1.0f}, {-0.5f, 0.125f, 0.5f, 1.0f}, {0.625f, -0.75f, 0.25f, 1.0f}};
+    g->rects_captured = 0;
+    GLuint v = compile(g, GL_VERTEX_SHADER, vs, "rect self-test");
+    GLuint f = compile(g, GL_FRAGMENT_SHADER, CAPTURE_FS, "rect self-test capture");
+    GLuint prog = v && f ? g->glCreateProgram() : 0;
+    GLint ok = 0;
+    if (prog) {
+        g->glAttachShader(prog, v);
+        g->glAttachShader(prog, f);
+        g->glTransformFeedbackVaryings(prog, V, vary, GL_INTERLEAVED_ATTRIBS);
+        g->glLinkProgram(prog);
+        g->glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    }
+    GLint loc = ok ? g->glGetAttribLocation(prog, "xe_v0") : -1;
+    if (ok && loc >= 0 && loc < 32) {
+        /* a complete framebuffer of its own, as draw_rects always has one (a draw without one does nothing, even
+         * with the rasterizer off: a surfaceless context's default framebuffer); the draw FBO is bound again by the
+         * next bind_targets */
+        GLuint fb = 0, tex = new_texture(g, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 1, 1), tb = 0;
+        /* and a capture buffer of its own: where the capture is broken, draw_rects's buffer holds what was in it
+         * before (a driver may hand back the same memory), and these vertices would be drawn as a guest clear */
+        g->glGenBuffers(1, &tb);
+        g->glGenFramebuffers(1, &fb);
+        g->glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        use_program(g, prog);
+        bind_vao(g, g->vao);
+        g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
+        g->glBufferData(GL_ARRAY_BUFFER, sizeof in, in, GL_STREAM_DRAW);
+        attribs_enable(g, 1u << loc);
+        g->glVertexAttribPointer((GLuint)loc, 4, GL_FLOAT, 0, 16, NULL);
+        g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tb);
+        g->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, (GLsizeiptr)N * V * 16, NULL, GL_STREAM_DRAW);
+        g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, tb);
+        g->glEnable(GL_RASTERIZER_DISCARD);
+        g->glBeginTransformFeedback(0 /* GL_POINTS */);
+        g->glDrawArrays(0, 0, N);
+        g->glEndTransformFeedback();
+        g->glDisable(GL_RASTERIZER_DISCARD);
+        const float *cap = g->glMapBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, 0, (GLsizeiptr)N * V * 16, GL_MAP_READ_BIT);
+        if (cap) {
+            for (int k = 0; k < N; k++) {
+                int same = 1;
+                for (int i = 0; i < V; i++)
+                    for (int c = 0; c < 4; c++)
+                        same &= cap[(k * V + i) * 4 + c] == in[k][c] + (float)i;
+                g->rects_captured += same;
+            }
+            g->glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
+        }
+        g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
+        g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        attribs_enable(g, 0);
+        g->glUseProgram(0);
+        g->cur_prog = 0;
+        g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
+        g->glDeleteFramebuffers(1, &fb);
+        g->glDeleteTextures(1, &tex);
+        g->glDeleteBuffers(1, &tb);
+        g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
+        static const float zero[N][4];
+        g->glBufferData(GL_ARRAY_BUFFER, sizeof zero, zero, GL_STREAM_DRAW); /* (nor these vertices in the draws') */
+    }
+    if (prog)
+        g->glDeleteProgram(prog);
+    if (v)
+        g->glDeleteShader(v);
+    if (f)
+        g->glDeleteShader(f);
+    rect_line(g, stderr);
+}
+
 static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const uint32_t *idx, uint32_t n)
 {
     enum { F = RECT_VARYINGS * 4 };

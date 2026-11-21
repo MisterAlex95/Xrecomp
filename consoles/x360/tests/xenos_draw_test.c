@@ -41,7 +41,8 @@
  * right tile resolved into the left one's picture), eagerly and with lazy resolves; WP-27's viewport z (scale -1,
  * offset 1, the test "greater"); WP-28's clear through a 4x view of 1x tiles.
  * At the end (renderers of their own): WP-2's lazy resolves; WP-10's rectangle lists, 20 in one list (two passes of
- * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes.
+ * the GPU path), drawn on the GPU and with RECOMP_X360_RECTS=cpu, the same bytes, and WP-29's start-up self-test
+ * of the capture agreeing with what the read-back path drew.
  * Each frame is read back at the swap. Exit 77 when EGL / GLES 3.0 cannot be had. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2254,8 +2255,29 @@ int main(int argc, char **argv)
     }
     window_offset_tiles(g, &cp, ps, nps, 0);
     viewport_z_reversed(g, &cp, ps, nps);
-    msaa_view_clear(g, &cp, ps, nps);
     xenos_gl_destroy(g);
+
+    /* WP-28's clear through an MSAA view, on a renderer of its own whose rectangle lists are read back
+     * (RECOMP_X360_RECTS=cpu): the GPU path loses a rectangle now and then under SwiftShader at scale 2 on a loaded
+     * machine (a plain 1x rectangle too: WP-29's capture read as a uniform block), which is not what this checks */
+    {
+        const char *env = getenv("RECOMP_X360_RECTS");
+        char saved[16] = "";
+        if (env)
+            snprintf(saved, sizeof saved, "%s", env);
+        setenv("RECOMP_X360_RECTS", "cpu", 1);
+        g = xenos_gl_create_scaled(cache, W, H, scale, why, sizeof why);
+        if (env)
+            setenv("RECOMP_X360_RECTS", saved, 1);
+        else
+            unsetenv("RECOMP_X360_RECTS");
+        CHECK(g != NULL, "MSAA view: no renderer: %s", why);
+        if (g) {
+            cp.render_ctx = g;
+            msaa_view_clear(g, &cp, ps, nps);
+            xenos_gl_destroy(g);
+        }
+    }
 
     /* WP-2, lazy resolves (RECOMP_X360_RESOLVE=lazy), on a renderer of their own: a resolve leaves memory as it was
      * and only draws into its host picture; the pixels reach memory when a texture reads that memory another way, 2
@@ -2406,7 +2428,7 @@ int main(int argc, char **argv)
     {
         enum { RV = 0xEE000, NR = 20 };
         uint8_t *rect_frame[2] = {NULL, NULL};
-        int cpu_ok = 1;
+        int cpu_ok = 1, g_selftest = -1;
         for (int mode = 1; mode >= 0; mode--) { /* 1: cpu, 0: gpu */
             const char *env = getenv("RECOMP_X360_RECTS");
             char saved[16] = "";
@@ -2448,6 +2470,8 @@ int main(int argc, char **argv)
             run(&cp);
             xenos_gl_stats rs;
             xenos_gl_get_stats(g, &rs);
+            CHECK(rs.rect_selftest >= 0 && rs.rect_selftest <= 3, "rectangle lists: self-test %d of 3",
+                  rs.rect_selftest);
             CHECK(rs.rect_draws == 1 && rs.rect_lists_read_back == (uint64_t)mode,
                   "rectangle lists (%s): %llu drawn, %llu read back", mode ? "cpu" : "gpu",
                   (unsigned long long)rs.rect_draws, (unsigned long long)rs.rect_lists_read_back);
@@ -2469,12 +2493,18 @@ int main(int argc, char **argv)
                 CHECK(!bad, "rectangle lists (%s): rectangle %d at %d,%d is %u,%u,%u, want %d,%d,%d",
                       mode ? "cpu" : "gpu", r, x, y, q[0], q[1], q[2], want[0], want[1], want[2]);
             }
+            if (mode)
+                g_selftest = rs.rect_selftest;
             int fw, fh;
             const uint8_t *f = xenos_gl_frame(g, &fw, &fh);
             if (f && (rect_frame[mode] = malloc((size_t)fw * fh * 4)))
                 memcpy(rect_frame[mode], f, (size_t)fw * fh * 4);
             xenos_gl_destroy(g);
         }
+        /* WP-29: the start-up self-test says what the read-back path showed */
+        if (g_selftest >= 0)
+            CHECK(cpu_ok == (g_selftest == 3), "rectangle lists: drawn %s, but the self-test captured %d of 3",
+                  cpu_ok ? "right" : "wrong", g_selftest);
         if (cpu_ok && rect_frame[0] && rect_frame[1])
             CHECK(!memcmp(rect_frame[0], rect_frame[1], (size_t)W * H * 4),
                   "rectangle lists: the GPU's picture differs from the read-back one");

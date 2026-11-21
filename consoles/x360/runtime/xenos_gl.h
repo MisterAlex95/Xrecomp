@@ -105,6 +105,8 @@ typedef struct xenos_gl_stats {
     uint64_t gpu_time_ns;          /* GPU time from swap to swap (GL_TIME_ELAPSED_EXT), of gpu_time_frames frames */
     uint64_t gpu_time_frames;
     uint64_t msaa_views;           /* WP-28: rectangle lists through an MSAA view drawn into its 1x stand-in surfaces */
+    int rect_selftest;             /* WP-29: of 3 vertices, those the start-up check of rectangle lists' transform
+                                    * feedback capture got back (3: "rect lists OK") */
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */
