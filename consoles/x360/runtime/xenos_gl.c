@@ -446,6 +446,13 @@ struct xenos_gl {
     } sampler[64];
     int nsampler;
     GLuint unit_sampler[32];  /* what each texture unit has bound (units used by bind_textures and the passes) */
+    /* WP-24: what apply_state last set, by group (the registers it was made from), valid while gs_valid: every other
+     * function that changes blend, masks, depth / stencil, culling, polygon offset or scissor clears it (GS_DIRTY);
+     * the program, vertex array and enabled attribute arrays as last set (use_program, bind_vao, attribs_enable) */
+    int gs_valid;
+    uint32_t gs_blend[11], gs_depth[3], gs_cull, gs_offset[6], gs_scissor[5];
+    GLuint cur_prog, cur_vao;
+    uint32_t attr_on;         /* attribute arrays enabled on vao (bit n: location n) */
     GLenum frame_fmt;         /* frame_tex's internal format */
     uint8_t *frame;
     char cache[512], frames[512];
@@ -497,6 +504,9 @@ struct xenos_gl {
 };
 
 static unsigned parse_outputs(const char *src);
+static void use_program(xenos_gl *g, GLuint prog);
+static void bind_vao(xenos_gl *g, GLuint vao);
+static void attribs_enable(xenos_gl *g, uint32_t mask);
 
 /* a draw or resolve that cannot be handled: counted, with its reason (a string literal) */
 static void unsupported(xenos_gl *g, const char *reason)
@@ -660,10 +670,14 @@ static void fail(char *why, size_t n, const char *msg)
  * only way to check one where the driver keeps the contents anyway (ANGLE on the Mac). */
 enum { TILER_OFF, TILER_ON, TILER_MAGENTA };
 
+/* WP-24: GL state apply_state shadows was changed by someone else (it sets all of it again at the next draw) */
+#define GS_DIRTY(g) ((g)->gs_valid = 0)
+
 /* the attachments of the bound draw framebuffer about to be overwritten whole: colour draw buffers in `colour` (bit n:
  * draw buffer n, which is GL_COLOR_ATTACHMENTn in every framebuffer here), the depth / stencil one with `ds` */
 static void tiler_discard(xenos_gl *g, unsigned colour, int ds)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     if (g->tiler == TILER_OFF || (!colour && !ds))
         return;
     if (g->tiler == TILER_MAGENTA) {
@@ -888,7 +902,7 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     g->glGenFramebuffers(1, &g->rfbo);
     g->glGenFramebuffers(1, &g->tfbo_draw);
     g->glGenVertexArrays(1, &g->vao);
-    g->glBindVertexArray(g->vao);
+    bind_vao(g, g->vao);
     g->glGenBuffers(1, &g->vbo);
     g->glGenBuffers(1, &g->ibo);
     g->glGenBuffers(2, g->ubo);
@@ -1106,6 +1120,7 @@ void xenos_gl_reset(xenos_gl *g)
 
 static void do_reset(xenos_gl *g)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     /* after a state load: the eDRAM is not in a state (as the GameCube's EFB): surfaces start clear, copies go */
     g->reset_pending = 0;
     for (int i = 0; i < MAX_SURFACES; i++)
@@ -1522,7 +1537,7 @@ static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
                     snprintf(un, sizeof un, "xe_tq%u", p->tq_fetch[i]);
                     p->tq_loc[i] = g->glGetUniformLocation(p->prog, un);
                 }
-                g->glUseProgram(p->prog);
+                use_program(g, p->prog);
                 for (int i = 0; i < p->nvb; i++) {
                     char un[16];
                     snprintf(un, sizeof un, "xe_vb%d", i);
@@ -1900,6 +1915,7 @@ static GLuint new_texture(xenos_gl *g, GLenum ifmt, GLenum tfmt, GLenum ttype, i
 /* clear a surface's texture (a new one: the eDRAM it stands for has no picture yet for us) */
 static void clear_texture(xenos_gl *g, const surface *s, GLuint tex)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, s->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0,
                               GL_TEXTURE_2D, tex, 0);
@@ -1964,6 +1980,7 @@ static void surface_ms_alloc(xenos_gl *g, surface *s)
  * resolves identical rectangles only) */
 static void surface_flush(xenos_gl *g, surface *s)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     if (!s->rb || !s->ms_dirty)
         return;
     pclear_flush(g, s); /* on rb: before rb is read */
@@ -2022,6 +2039,7 @@ static int get_surface(xenos_gl *g, uint32_t base, uint32_t pitch, uint32_t fmt,
             if (s->h >= need_h)
                 return i;
             /* taller: a new texture, the old rows copied to the top */
+            GS_DIRTY(g);
             pclear_flush(g, s);
             surface_flush(g, s);
             GLenum tf, tt;
@@ -2226,6 +2244,7 @@ static int bind_targets(xenos_gl *g, const xenos_cp *cp, unsigned outputs)
                 pclear_bound(g, dsa, -1);
         }
         if (g->fbo_checked && g->ndclear) { /* the stale rows, on the attachment each surface is bound at */
+            GS_DIRTY(g);
             int k = g->scale;
             g->glEnable(GL_SCISSOR_TEST);
             for (int c = 0; c < g->ndclear; c++) {
@@ -2429,7 +2448,80 @@ static int float32_target(const xenos_gl *g, int i)
     return 0;
 }
 
+static void apply_blend(xenos_gl *g, const xenos_cp *cp);
+static void apply_depth(xenos_gl *g, const xenos_cp *cp);
+static void apply_cull(xenos_gl *g, const xenos_cp *cp);
+static void apply_scissor(xenos_gl *g, const xenos_cp *cp);
+
+static void use_program(xenos_gl *g, GLuint prog)
+{
+    if (g->cur_prog != prog) {
+        g->glUseProgram(prog);
+        g->cur_prog = prog;
+    }
+}
+
+static void bind_vao(xenos_gl *g, GLuint vao)
+{
+    if (g->cur_vao != vao) {
+        g->glBindVertexArray(vao);
+        g->cur_vao = vao;
+    }
+}
+
+/* the vertex array's enabled attribute arrays made `mask` (bit n: location n) */
+static void attribs_enable(xenos_gl *g, uint32_t mask)
+{
+    for (uint32_t d = g->attr_on ^ mask; d; d &= d - 1) {
+        GLuint loc = (GLuint)__builtin_ctz(d);
+        if ((mask >> loc) & 1)
+            g->glEnableVertexAttribArray(loc);
+        else
+            g->glDisableVertexAttribArray(loc);
+    }
+    g->attr_on = mask;
+}
+
 static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
+{
+    /* WP-24: each group set only when its registers changed since apply_state last set it (and nothing else touched
+     * that state since: gs_valid) */
+    int valid = g->gs_valid;
+    g->gs_valid = 1;
+    uint32_t f32 = 0;
+    if (!g->float_blend)
+        for (int i = 0; i < 4; i++)
+            f32 |= (uint32_t)float32_target(g, i) << i;
+    uint32_t in_blend[11] = {cp->regs[0x2104], cp->regs[0x2105], cp->regs[0x2106], cp->regs[0x2107], cp->regs[0x2108],
+                             cp->regs[0x2201], cp->regs[0x2209], cp->regs[0x220A], cp->regs[0x220B], f32, 0};
+    uint32_t in_depth[3] = {cp->regs[0x2200], cp->regs[0x210C], cp->regs[0x210D]};
+    int polygonal = (prim_type >= 4 && prim_type <= 7) || (prim_type >= 13 && prim_type <= 15);
+    uint32_t in_offset[6] = {cp->regs[0x2205] & 0x3803u, cp->regs[0x2380], cp->regs[0x2381], cp->regs[0x2382],
+                             cp->regs[0x2383], (uint32_t)polygonal};
+    uint32_t in_scissor[5] = {cp->regs[0x2081], cp->regs[0x2082], (uint32_t)g->tw, (uint32_t)g->th, 0};
+    int do_blend = !valid || memcmp(in_blend, g->gs_blend, sizeof in_blend);
+    int do_depth = !valid || memcmp(in_depth, g->gs_depth, sizeof in_depth);
+    int do_cull = !valid || (cp->regs[0x2205] & 7) != g->gs_cull;
+    int do_offset = !valid || memcmp(in_offset, g->gs_offset, sizeof in_offset);
+    int do_scissor = !valid || memcmp(in_scissor, g->gs_scissor, sizeof in_scissor);
+    memcpy(g->gs_blend, in_blend, sizeof in_blend);
+    memcpy(g->gs_depth, in_depth, sizeof in_depth);
+    g->gs_cull = cp->regs[0x2205] & 7;
+    memcpy(g->gs_offset, in_offset, sizeof in_offset);
+    memcpy(g->gs_scissor, in_scissor, sizeof in_scissor);
+    if (do_blend)
+        apply_blend(g, cp);
+    if (do_depth)
+        apply_depth(g, cp);
+    if (do_cull)
+        apply_cull(g, cp);
+    if (do_offset)
+        apply_polygon_offset(g, cp, prim_type);
+    if (do_scissor)
+        apply_scissor(g, cp);
+}
+
+static void apply_blend(xenos_gl *g, const xenos_cp *cp)
 {
     /* blending, render target n from RB_BLENDCONTROLn (off when it is src * 1 + dst * 0 for colour and alpha), and
      * RB_COLOR_MASK's nibble n; without per-target state (GLES 3.0) target 0's for all */
@@ -2471,6 +2563,10 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
             g->glColorMask(m & 1, (m >> 1) & 1, (m >> 2) & 1, (m >> 3) & 1);
         }
     }
+}
+
+static void apply_depth(xenos_gl *g, const xenos_cp *cp)
+{
     /* depth and stencil */
     uint32_t dc = cp->regs[0x2200];
     if (dc & 2) {
@@ -2494,6 +2590,10 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
     } else {
         g->glDisable(GL_STENCIL_TEST);
     }
+}
+
+static void apply_cull(xenos_gl *g, const xenos_cp *cp)
+{
     /* culling: Xenos's winding is as seen on the render target (Xenia: 0 = front is CCW); the host target is the
      * picture upside down (guest y = 0 at GL's y = 0), which reverses the winding GL sees */
     uint32_t sc = cp->regs[0x2205];
@@ -2504,7 +2604,10 @@ static void apply_state(xenos_gl *g, const xenos_cp *cp, uint32_t prim_type)
         g->glDisable(GL_CULL_FACE);
     }
     g->glFrontFace((sc >> 2) & 1 ? GL_CCW : GL_CW);
-    apply_polygon_offset(g, cp, prim_type);
+}
+
+static void apply_scissor(xenos_gl *g, const xenos_cp *cp)
+{
     /* the window scissor (top-left / bottom-right, y downwards), when it is set and smaller than the target */
     uint32_t tl = cp->regs[0x2081], br = cp->regs[0x2082];
     int x0 = (int)(tl & 0x7FFF), y0 = (int)((tl >> 16) & 0x7FFF);
@@ -3231,6 +3334,7 @@ static int copy_fits(const rt_copy *rc, const uint32_t *fc)
  * resolution, compatible formats); `whole`: the region is all of dst (its old contents invalidated, WP-17) */
 static void blit_tex(xenos_gl *g, GLuint src, GLuint dst, int sx, int sy, int w, int h, int dx, int dy, int whole)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     int s = g->scale;
     g->glBindFramebuffer(GL_READ_FRAMEBUFFER, g->rfbo);
     g->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
@@ -3757,6 +3861,7 @@ static void pix_float(int lay, const uint8_t *p, float out[4])
  * until the next read; NULL when out of memory. */
 static const uint8_t *read_raw(xenos_gl *g, GLuint tex, GLenum ifmt, int x0, int y0, int w, int h)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     int s = g->scale;
     GLuint from = tex;
     int fx = x0, fy = y0;
@@ -4322,6 +4427,7 @@ static const char DEPTH_FS[] =
 
 static const uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     if (!g->dprog && !g->dprog_failed) {
         GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "depth resolve vs");
         GLuint f = compile(g, GL_FRAGMENT_SHADER, DEPTH_FS, "depth resolve fs");
@@ -4365,7 +4471,7 @@ static const uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0,
     g->glDisable(GL_CULL_FACE);
     g->glColorMask(1, 1, 1, 1);
     g->glViewport(0, 0, w, h);
-    g->glUseProgram(g->dprog);
+    use_program(g, g->dprog);
     g->glActiveTexture(GL_TEXTURE0);
     unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, s->tex);
@@ -4373,7 +4479,7 @@ static const uint32_t *read_depth(xenos_gl *g, const surface *s, int x0, int y0,
     g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     g->glUniform1i(g->glGetUniformLocation(g->dprog, "d"), 0);
     g->glUniform3i(g->dprog_at, x0, y0, g->scale);
-    g->glBindVertexArray(g->vao);
+    bind_vao(g, g->vao);
     g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
     size_t n = (size_t)w * h;
     uint32_t *out = scratch_buf(g, SCRATCH_PIXELS, n * 4);
@@ -4480,6 +4586,7 @@ static int alias_program(xenos_gl *g)
 /* rows y0..y1 of colour surface d from surface s, whose row y - dy they are */
 static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, int y0, int y1)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     int dc = alias_class(g, d), sc = alias_class(g, s);
     if (dc < 0 || sc < 0 || fmt_wide(d->fmt & 255) != fmt_wide(s->fmt & 255) || !alias_program(g))
         return 0;
@@ -4498,7 +4605,7 @@ static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, i
     g->glEnable(GL_SCISSOR_TEST);
     g->glScissor(0, y0 * k, d->w * k, (y1 - y0) * k);
     g->glViewport(0, 0, d->w * k, d->h * k);
-    g->glUseProgram(g->aprog);
+    use_program(g, g->aprog);
     g->glActiveTexture(GL_TEXTURE0);
     unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, s->tex);
@@ -4506,7 +4613,7 @@ static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, i
     g->glUniform3i(g->aprog_off, 0, -dy * k, 0);
     g->glUniform1i(g->aprog_sc, sc);
     g->glUniform1i(g->aprog_dc, dc);
-    g->glBindVertexArray(g->vao);
+    bind_vao(g, g->vao);
     g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
     g->glDisable(GL_SCISSOR_TEST);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
@@ -4517,6 +4624,7 @@ static int alias_copy(xenos_gl *g, const surface *d, const surface *s, int dy, i
 /* rows y0..y1 of depth surface d from depth surface s */
 static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy, int y0, int y1)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     pclear_flush(g, s);
     pclear_flush(g, d);
     int k = g->scale, hw = d->w * k;
@@ -4536,6 +4644,7 @@ static void alias_depth(xenos_gl *g, const surface *d, const surface *s, int dy,
  * multisampled buffer rb when that is what is drawn into from now on */
 static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint rb)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     pclear_flush(g, d); /* in their order */
     int k = g->scale;
     GLenum att = d->kind == 2 ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
@@ -4570,6 +4679,7 @@ static void alias_clear_to(xenos_gl *g, const surface *d, int y0, int y1, GLuint
 /* WP-17: a surface's pending clear done now, through rfbo (its buffer: rb when it has one, else tex) */
 static void pclear_flush(xenos_gl *g, const surface *cs)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     surface *s = &g->surf[cs - g->surf];
     if (!s->pclear)
         return;
@@ -4621,6 +4731,7 @@ static void pclear_set(xenos_gl *g, int si, int x0, int y0, int x1, int y1, cons
  * `slot`, or the depth / stencil attachment for -1): scissored, or the whole attachment invalidated and cleared */
 static void pclear_bound(xenos_gl *g, int si, int slot)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     surface *s = &g->surf[si];
     if (!s->pclear)
         return;
@@ -4671,6 +4782,7 @@ static void deferred_clears_flush(xenos_gl *g, int si, int use_ms)
  * had contents). */
 static void surface_reload(xenos_gl *g, surface *s)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     pclear_flush(g, s); /* rb takes tex: the clear first, on rb, as it came first */
     int hw = s->w * g->scale, hh = s->h * g->scale, depth = s->kind == 2;
     s->ms_reload = 0;
@@ -4712,7 +4824,7 @@ static void surface_reload(xenos_gl *g, surface *s)
     g->glActiveTexture(GL_TEXTURE0);
     unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, s->tex);
-    g->glBindVertexArray(g->vao);
+    bind_vao(g, g->vao);
     if (depth) {
         static const GLenum none = 0;
         g->glDrawBuffers(1, &none);
@@ -4722,7 +4834,7 @@ static void surface_reload(xenos_gl *g, surface *s)
         g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
         g->glClearStencil(0);
         g->glClear(GL_STENCIL_BUFFER_BIT);
-        g->glUseProgram(g->zprog);
+        use_program(g, g->zprog);
         g->glUniform1i(g->glGetUniformLocation(g->zprog, "d"), 0);
         if (s->written)
             g->st.edram_stale++;
@@ -4731,7 +4843,7 @@ static void surface_reload(xenos_gl *g, surface *s)
         g->glDrawBuffers(1, &b0);
         g->glDisable(GL_DEPTH_TEST);
         g->glColorMask(1, 1, 1, 1);
-        g->glUseProgram(g->aprog);
+        use_program(g, g->aprog);
         g->glUniform1i(g->glGetUniformLocation(g->aprog, "t"), 0);
         g->glUniform3i(g->aprog_off, 0, 0, 0);
         g->glUniform1i(g->aprog_sc, -1);
@@ -4825,6 +4937,7 @@ static const char STENCIL_FS[] =
 
 static const uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0, int w, int h)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     if (!g->sprog && !g->sprog_failed) {
         GLuint v = compile(g, GL_VERTEX_SHADER, DEPTH_VS, "stencil resolve vs");
         GLuint f = compile(g, GL_FRAGMENT_SHADER, STENCIL_FS, "stencil resolve fs");
@@ -4877,8 +4990,8 @@ static const uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0
     g->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0);
     g->glStencilOpSeparate(GL_FRONT_AND_BACK, 0x1E00, 0x1E00, 0x1E00); /* GL_KEEP */
     g->glViewport(0, 0, hw, hh);
-    g->glUseProgram(g->sprog);
-    g->glBindVertexArray(g->vao);
+    use_program(g, g->sprog);
+    bind_vao(g, g->vao);
     for (int bit = 0; bit < 8; bit++) {
         g->glClearColor(0, 0, 0, 0);
         g->glClear(GL_COLOR_BUFFER_BIT);
@@ -4912,6 +5025,7 @@ static void resolve(xenos_gl *g, const xenos_cp *cp)
 
 static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     uint32_t c0 = cp->regs[0x4800], c1 = cp->regs[0x4801];
     float v[6];
     for (int i = 0; i < 6; i++)
@@ -5273,10 +5387,9 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
 }
 
 /* rp kind 3 (WP-10): the capture stays on the GPU and the second pass reads it as uniform blocks of RECT_CHUNK
- * rectangles; kind 2: it is read back and the triangles are made here. p's vertex attributes (the capture's) are
- * turned off before a kind 3 pass: it has none. */
-static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *p, uint32_t na, const program *rp,
-                       const uint32_t *idx, uint32_t n)
+ * rectangles; kind 2: it is read back and the triangles are made here. The capture's vertex attributes are turned
+ * off before a kind 3 pass: it has none. */
+static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *rp, const uint32_t *idx, uint32_t n)
 {
     enum { F = RECT_VARYINGS * 4 };
     uint32_t nr = n / 3;
@@ -5305,10 +5418,8 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *p, uint32
          * off the feedback bindings so that it is never bound for feedback and as a uniform buffer at once */
         g->glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
         g->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
-        for (uint32_t a = 0; a < na; a++)
-            if (p->loc[a] >= 0)
-                g->glDisableVertexAttribArray((GLuint)p->loc[a]);
-        g->glUseProgram(rp->prog);
+        attribs_enable(g, 0); /* the pass reads none */
+        use_program(g, rp->prog);
         bind_textures(g, cp, rp);
         for (uint32_t k = 0; k < chunks; k++) {
             uint32_t m = nr - k * RECT_CHUNK < RECT_CHUNK ? nr - k * RECT_CHUNK : RECT_CHUNK;
@@ -5354,19 +5465,19 @@ static void draw_rects(xenos_gl *g, const xenos_cp *cp, const program *p, uint32
             o[5 * F + i] = a[i] + b[i] - c[i];
     }
     g->glUnmapBuffer(GL_TRANSFORM_FEEDBACK_BUFFER);
-    g->glUseProgram(rp->prog);
+    use_program(g, rp->prog);
     bind_textures(g, cp, rp);
     g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
     g->glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nr * 6 * F * 4, tri, GL_STREAM_DRAW);
-    for (int i = 0; i < RECT_VARYINGS; i++)
-        if (rp->loc[i] >= 0) {
-            g->glEnableVertexAttribArray((GLuint)rp->loc[i]);
-            g->glVertexAttribPointer((GLuint)rp->loc[i], 4, GL_FLOAT, 0, F * 4, (void *)(uintptr_t)(i * 16));
-        }
-    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, (GLsizei)(nr * 6));
+    uint32_t need = 0;
     for (int i = 0; i < RECT_VARYINGS; i++)
         if (rp->loc[i] >= 0)
-            g->glDisableVertexAttribArray((GLuint)rp->loc[i]);
+            need |= 1u << rp->loc[i];
+    attribs_enable(g, need);
+    for (int i = 0; i < RECT_VARYINGS; i++)
+        if (rp->loc[i] >= 0)
+            g->glVertexAttribPointer((GLuint)rp->loc[i], 4, GL_FLOAT, 0, F * 4, (void *)(uintptr_t)(i * 16));
+    g->glDrawArrays(4 /* GL_TRIANGLES */, 0, (GLsizei)(nr * 6));
     free(tri);
 }
 
@@ -5588,7 +5699,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         unsupported(g, "no complete framebuffer for the render targets");
         return;
     }
-    g->glUseProgram(p->prog);
+    use_program(g, p->prog);
     upload_constants(g, cp); /* the guest viewport is applied in the vertex shader (xe_k.vp) */
     apply_state(g, cp, d->prim_type);
     bind_textures(g, cp, p);
@@ -5597,7 +5708,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         unsupported(g, "vertex format of a computed-index fetch");
         return;
     }
-    g->glBindVertexArray(g->vao);
+    bind_vao(g, g->vao);
     g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
     if (!min_index) {
         g->glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nv * na * 16, vb, GL_STREAM_DRAW);
@@ -5606,17 +5717,20 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         if (na)
             g->glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)min_index * na * 16, (GLsizeiptr)nv * na * 16, vb);
     }
+    uint32_t need = 0;
     for (uint32_t a = 0; a < na; a++)
-        if (p->loc[a] >= 0) {
-            g->glEnableVertexAttribArray((GLuint)p->loc[a]);
+        if (p->loc[a] >= 0)
+            need |= 1u << p->loc[a];
+    attribs_enable(g, need); /* WP-24: left enabled between draws, only the difference changed */
+    for (uint32_t a = 0; a < na; a++)
+        if (p->loc[a] >= 0)
             g->glVertexAttribPointer((GLuint)p->loc[a], 4, GL_FLOAT, 0, (GLsizei)(na * 16),
                                      (void *)(uintptr_t)(a * 16));
-        }
     int exports = p->memexport || (rp && rp->memexport);
     if (exports)
         memexport_begin(g);
     if (d->prim_type == 8) {
-        draw_rects(g, cp, p, na, rp, idx, n);
+        draw_rects(g, cp, rp, idx, n);
     } else if (idx) {
         g->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g->ibo);
         g->glBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (GLsizeiptr)n, idx, GL_STREAM_DRAW);
@@ -5630,9 +5744,6 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     }
     if (exports)
         memexport_end(g, cp);
-    for (uint32_t a = 0; a < na; a++)
-        if (p->loc[a] >= 0)
-            g->glDisableVertexAttribArray((GLuint)p->loc[a]);
     g->st.drawn++;
     g->st.rect_draws += d->prim_type == 8;
     free(conv);
@@ -5661,6 +5772,7 @@ static void frame_texture(xenos_gl *g, int fw, int fh, GLenum ifmt)
  * texelFetch decodes, the gamma class encodes again, written as 8_8_8_8. 0 when that pass is not available. */
 static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     if (!alias_program(g))
         return 0;
     static const GLenum b0 = GL_COLOR_ATTACHMENT0;
@@ -5676,7 +5788,7 @@ static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
     g->glColorMask(1, 1, 1, 1);
     tiler_discard(g, 1, 0); /* the triangle covers all of frame_tex (frame_texture: fw x fh) */
     g->glViewport(0, 0, fw * k, fh * k);
-    g->glUseProgram(g->aprog);
+    use_program(g, g->aprog);
     g->glActiveTexture(GL_TEXTURE0);
     unit_plain(g, 0); /* WP-24 */
     g->glBindTexture(GL_TEXTURE_2D, src);
@@ -5684,7 +5796,7 @@ static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
     g->glUniform3i(g->aprog_off, 0, 0, 0);
     g->glUniform1i(g->aprog_sc, 1); /* gamma */
     g->glUniform1i(g->aprog_dc, 0); /* 8_8_8_8 */
-    g->glBindVertexArray(g->vao);
+    bind_vao(g, g->vao);
     g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
@@ -5697,6 +5809,7 @@ static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
  * swizzle: xenos_gl_frame_texture for a window) and, with readback on, in `frame` at the guest resolution. */
 void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     if (g->reset_pending)
         do_reset(g);
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
@@ -5858,6 +5971,7 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
 
 void xenos_gl_end_frame(xenos_gl *g)
 {
+    GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
     /* what a window's own drawing expects back (host_window_present_texture): framebuffer 0, no test, no blend */
     g->glBindFramebuffer(GL_FRAMEBUFFER, 0);
     g->glDisable(GL_SCISSOR_TEST);
@@ -5873,5 +5987,6 @@ void xenos_gl_end_frame(xenos_gl *g)
     g->glActiveTexture(GL_TEXTURE0);
     g->glBindVertexArray(0);
     g->glUseProgram(0);
+    g->cur_vao = g->cur_prog = ~0u; /* the owner's own drawing follows */
     g->ubo_rebind = 1; /* the owner's drawing may bind its own uniform buffers; the buffers' contents stay ours */
 }
