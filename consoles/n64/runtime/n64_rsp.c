@@ -108,6 +108,7 @@ struct n64_rsp {
     uint16_t rcp_rom[512];
     uint16_t rsq_rom[512];
     rsp_dec dec[1024]; /* one per IMEM word; host only, not in save states (it checks itself against IMEM) */
+    uint32_t idle_b, idle_n, idle_r[32]; /* rsp_idle's note: the branch, the instruction count, the registers */
 };
 
 /* ---- ROMs --------------------------------------------------------------------------------------------------------- */
@@ -1583,13 +1584,14 @@ enum {
     RK_LB, RK_LH, RK_LW, RK_LBU, RK_LHU, RK_SB, RK_SH, RK_SW, RK_LWC2, RK_SWC2,
     RK_LDV, RK_LQV, RK_SDV, RK_SQV, /* their common aligned case inline, the rest through vu_load / vu_store */
     RK_VU, /* COP2 computational: vu_fns[vop] */
+    RK_IDLE,  /* a backward branch closing a loop that only reads (rsp_idle); e = the branch's own RK_* */
+    RK_CDOWN, /* BGTZ / BNEZ rs to itself with ADDI rs, rs, -1 in its delay slot (a delay loop); e = RK_BGTZ / RK_BNE */
 };
 
-/* Decodes the IMEM word raw (as loaded, see rsp_dec) at offset ia into its slot. Same semantics as the hardware notes
- * in the run loop below; unknown opcodes are no-ops. */
-static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t raw)
+/* Decodes the IMEM word raw (as loaded, see rsp_dec) at offset ia into x. Same semantics as the hardware notes in the
+ * run loop below; unknown opcodes are no-ops. */
+static void rsp_decode_word(uint32_t ia, uint32_t raw, rsp_dec *out)
 {
-    rsp_dec *d = &s->dec[ia >> 2];
     uint32_t op = n64_be32((const uint8_t *)&raw);
     uint32_t imm = (uint32_t)(int32_t)(int16_t)op;
     rsp_dec x;
@@ -1669,9 +1671,9 @@ static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t 
             x.a = (uint8_t)((op >> 11) & 31);
             x.c = (uint8_t)((op >> 6) & 31);
             x.vop = (uint8_t)((op & 63) | (x.e < 2 ? 64 : 0));
-            x.imm = (uint32_t)(offsetof(n64_rsp, vr) + sizeof s->vr[0] * x.b) << 16 |
-                    (uint32_t)(offsetof(n64_rsp, vr) + sizeof s->vr[0] * x.a);
-            x.link = (uint16_t)(offsetof(n64_rsp, vr) + sizeof s->vr[0] * x.c);
+            x.imm = (uint32_t)(offsetof(n64_rsp, vr) + sizeof(int16_t[8]) * x.b) << 16 |
+                    (uint32_t)(offsetof(n64_rsp, vr) + sizeof(int16_t[8]) * x.a);
+            x.link = (uint16_t)(offsetof(n64_rsp, vr) + sizeof(int16_t[8]) * x.c);
         } else {
             k = RK_COP2M;
             x.imm = op;
@@ -1708,8 +1710,94 @@ static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t 
     default: break;
     }
     x.kind = (uint8_t)k;
-    *d = x;
+    *out = x;
+}
+
+/* An instruction an idle loop may hold (rsp_idle): it writes no memory, no vector state and no COP0 register, does
+ * not branch, and reads nothing that changes while the RSP runs alone: scalar ALU ops, DMEM loads, MFC0 of any
+ * register but SP_SEMAPHORE (whose read sets it). The RDP's registers are plain fields its front end changes only
+ * when n64_rdp_run runs, which an idle loop (no MTC0) never calls. */
+static int rsp_pure(const rsp_dec *x)
+{
+    switch (x->kind) {
+    case RK_NOP: case RK_SLL: case RK_SRL: case RK_SRA: case RK_SLLV: case RK_SRLV: case RK_SRAV: case RK_SRLV_RS:
+    case RK_ADD: case RK_SUB: case RK_AND: case RK_OR: case RK_XOR: case RK_NOR: case RK_SLT: case RK_SLTU:
+    case RK_ADDI: case RK_SLTI: case RK_SLTIU: case RK_ANDI: case RK_ORI: case RK_XORI:
+    case RK_LB: case RK_LH: case RK_LW: case RK_LBU: case RK_LHU:
+        return 1;
+    case RK_MFC0:
+        return x->c != 7;
+    default:
+        return 0;
+    }
+}
+
+/* The body of the loop the branch at b closes, from its target to its delay slot, holds only rsp_pure instructions
+ * (the branch itself aside), as IMEM holds them now. */
+static int rsp_idle_body(const n64_rsp *s, uint32_t b, uint32_t target)
+{
+    for (uint32_t a = target; a <= b + 4; a += 4) {
+        if (a == b)
+            continue;
+        uint32_t raw;
+        rsp_dec x;
+        memcpy(&raw, s->mem + 0x1000 + a, 4);
+        rsp_decode_word(a, raw, &x);
+        if (!rsp_pure(&x))
+            return 0;
+    }
+    return 1;
+}
+
+#define RSP_IDLE_MAX 16 /* instructions in an idle loop's body, the branch and its delay slot included */
+
+/* Decodes the IMEM word raw at offset ia into its slot. A conditional branch or J back to at most RSP_IDLE_MAX - 2
+ * words before it becomes RK_IDLE when its loop body is pure now (rsp_idle checks again before it skips anything), or
+ * RK_CDOWN for the delay loop "BGTZ / BNEZ rs, ." with "ADDI rs, rs, -1" in the delay slot (checked again when it
+ * runs). */
+static RSP_NOINLINE const rsp_dec *rsp_decode(n64_rsp *s, uint32_t ia, uint32_t raw)
+{
+    rsp_dec *d = &s->dec[ia >> 2];
+    rsp_decode_word(ia, raw, d);
+    switch (d->kind) {
+    case RK_BEQ: case RK_BNE: case RK_BLEZ: case RK_BGTZ: case RK_BLTZ: case RK_BGEZ: case RK_J:
+        if (d->imm <= ia && ia - d->imm <= 4 * (RSP_IDLE_MAX - 2) && ia < 0xFFC) {
+            uint32_t slot = n64_be32(s->mem + 0x1000 + ia + 4);
+            if (d->imm == ia && (d->kind == RK_BGTZ || (d->kind == RK_BNE && d->b == 0)) && d->a != 0 &&
+                (slot & ~(1u << 26)) == (0x20000000u | (uint32_t)d->a << 21 | (uint32_t)d->a << 16 | 0xFFFFu)) {
+                d->e = d->kind;
+                d->kind = RK_CDOWN;
+            } else if (rsp_idle_body(s, ia, d->imm)) {
+                d->e = d->kind;
+                d->kind = RK_IDLE;
+            }
+        }
+        break;
+    default:
+        break;
+    }
     return d;
+}
+
+/* An idle loop (RK_IDLE) was just taken at b: pc / npc are its delay slot / its target. The first time, the scalar
+ * registers are noted; the next time this branch is taken in the same n64_rsp_run with the same registers, the RSP
+ * is in a cycle: the body reads only what it cannot change itself (rsp_pure) and writes only registers, so every
+ * later iteration runs the same instructions with the same values. Whole iterations up to the cycle budget are then
+ * counted as run (n), the state being exactly what running them would leave; the interpreter runs the rest. */
+static RSP_NOINLINE uint32_t rsp_idle(n64_rsp *s, uint32_t b, uint32_t target, uint32_t n, uint32_t cycles)
+{
+    if (s->idle_b == b && memcmp(s->idle_r, s->r, sizeof s->r) == 0) {
+        s->idle_b = ~0u;
+        if (rsp_idle_body(s, b, target)) {
+            uint32_t p = n - s->idle_n;
+            n += (cycles - n) / p * p;
+        }
+        return n;
+    }
+    s->idle_b = b;
+    s->idle_n = n;
+    memcpy(s->idle_r, s->r, sizeof s->r);
+    return n;
 }
 
 uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
@@ -1724,6 +1812,7 @@ uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
     const uint8_t *imem = s->mem + 0x1000;
     const rsp_dec *dec = s->dec;
     int sstep = (s->status & ST_SSTEP) != 0;
+    s->idle_b = ~0u;
     while (n < cycles) {
         uint32_t raw;
         memcpy(&raw, imem + pc, 4);
@@ -1800,6 +1889,42 @@ uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
             r[31] = d->link;
             npc = imm;
             break;
+        case RK_IDLE:
+        {
+            int taken;
+            switch (d->e) {
+            case RK_BEQ: taken = r[rs] == r[rt]; break;
+            case RK_BNE: taken = r[rs] != r[rt]; break;
+            case RK_BLEZ: taken = (int32_t)r[rs] <= 0; break;
+            case RK_BGTZ: taken = (int32_t)r[rs] > 0; break;
+            case RK_BLTZ: taken = (int32_t)r[rs] < 0; break;
+            case RK_BGEZ: taken = (int32_t)r[rs] >= 0; break;
+            default: taken = 1; break; /* J */
+            }
+            if (taken) {
+                uint32_t b = (uint32_t)(d - dec) << 2;
+                npc = imm;
+                if (!sstep && pc == b + 4) /* not in another branch's delay slot */
+                    n = rsp_idle(s, b, imm, n, cycles);
+            }
+            break;
+        }
+        case RK_CDOWN: /* each turn: the branch, then rs - 1 in the delay slot; j turns at once while all are taken */
+        {
+            uint32_t v = r[rs];
+            if (d->e == RK_BGTZ ? (int32_t)v > 0 : v != 0) {
+                npc = imm;
+                uint32_t slot = n64_be32(imem + pc);
+                if (!sstep && pc == imm + 4 && (slot & ~(1u << 26)) == (0x20000000u | rs << 21 | rs << 16 | 0xFFFFu)) {
+                    uint32_t j = v - 1, m = (cycles - n) / 2;
+                    if (j > m)
+                        j = m;
+                    r[rs] = v - j;
+                    n += 2 * j;
+                }
+            }
+            break;
+        }
         case RK_BEQ: if (r[rs] == r[rt]) npc = imm; break;
         case RK_BNE: if (r[rs] != r[rt]) npc = imm; break;
         case RK_BLEZ: if ((int32_t)r[rs] <= 0) npc = imm; break;
