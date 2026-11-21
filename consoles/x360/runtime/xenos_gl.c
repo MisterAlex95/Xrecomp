@@ -5505,8 +5505,9 @@ static void sync_surface(xenos_gl *g, int si, const int *bound, int nbound)
 }
 
 /* The stencil of a depth resolve (XBA-296). GLES 3.0 cannot sample stencil, so it is read a bit at a time: for each of
- * the 8 bits a full-target pass with the stencil test on that bit marks the pixels that have it, read back at the host
- * texel of each guest pixel (the one read_depth takes). Returns w * h values, top row first, or NULL. */
+ * the 8 bits a full-target pass with the stencil test on that bit marks the pixels that have it in one colour channel
+ * (four bits a read-back, WP-36), read back at the host texel of each guest pixel (the one read_depth takes). Returns
+ * w * h values, top row first, or NULL. */
 static const char STENCIL_FS[] =
     "#version 300 es\nprecision mediump float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n";
 
