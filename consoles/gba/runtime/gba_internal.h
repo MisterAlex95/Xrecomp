@@ -380,7 +380,8 @@ static inline void gba_code_write(gba_machine *m, uint32_t idx, unsigned nhalf)
  * PC while *left > 1 and execution stays in sequence, as that loop would one call at a time: while the time is not up,
  * the CPU not halted, no IRQ due, and the next instruction in the cartridge or in [iw_lo, iw_hi). One step at least;
  * returns how many ran. *chained: the last one went on in sequence (*left counted down for it): the next instruction
- * is still handed over. */
+ * is still handed over. Cartridge code runs from the predecoded blocks (cut to *left, no chaining), and may stop
+ * earlier than the loop would (the block's end): the loop checks and hands the rest over again. */
 uint32_t gba_cpu_step_handed(gba_machine *m, uint32_t *left, bool *chained, uint32_t iw_lo, uint32_t iw_hi);
 /* Runs instructions until m->now >= m->next_event (or the CPU halts). */
 void gba_cpu_run(gba_machine *m);

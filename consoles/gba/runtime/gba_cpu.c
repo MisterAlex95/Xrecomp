@@ -1087,7 +1087,8 @@ void gba_cpu_step(gba_machine *m)
 
 static inline bool irq_due(const gba_machine *m);
 
-uint32_t gba_cpu_step_handed(gba_machine *m, uint32_t *left, bool *chained, uint32_t iw_lo, uint32_t iw_hi)
+/* gba_cpu_step_handed one step() at a time: the reference loop, and what the blocks cannot run. */
+static uint32_t handed_steps(gba_machine *m, uint32_t *left, bool *chained, uint32_t iw_lo, uint32_t iw_hi)
 {
     uint32_t n = 0;
     for (;;) {
@@ -1586,7 +1587,7 @@ static void decode_arm(blk_op *o, uint32_t op, uint32_t pc, bool *ends)
     }
 }
 
-static gba_block *blk_decode(gba_machine *m, gba_block *b, uint32_t pc, bool thumb, int region)
+static gba_block *blk_decode(gba_machine *m, gba_block *b, uint32_t pc, bool thumb, int region, uint32_t maxops)
 {
     struct gba_blocks *bs = m->blocks;
     if (bs->used + BLK_MAX_OPS > BLK_POOL)
@@ -1598,7 +1599,7 @@ static gba_block *blk_decode(gba_machine *m, gba_block *b, uint32_t pc, bool thu
         idx0 = GBA_CODE_IWRAM(pc);
     else if (region == RG_EWRAM)
         idx0 = GBA_CODE_EWRAM(pc);
-    for (uint32_t a = pc; n < BLK_MAX_OPS && ((a ^ pc) >> BLK_PAGE_SHIFT) == 0; a += w) {
+    for (uint32_t a = pc; n < maxops && ((a ^ pc) >> BLK_PAGE_SHIFT) == 0; a += w) {
         uint32_t op;
         switch (region) {
         case RG_CART: {
@@ -1660,7 +1661,7 @@ static bool blk_same(const gba_machine *m, const gba_block *b)
     return true;
 }
 
-static __attribute__((noinline)) gba_block *blk_get_slow(gba_machine *m, uint32_t pc, bool thumb)
+static __attribute__((noinline)) gba_block *blk_get_slow(gba_machine *m, uint32_t pc, bool thumb, uint32_t maxops)
 {
     struct gba_blocks *bs = m->blocks;
     if (!bs) {
@@ -1685,11 +1686,12 @@ static __attribute__((noinline)) gba_block *blk_get_slow(gba_machine *m, uint32_
     int region = blk_region(m, pc, thumb);
     if (region == RG_NONE)
         return NULL;
-    return blk_decode(m, b, pc, thumb, region);
+    return blk_decode(m, b, pc, thumb, region, maxops);
 }
 
-/* The block at pc (decoded now if needed), NULL when pc is not in a region blocks run from. */
-static inline __attribute__((always_inline)) const gba_block *blk_get(gba_machine *m, uint32_t pc, bool thumb)
+/* The block at pc (decoded now if needed, of maxops ops at most), NULL when pc is not in a region blocks run from. */
+static inline __attribute__((always_inline)) const gba_block *blk_get(gba_machine *m, uint32_t pc, bool thumb,
+                                                                    uint32_t maxops)
 {
     struct gba_blocks *bs = m->blocks;
     uint32_t key = pc | (thumb ? 1u : 0u);
@@ -1698,7 +1700,7 @@ static inline __attribute__((always_inline)) const gba_block *blk_get(gba_machin
         if (b->key == key && (b->page == BLK_NOPAGE || (bs->gen[b->page] == b->gen && b->vep == bs->epoch)))
             return b;
     }
-    return blk_get_slow(m, pc, thumb);
+    return blk_get_slow(m, pc, thumb, maxops);
 }
 
 /* ---- running ---- */
@@ -1885,7 +1887,7 @@ static inline bool ram_w_clean(const gba_machine *m, uint32_t a, unsigned nhalf,
         EXEC(m, op->raw, pc);                                                                                        \
         if (m->cpu.branched) {                                                                                       \
             m->now += rc_refill_cost(h, m->now, R[15], is_thumb(m));                                                 \
-            return;                                                                                                  \
+            return (uint32_t)(op - cur->ops) + 1;                                                                    \
         }                                                                                                            \
         R[15] += W;                                                                                                  \
         if (m->now != now)                                                                                           \
@@ -1893,7 +1895,7 @@ static inline bool ram_w_clean(const gba_machine *m, uint32_t a, unsigned nhalf,
         if (__builtin_expect((m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I)) | m->cpu.halted | m->cpu.stopped |        \
                                  (m->blk_attn != attn0) | (m->cpu.cpsr_ctl != ctl_),                                 \
                              0))                                                                                     \
-            return;                                                                                                  \
+            return (uint32_t)(op - cur->ops) + 1;                                                                    \
         now = m->now;                                                                                                \
         ne = cpu_limit(m);                                                                                           \
         FLAGS_IN();                                                                                                  \
@@ -1908,7 +1910,7 @@ static inline bool ram_w_clean(const gba_machine *m, uint32_t a, unsigned nhalf,
 #define BLK_PROLOGUE(TH)                                                                                             \
     gba_rc_head *const h = HEAD(m);                                                                                  \
     const gba_block *cur = b;                                                                                        \
-    const blk_op *op = b->ops, *end = b->ops + b->n;                                                                 \
+    const blk_op *op = b->ops, *end = b->ops + (lim && lim < b->n ? lim : b->n);                                     \
     uint32_t pc = b->key & ~1u;                                                                                      \
     const int region = b->region;                                                                                    \
     const uint32_t rg = (pc >> 24) & 15;                                                                             \
@@ -1931,13 +1933,14 @@ static inline bool ram_w_clean(const gba_machine *m, uint32_t a, unsigned nhalf,
     if (!latched)                                                                                                    \
         blk_latch(m, pc - W, THUMB, region);                                                                         \
     m->now = now;                                                                                                    \
-    FLAGS_OUT()
+    FLAGS_OUT();                                                                                                     \
+    return (uint32_t)(op - cur->ops)
 
 #define THUMB true
 #define W 2u
 #define PIPE 4u
 
-static void blk_run_thumb(gba_machine *m, const gba_block *b)
+static uint32_t blk_run_thumb(gba_machine *m, const gba_block *b, uint32_t lim)
 {
     static const void *const lab[TK_COUNT] = {
         [TK_GEN] = &&L_GEN, [TK_LSL_I] = &&L_LSL_I, [TK_LSR_I] = &&L_LSR_I, [TK_ASR_I] = &&L_ASR_I,
@@ -2320,14 +2323,14 @@ L_BL2:
 
 branch_taken: {
     now += refill_cost(m, now, R[15], is_thumb(m));
-    if (now < ne && is_thumb(m) == THUMB) {
+    if (now < ne && !lim && is_thumb(m) == THUMB) {
         uint32_t npc_ = R[15] - PIPE;
         if (npc_ == cur->key - THUMB && m->blk_attn == attn0) { /* a loop back to this block's start */
             op = cur->ops;
             pc = npc_;
             goto top;
         }
-        const gba_block *nb_ = blk_get(m, npc_, THUMB);
+        const gba_block *nb_ = blk_get(m, npc_, THUMB, BLK_MAX_OPS);
         if (nb_ && nb_->region == region && ((npc_ >> 24) & 15) == rg && m->blk_attn == attn0) {
             cur = nb_;
             op = nb_->ops;
@@ -2341,7 +2344,7 @@ branch_taken: {
     m->cpu.branched = true;
     m->now = now;
     FLAGS_OUT();
-    return;
+    return (uint32_t)(op - cur->ops) + 1;
 }
     BLK_OUT();
 }
@@ -2407,7 +2410,7 @@ branch_taken: {
     op2 = l_shift_imm(op->d, R[op->c], op->x, fC, &sc);                                                              \
     DP_BODY(OPC)
 
-static void blk_run_arm(gba_machine *m, const gba_block *b)
+static uint32_t blk_run_arm(gba_machine *m, const gba_block *b, uint32_t lim)
 {
 #define DPL(f, n) [AK_##f + n] = &&L_##f##n
     static const void *const lab[AK_COUNT] = {
@@ -2643,14 +2646,14 @@ L_BX:
 
 branch_taken: {
     now += refill_cost(m, now, R[15], is_thumb(m));
-    if (now < ne && is_thumb(m) == THUMB) {
+    if (now < ne && !lim && is_thumb(m) == THUMB) {
         uint32_t npc_ = R[15] - PIPE;
         if (npc_ == cur->key - THUMB && m->blk_attn == attn0) { /* a loop back to this block's start */
             op = cur->ops;
             pc = npc_;
             goto top;
         }
-        const gba_block *nb_ = blk_get(m, npc_, THUMB);
+        const gba_block *nb_ = blk_get(m, npc_, THUMB, BLK_MAX_OPS);
         if (nb_ && nb_->region == region && ((npc_ >> 24) & 15) == rg && m->blk_attn == attn0) {
             cur = nb_;
             op = nb_->ops;
@@ -2664,7 +2667,7 @@ branch_taken: {
     m->cpu.branched = true;
     m->now = now;
     FLAGS_OUT();
-    return;
+    return (uint32_t)(op - cur->ops) + 1;
 }
     BLK_OUT();
 }
@@ -2684,19 +2687,51 @@ static inline bool blk_step(gba_machine *m)
 {
     bool thumb = (m->cpu.cpsr_ctl & CPSR_T) != 0;
     uint32_t pc = R[15] - (thumb ? 4u : 8u);
-    const gba_block *b = blk_get(m, pc, thumb);
+    const gba_block *b = blk_get(m, pc, thumb, BLK_MAX_OPS);
     if (!b)
         return false;
     if (thumb)
-        blk_run_thumb(m, b);
+        blk_run_thumb(m, b, 0);
     else
-        blk_run_arm(m, b);
+        blk_run_arm(m, b, 0);
     return true;
 }
 
 static inline bool irq_due(const gba_machine *m)
 {
     return m->irq_line && !(m->cpu.cpsr_ctl & CPSR_I);
+}
+
+/* The instructions lifted code in the cartridge hands over run from the predecoded blocks (a step() each was most of
+ * the recompiler's time outside lifted code): the block at pc, cut to the instructions the loop may run in sequence
+ * (*left), without going on after a taken branch. Cartridge blocks need no check against memory (lifted code's RAM
+ * stores, m->rc_ran, concern RAM blocks only); IWRAM code is stepped (its blocks would be checked against IWRAM after
+ * every lifted call). It stops where the loop would
+ * have stopped stepping, or earlier (the block's end, a change the run loop checks): the loop checks then and hands
+ * the rest over again, as after its own stops. The clock runs to next_event as the loop's (not gba_run_cycles' cap). */
+uint32_t gba_cpu_step_handed(gba_machine *m, uint32_t *left, bool *chained, uint32_t iw_lo, uint32_t iw_hi)
+{
+    bool thumb = (m->cpu.cpsr_ctl & CPSR_T) != 0;
+    uint32_t w = thumb ? 2u : 4u, pc = R[15] - 2 * w, lim = *left ? *left : 1;
+    if (m->interp_ref || pc - 0x08000000u >= 0x06000000u)
+        return handed_steps(m, left, chained, iw_lo, iw_hi);
+    const gba_block *b = blk_get(m, pc, thumb, lim < BLK_MAX_OPS ? lim : BLK_MAX_OPS);
+    if (!b)
+        return handed_steps(m, left, chained, iw_lo, iw_hi);
+    uint64_t cap = m->cpu_cap;
+    m->cpu_cap = UINT64_MAX;
+    uint32_t n = thumb ? blk_run_thumb(m, b, lim) : blk_run_arm(m, b, lim);
+    m->cpu_cap = cap;
+    if (!n)
+        return handed_steps(m, left, chained, iw_lo, iw_hi);
+    bool nt = (m->cpu.cpsr_ctl & CPSR_T) != 0;
+    if (n >= *left || nt != thumb || R[15] - (nt ? 4u : 8u) != pc + n * w) {
+        *chained = false;
+        return n;
+    }
+    *left -= n;
+    *chained = true;
+    return n;
 }
 
 /* gba_cpu_step_outside_rom goes on in front of pc (was: the pc of the instruction before): outside the cartridge,
