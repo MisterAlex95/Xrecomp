@@ -269,6 +269,8 @@ typedef struct texture {
     int copy;         /* 1 + the resolve copy it was made from (its host picture, at the internal resolution) */
     int swap_rb;      /* that copy's: red and blue are the other way round from the memory the fetch constant reads */
     int levels;       /* mip levels uploaded */
+    uint32_t gen;     /* the copy's generation it was taken from (rt_copy.gen) */
+    uint32_t lo, hi;  /* decoded from memory: the physical bytes its levels lie in (lazy resolves flush over them) */
 } texture;
 
 /* ---- the eDRAM model ----
@@ -314,6 +316,13 @@ typedef struct rt_copy {
     int swap_rb;           /* the resolve exchanged red and blue in memory; the picture has them as the surface did */
     uint32_t fmt, endian;  /* the destination's texture format and endian mode: how memory was written */
     unsigned used;
+    uint32_t gen;          /* moves at each resolve into it (unique across copies): a texture taken from the picture
+                            * is up to date while its gen is this one */
+    /* WP-2, lazy resolves: the picture holds pixels guest memory does not have yet (hash is of the memory as it is,
+     * untouched), in the guest rectangle (px0, py0)-(px1, py1); frame is the swap count of the last resolve */
+    int pending;
+    int px0, py0, px1, py1;
+    unsigned frame;
 } rt_copy;
 
 struct xenos_gl {
@@ -367,6 +376,11 @@ struct xenos_gl {
     int tw, th;               /* the guest size of the bound colour target 0 (the viewport's frame of reference) */
     rt_copy copies[MAX_COPIES];
     unsigned copy_clock;
+    uint32_t copy_gen;        /* the last rt_copy.gen given */
+    int lazy;                 /* WP-2: RECOMP_X360_RESOLVE=lazy, resolves write guest memory only when needed */
+    int npending;             /* copies with pending set */
+    int in_resolve;           /* resolve() is timing itself (resolve_ns) */
+    unsigned swaps;           /* xenos_gl_swap calls (the age of a pending copy) */
     GLuint frame_tex;         /* the last swap's picture: a texture of frame_w x frame_h host pixels, top row first */
     int frame_w, frame_h;
     GLenum frame_fmt;         /* frame_tex's internal format */
@@ -630,6 +644,9 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     draw_buffers_caps(g);
     const char *msaa_env = getenv("RECOMP_X360_MSAA");
     g->msaa_on = !(msaa_env && !strcmp(msaa_env, "0"));
+    const char *resolve_env = getenv("RECOMP_X360_RESOLVE"); /* eager (default) | lazy (WP-2) */
+    g->lazy = resolve_env && !strcmp(resolve_env, "lazy");
+    fprintf(stderr, "xenos: resolves %s\n", g->lazy ? "lazy (RECOMP_X360_RESOLVE=lazy)" : "eager");
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -854,13 +871,15 @@ static void do_reset(xenos_gl *g)
                 g->glDeleteRenderbuffers(1, &g->surf[i].rb);
             memset(&g->surf[i], 0, sizeof g->surf[i]);
         }
+    /* pending resolves go unwritten: the memory is the state's now */
     for (int i = 0; i < MAX_COPIES; i++)
         if (g->copies[i].tex) {
             g->glDeleteTextures(1, &g->copies[i].tex);
             memset(&g->copies[i], 0, sizeof g->copies[i]);
         }
+    g->npending = 0;
     for (int i = 0; i < MAX_TEXTURES; i++)
-        g->textures[i].copy = 0, g->textures[i].hash = 0, g->textures[i].checked = 0;
+        g->textures[i].copy = 0, g->textures[i].hash = 0, g->textures[i].checked = 0, g->textures[i].gen = 0;
     for (int i = 0; i < 4; i++)
         g->cur[i] = -1;
     g->cur_ds = -1;
@@ -2428,6 +2447,7 @@ typedef struct decoded {
     void *level[14];            /* each level's slices of RGBA, top row first */
     uint32_t lw[14], lh[14], ld[14];
     uint64_t hash;              /* of the source bytes and the swizzle */
+    uint32_t lo, hi;            /* the physical bytes the levels' storage covers */
 } decoded;
 
 static void free_decoded(decoded *d)
@@ -2512,11 +2532,12 @@ static tex_storage storage_of(const texfmt *tf, uint32_t dim, uint32_t w, uint32
 /* decode the texture a 6-dword fetch constant describes (the layout of Xenia's texture_util.cc
  * GetGuestTextureLayout: rows of the pitch aligned to 32 blocks, linear ones too, as Direct3D's pitches already
  * are; slices of the height aligned to 32 blocks; cube faces (+X, -X, +Y, -Y, +Z, -Z, GL's order) 4 KB apart; 3D
- * slices packed, tiled ones in the 3D tiling; mips as the header says). With `hash_only`, only the hash is made.
- * 0 when unsupported. */
+ * slices packed, tiled ones in the 3D tiling; mips as the header says). With `hash_only`, only the hash is made;
+ * with 2, only lo / hi (memory is not read). 0 when unsupported. */
 static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only, decoded *out)
 {
     memset(out, 0, sizeof *out);
+    out->lo = 0xFFFFFFFFu;
     const texfmt *tf = tex_format(fc[1] & 63);
     uint32_t dim = (fc[5] >> 9) & 3;
     if ((fc[0] & 3) != 2 || !tf)
@@ -2588,6 +2609,15 @@ static int decode_texture(const xenos_cp *cp, const uint32_t *fc, int hash_only,
             packed_offset(w, h1, depth, dim, tf->block, (uint32_t)l, &ox, &oy, &oz);
         uint32_t bw = (lw + tf->block - 1) / tf->block, bh = (lh + tf->block - 1) / tf->block;
         size_t slice_n = (size_t)bw * bh * tf->bytes, src_n = slice_n * ld;
+        {
+            uint32_t lat = level_addr & 0x1FFFFFFFu, lspan = st.stride * (dim == 3 ? 6 : 1);
+            out->lo = lat < out->lo ? lat : out->lo;
+            out->hi = lat + lspan > out->hi ? lat + lspan : out->hi;
+            if (hash_only == 2) {
+                out->lw[l] = lw, out->lh[l] = lh, out->ld[l] = ld;
+                continue;
+            }
+        }
         /* With physical memory at hand the hash is of the level's whole storage as it lies in memory (padding
          * included): no decode to know a texture has not changed, which every cached texture is asked after each
          * swap and resolve (likely much of the 47 ms a Warhammer frame took on the Thor, XBA-318). */
@@ -2679,6 +2709,26 @@ static uint64_t memory_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
     return h;
 }
 
+/* a copy goes: its picture, its pending write if any (the CPU wrote that memory since: its bytes win, as they would
+ * have over the resolve), and with `retake` the textures taken from it are checked again at their next use */
+static void drop_copy(xenos_gl *g, rt_copy *c, int retake)
+{
+    if (c->pending) {
+        g->npending--;
+        g->st.resolves_dropped++;
+    }
+    if (retake)
+        for (int i = 0; i < MAX_TEXTURES; i++)
+            if (g->textures[i].copy == 1 + (int)(c - g->copies))
+                g->textures[i].checked = g->epoch - 1u;
+    g->glDeleteTextures(1, &c->tex);
+    memset(c, 0, sizeof *c);
+}
+
+/* WP-2: a copy's pending resolve written to guest memory; those overlapping physical [lo, hi) (after resolve_write) */
+static void flush_copy(xenos_gl *g, const xenos_cp *cp, rt_copy *rc);
+static void flush_range(xenos_gl *g, const xenos_cp *cp, uint32_t lo, uint32_t hi);
+
 /* the copy whose destination is `base`, still matching guest memory (checked once per epoch), or NULL */
 static rt_copy *copy_at(xenos_gl *g, const xenos_cp *cp, uint32_t base)
 {
@@ -2689,8 +2739,7 @@ static rt_copy *copy_at(xenos_gl *g, const xenos_cp *cp, uint32_t base)
             continue;
         if (c->checked != g->epoch) {
             if (memory_hash(cp, c->base, c->bytes) != c->hash) { /* the CPU (or a texture upload) wrote it */
-                g->glDeleteTextures(1, &c->tex);
-                memset(c, 0, sizeof *c);
+                drop_copy(g, c, 0);
                 return NULL;
             }
             c->checked = g->epoch;
@@ -2760,7 +2809,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     if (rc) {
         uint32_t w = (fc[2] & 0x1FFF) + 1, h = ((fc[2] >> 13) & 0x1FFF) + 1;
         if ((int)w <= rc->w && (int)h <= rc->h) {
-            if (t && t->copy == 1 + (int)(rc - g->copies) && t->hash == rc->hash) {
+            if (t && t->copy == 1 + (int)(rc - g->copies) && t->gen == rc->gen) {
                 t->swap_rb = rc->swap_rb;
                 t->checked = g->epoch;
                 t->used = (int)++g->tex_clock;
@@ -2784,6 +2833,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
             t->copy = 1 + (int)(rc - g->copies);
             t->swap_rb = rc->swap_rb;
             t->hash = rc->hash;
+            t->gen = rc->gen;
             t->checked = g->epoch;
             t->used = (int)++g->tex_clock;
             g->st.copy_textures++;
@@ -2791,6 +2841,14 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
         }
     }
     decoded d;
+    if (g->npending) { /* lazy resolves over that memory: written first, so it is decoded as it would be */
+        uint32_t lo = 0, hi = 0;
+        if (t && !t->copy && t->hi > t->lo)
+            lo = t->lo, hi = t->hi;
+        else if (decode_texture(cp, fc, 2, &d))
+            lo = d.lo, hi = d.hi;
+        flush_range(g, cp, lo, hi);
+    }
     if (t && !t->copy) {
         if (!decode_texture(cp, fc, 1, &d))
             return 0;
@@ -2812,6 +2870,7 @@ static GLuint texture_of(xenos_gl *g, const xenos_cp *cp, const uint32_t *fc, ui
     t->copy = 0;
     t->swap_rb = 0;
     t->hash = d.hash;
+    t->lo = d.lo, t->hi = d.hi;
     t->checked = g->epoch;
     t->used = (int)++g->tex_clock;
     /* a fetch constant whose X sign is gamma (Xenia's TextureSign::kGamma, 3) samples the bytes as gamma-encoded and
@@ -3400,6 +3459,157 @@ static void depth_write(const xenos_cp *cp, uint32_t base, uint32_t pitch_aligne
         }
 }
 
+/* ---- lazy resolves (WP-2) ----
+ * With RECOMP_X360_RESOLVE=lazy, a resolve that keeps a host picture (rt_copy: a colour target, a page-aligned base, no
+ * exponent bias, the rectangle inside the destination) only blits into the picture and marks it pending; guest memory
+ * stays as it was, and the copy's hash is of that untouched memory, so a CPU write there still drops the copy (and its
+ * pending pixels: the CPU's bytes win, as they would have over an eager resolve). The pixels are written, from the
+ * picture through resolve_write (the same bytes as the eager resolve: the picture is a nearest copy of the surface,
+ * read_raw filters it down the same way), when the GPU is about to read that memory another way (a texture that does
+ * not fit the picture, vertices, indices, the front buffer decoded at a swap) or write over it (another resolve, a
+ * depth resolve, memory export), when the copy is evicted or resized, 2 swaps after its last resolve (a picture
+ * resolved once and kept: save states get it) and at xenos_gl_flush_resolves. A pending resolve does not move the
+ * epoch (memory did not change): the cached textures over its range and those taken from the copy are checked again
+ * one by one instead. */
+static void flush_copy(xenos_gl *g, const xenos_cp *cp, rt_copy *rc)
+{
+    if (!rc->pending)
+        return;
+    uint64_t t0 = mono_ns();
+    int w = rc->px1 - rc->px0, h = rc->py1 - rc->py0;
+    const uint8_t *px = read_raw(g, rc->tex, rc->ifmt, rc->px0, rc->py0, w, h);
+    uint64_t t1 = mono_ns();
+    if (px) {
+        const resolve_dest d = {rc->base, (uint32_t)rc->w, rc->fmt, rc->endian, rc->swap_rb, 0};
+        resolve_write(cp, &d, px, pix_layout(rc->ifmt), rc->px0, rc->py0, w, h);
+        g->st.resolved_pixels += (uint64_t)w * (uint64_t)h;
+    }
+    rc->pending = 0;
+    g->npending--;
+    g->epoch++; /* memory changed under the cached textures: compare them again */
+    rc->hash = memory_hash(cp, rc->base, rc->bytes);
+    rc->checked = g->epoch;
+    uint64_t t2 = mono_ns();
+    g->st.resolve_flushes++;
+    g->st.resolve_read_ns += t1 - t0;
+    g->st.resolve_write_ns += t2 - t1;
+    if (!g->in_resolve) /* else resolve() counts it */
+        g->st.resolve_ns += t2 - t0;
+}
+
+static void flush_range(xenos_gl *g, const xenos_cp *cp, uint32_t lo, uint32_t hi)
+{
+    lo &= 0x1FFFFFFFu;
+    for (int i = 0; g->npending && i < MAX_COPIES && hi > lo; i++) {
+        rt_copy *c = &g->copies[i];
+        if (c->pending && c->base < hi && lo < c->base + c->bytes)
+            flush_copy(g, cp, c);
+    }
+}
+
+void xenos_gl_flush_resolves(xenos_gl *g, const xenos_cp *cp)
+{
+    if (!g || !g->ready)
+        return;
+    if (g->reset_pending)
+        do_reset(g); /* a state was loaded: what was pending belongs to the memory before it */
+    if (!g->npending)
+        return;
+    for (int i = 0; g->npending && i < MAX_COPIES; i++)
+        flush_copy(g, cp, &g->copies[i]);
+}
+
+int xenos_gl_lazy_resolves(const xenos_gl *g)
+{
+    return g && g->lazy;
+}
+
+/* A colour resolve the lazy way, into its copy only; 0 when it cannot be (no host picture for it, or the rectangle
+ * goes past the destination): the caller resolves it eagerly. */
+static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint32_t base, uint32_t pitch_aligned,
+                        uint32_t height, uint32_t fmt, uint32_t endian, int swap_rb, int bias, int bpp, int x0, int y0,
+                        int x1, int y1)
+{
+    if (s->kind == 2 || (base & 0xFFF) || bias)
+        return 0;
+    if (!height)
+        height = (uint32_t)y1;
+    uint32_t height_aligned = (height + 31) & ~31u, bytes = pitch_aligned * height_aligned * (uint32_t)bpp;
+    if ((uint32_t)x1 > pitch_aligned || (uint32_t)y1 > height_aligned)
+        return 0;
+    /* other copies over this memory: their pending pixels go under ours first, then the copies go (an eager resolve
+     * would change their memory) */
+    for (int i = 0; i < MAX_COPIES; i++) {
+        rt_copy *c = &g->copies[i];
+        if (c->tex && c->base != base && c->base < base + bytes && base < c->base + c->bytes) {
+            flush_copy(g, cp, c);
+            drop_copy(g, c, 1);
+        }
+    }
+    rt_copy *rc = copy_at(g, cp, base); /* still what memory holds (or held, plus what is pending) */
+    if (rc && (rc->ifmt != s->ifmt || rc->w != (int)pitch_aligned || rc->h != (int)height_aligned ||
+               rc->swap_rb != swap_rb || rc->fmt != fmt || rc->endian != endian)) {
+        flush_copy(g, cp, rc); /* resized or another format: what it holds is written the old way first */
+        drop_copy(g, rc, 1);
+    } else if (!rc) {
+        rt_copy *victim = &g->copies[0];
+        for (int i = 0; i < MAX_COPIES; i++) {
+            rt_copy *c = &g->copies[i];
+            if (!c->tex || (victim->tex && c->used < victim->used))
+                victim = c;
+        }
+        if (victim->tex) { /* evicted: its pending pixels written first */
+            flush_copy(g, cp, victim);
+            drop_copy(g, victim, 1);
+        }
+        rc = victim;
+    }
+    int fresh = !rc->tex;
+    if (fresh) {
+        GLenum tf, tt;
+        upload_fmt(s->ifmt, &tf, &tt);
+        rc->tex = new_texture(g, s->ifmt, tf, tt, (int)pitch_aligned * g->scale, (int)height_aligned * g->scale);
+        rc->ifmt = s->ifmt, rc->w = (int)pitch_aligned, rc->h = (int)height_aligned;
+        rc->swap_rb = swap_rb, rc->fmt = fmt, rc->endian = endian;
+        rc->base = base, rc->bytes = bytes;
+    }
+    if (rc->pending) {
+        /* one pending rectangle per copy: the new one when it holds the old one, the old one when it holds the new
+         * one (the picture there is what memory would have), else the old one is written now */
+        int holds_old = x0 <= rc->px0 && y0 <= rc->py0 && x1 >= rc->px1 && y1 >= rc->py1;
+        int in_old = rc->px0 <= x0 && rc->py0 <= y0 && rc->px1 >= x1 && rc->py1 >= y1;
+        if (holds_old)
+            rc->px0 = x0, rc->py0 = y0, rc->px1 = x1, rc->py1 = y1;
+        else if (!in_old)
+            flush_copy(g, cp, rc);
+    }
+    blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0);
+    if (fresh) {
+        rc->hash = memory_hash(cp, rc->base, rc->bytes); /* of the memory as it is: a CPU write still shows */
+        rc->checked = g->epoch;
+    }
+    if (!rc->pending) {
+        rc->pending = 1;
+        g->npending++;
+        rc->px0 = x0, rc->py0 = y0, rc->px1 = x1, rc->py1 = y1;
+    }
+    rc->used = ++g->copy_clock;
+    rc->gen = ++g->copy_gen;
+    rc->frame = g->swaps;
+    g->st.resolves++;
+    g->st.resolves_deferred++;
+    if (g->nresolved < 16)
+        g->resolved[g->nresolved++] = base;
+    /* no epoch move: the textures taken from this copy, and those decoded from memory under it, are checked again */
+    int idx = 1 + (int)(rc - g->copies);
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+        texture *t = &g->textures[i];
+        if (t->tex && t->checked == g->epoch && (t->copy ? t->copy == idx : t->lo < base + bytes && base < t->hi))
+            t->checked = g->epoch - 1u;
+    }
+    return 1;
+}
+
 /* the source surface of a resolve: render target src (0-3) or depth (4), as last bound, else as the registers say */
 static int resolve_source(xenos_gl *g, const xenos_cp *cp, uint32_t src)
 {
@@ -3928,7 +4138,9 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp);
 static void resolve(xenos_gl *g, const xenos_cp *cp)
 {
     uint64_t t0 = mono_ns();
+    g->in_resolve = 1;
     resolve_copy(g, cp);
+    g->in_resolve = 0;
     g->st.resolve_ns += mono_ns() - t0;
 }
 
@@ -3968,8 +4180,16 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
         uint32_t base = cp->regs[0x2319] & 0x1FFFFFFFu;
         uint32_t pitch_aligned = (pitch + 31) & ~31u;
         int bpp = dest_bytes(fmt);
+        int writable = bpp && endian < 4 && cp->write32 && cp->read32;
+        if (writable && g->lazy && resolve_lazy(g, cp, s, base, pitch_aligned, height, fmt, endian, (int)swap_rb, bias,
+                                                bpp, x0, y0, x1, y1))
+            goto cleared;
+        if (writable && g->npending) { /* written over: what is pending under it first */
+            uint32_t h = height ? height : (uint32_t)y1;
+            flush_range(g, cp, base, base + pitch_aligned * ((h + 31) & ~31u) * (uint32_t)bpp);
+        }
         uint64_t tr = mono_ns();
-        const uint8_t *px = bpp && endian < 4 && cp->write32 && cp->read32
+        const uint8_t *px = writable
                                 ? read_raw(g, s->tex, s->ifmt, x0, y0, x1 - x0, y1 - y0)
                                 : NULL;
         if (px) {
@@ -4029,6 +4249,8 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                 rc->hash = memory_hash(cp, rc->base, rc->bytes);
                 rc->checked = g->epoch;
                 rc->used = ++g->copy_clock;
+                rc->gen = ++g->copy_gen;
+                rc->frame = g->swaps;
             }
         } else {
             unsupported(g, "resolve destination format");
@@ -4042,6 +4264,11 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                            : NULL;
         if (dv) {
             uint32_t pitch_aligned = (pitch + 31) & ~31u;
+            if (g->npending) {
+                uint32_t h = (cp->regs[0x231A] >> 16) & 0x3FFF;
+                h = h > (uint32_t)y1 ? h : (uint32_t)y1;
+                flush_range(g, cp, base, base + pitch_aligned * ((h + 31) & ~31u) * 4);
+            }
             const uint8_t *sv = read_stencil(g, s, x0, y0, x1 - x0, y1 - y0);
             uint64_t tw = mono_ns();
             g->st.resolve_read_ns += tw - tr;
@@ -4057,6 +4284,7 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
             unsupported(g, "depth resolve destination format");
         }
     }
+cleared:;
     int clear_c = (ctl >> 8) & 1, clear_d = (ctl >> 9) & 1;
     if (clear_c || clear_d) {
         g->glBindFramebuffer(GL_FRAMEBUFFER, g->rfbo);
@@ -4211,6 +4439,8 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
         uint32_t base = (c0 & ~3u) & 0x1FFFFFFFu;
         /* the bytes the conversion reads: up to 4 dwords from the last element's start */
         uint64_t span = 4 * ((uint64_t)at->offset + (uint64_t)(count - 1) * at->stride) + 16;
+        if (g->npending) /* lazy resolves under the buffer: written first */
+            flush_range(g, cp, base, (uint32_t)(base + span));
         g->glActiveTexture(GL_TEXTURE0 + (GLenum)(p->nsamplers + i));
         if (cp->mem && (c0 & ~3u) < 0x20000000u && base + span <= 0x20000000u) {
             int fresh;
@@ -4345,6 +4575,14 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
     }
     if (n && cp->write32) {
         const uint32_t *log = g->glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 8, 8 * (GLsizeiptr)n, GL_MAP_READ_BIT);
+        if (log && g->npending) { /* lazy resolves under what is exported: written first, the export over them */
+            uint32_t lo = 0xFFFFFFFFu, hi = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t pa = log[2 * i] & 0x1FFFFFFCu;
+                lo = pa < lo ? pa : lo, hi = pa + 4 > hi ? pa + 4 : hi;
+            }
+            flush_range(g, cp, lo, hi);
+        }
         if (log) {
             for (uint32_t i = 0; i < n; i++) { /* the dword's bytes in memory order: big-endian word = its bswap */
                 uint32_t a = log[2 * i], pa = a & 0x1FFFFFFCu, v = __builtin_bswap32(log[2 * i + 1]);
@@ -4417,6 +4655,8 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         }
         uint32_t endian = cp->regs[XENOS_REG_VGT_DMA_SIZE] >> 30;
         max_index = 0, min_index = 0xFFFFFFFFu;
+        if (d->source_select == 0 && g->npending) /* lazy resolves under the indices: written first */
+            flush_range(g, cp, d->dma_base, d->dma_base + (d->index_size ? 4 : 2) * n + 4);
         for (uint32_t i = 0; i < n; i++) {
             uint32_t v, at = d->index_size ? i : i / 2, w = 0;
             if (d->source_select == 0)
@@ -4472,6 +4712,9 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     for (uint32_t a = 0; a < na; a++) {
         const attr *at = &p->attrs[a];
         uint32_t c0 = cp->regs[0x4800 + 2 * at->fetch_constant], c1 = cp->regs[0x4800 + 2 * at->fetch_constant + 1];
+        if (g->npending) /* lazy resolves under the vertices: written first */
+            flush_range(g, cp, c0 & ~3u,
+                        (c0 & ~3u) + 4 * (at->offset + (max_index + 1) * at->stride + 4));
         if (!fetch_vertices(cp, c0 & ~3u, c1 & 3, at, min_index, nv, vb + 4 * a, 4 * (size_t)na)) {
             free(conv);
             unsupported(g, "vertex format");
@@ -4616,6 +4859,8 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         g->st.front_buffer_frames++;
     } else if (front) {
         decoded d;
+        if (g->npending && decode_texture(cp, fc, 2, &d)) /* lazy resolves there: written first */
+            flush_range(g, cp, d.lo, d.hi);
         if (decode_texture(cp, fc, 0, &d)) { /* from memory (no host picture of it) */
             g->st.front_buffer_frames++;
             uint8_t *rgba = d.level[0] ? calloc((size_t)d.w * d.h, 4) : NULL; /* a front buffer has its level 0 */
@@ -4698,6 +4943,11 @@ void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
         }
     }
     g->st.frames++;
+    /* lazy resolves not resolved again for 2 swaps: written (a picture resolved once and kept, that states hold) */
+    g->swaps++;
+    for (int i = 0; g->npending && i < MAX_COPIES; i++)
+        if (g->copies[i].pending && g->swaps - g->copies[i].frame >= 2)
+            flush_copy(g, cp, &g->copies[i]);
     g->glBindFramebuffer(GL_FRAMEBUFFER, g->fbo);
     if (g->title_clears)
         return; /* the title clears through its resolves */

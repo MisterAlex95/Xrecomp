@@ -2037,6 +2037,146 @@ int main(int argc, char **argv)
         run(&cp);
     }
     xenos_gl_destroy(g);
+
+    /* WP-2, lazy resolves (RECOMP_X360_RESOLVE=lazy), on a renderer of their own: a resolve leaves memory as it was
+     * and only draws into its host picture; the pixels reach memory when a texture reads that memory another way, 2
+     * swaps after the last resolve, at xenos_gl_flush_resolves; a CPU write before that wins (the copy is dropped); a
+     * state load (xenos_gl_reset) forgets what was pending. Destination 0xF0000, a tiled 64x64 8_8_8_8 (8-in-32). */
+    if (pst2) {
+        setenv("RECOMP_X360_RESOLVE", "lazy", 1);
+        g = xenos_gl_create_scaled(cache, W, H, scale, why, sizeof why);
+        unsetenv("RECOMP_X360_RESOLVE");
+        CHECK(g && xenos_gl_lazy_resolves(g), "lazy resolves: renderer %p, lazy %d", (void *)g,
+              g ? xenos_gl_lazy_resolves(g) : 0);
+    } else {
+        g = NULL;
+    }
+    if (g) {
+        enum { DST = 0xF0000 };
+        cp.render_ctx = g;
+        for (uint32_t i = 0; i < 64 * 64 * 4; i += 4)
+            w32(DST + i, 0xABABABABu);
+        reg(0x2104, 0xFFFFu), reg(0x2200, 0), reg(0x2201, 0x00010001u), reg(0x2205, 0);
+        full_viewport();
+        for (int i = 0; i < 4; i++)
+            reg(0x4400 + i, fbits(1.0f));
+        /* a full-target quad of one colour at 0xEF000, drawn with the colour shader */
+        #define LAZY_QUAD(r_, g_, b_)                                                                                \
+            do {                                                                                                     \
+                vertex(0xEF000, -1, -1, r_, g_, b_), vertex(0xEF020, 1, -1, r_, g_, b_);                             \
+                vertex(0xEF040, -1, 1, r_, g_, b_), vertex(0xEF060, 1, 1, r_, g_, b_);                               \
+                im[0] = 1, im[1] = nps;                                                                              \
+                memcpy(im + 2, ps, 4 * nps);                                                                         \
+                type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + nps);                                                           \
+                reg(0x4800, 0xEF000u | 3u), reg(0x4801, 2u | (32u << 2));                                            \
+                type3(PM4_DRAW_INDX_2, &strip_a, 1);                                                                 \
+            } while (0)
+        /* the whole target resolved to DST (no clear) */
+        #define LAZY_RESOLVE()                                                                                       \
+            do {                                                                                                     \
+                static const float lv[6] = {0, 0, W, 0, W, H};                                                       \
+                for (int i_ = 0; i_ < 6; i_++)                                                                       \
+                    w32(0xEF100 + 4 * (uint32_t)i_, fbits(lv[i_]));                                                  \
+                reg(0x4800, 0xEF100u | 3u), reg(0x4801, 2u | (6u << 2));                                             \
+                reg(0x2208, 6), reg(0x2318, 0), reg(0x2319, DST), reg(0x231A, W | (uint32_t)H << 16);                \
+                reg(0x231B, 2u | 6u << 7);                                                                           \
+                uint32_t rect_ = 8u | 2u << 6 | 3u << 16;                                                            \
+                type3(PM4_DRAW_INDX_2, &rect_, 1);                                                                   \
+                reg(0x2208, 4);                                                                                      \
+            } while (0)
+        /* DST sampled over the target: endian 2 reads it as the resolve wrote it (its host picture), 0 does not */
+        #define LAZY_SAMPLE(endian_)                                                                                 \
+            do {                                                                                                     \
+                im[0] = 1, im[1] = ntex;                                                                             \
+                memcpy(im + 2, pst2, 4 * ntex);                                                                      \
+                type3(PM4_IM_LOAD_IMMEDIATE, im, 2 + ntex);                                                          \
+                reg(0x4800, 0x6000u | 3u), reg(0x4801, 2u | (32u << 2));                                             \
+                uint32_t f_[6] = {2u | 2u << 10 | 2u << 13 | 2u << 22 | 1u << 31, 6u | (endian_) << 6 | DST,         \
+                                  63u | 63u << 13, sw_id << 1, 0, 1u << 9};                                          \
+                for (int i_ = 0; i_ < 6; i_++)                                                                       \
+                    reg(0x480C + i_, f_[i_]);                                                                        \
+                type3(PM4_DRAW_INDX_2, &strip_a, 1);                                                                 \
+            } while (0)
+        #define LAZY_AT(x_, y_) rd32(NULL, DST + tiled_off(x_, y_))
+        xenos_gl_stats ls;
+        /* a red resolve: memory untouched */
+        LAZY_QUAD(1, 0, 0);
+        LAZY_RESOLVE();
+        run(&cp);
+        xenos_gl_get_stats(g, &ls);
+        CHECK(ls.resolves == 1 && ls.resolves_deferred == 1 && ls.resolve_flushes == 0,
+              "lazy: resolves %llu, deferred %llu, written %llu, want 1, 1, 0", (unsigned long long)ls.resolves,
+              (unsigned long long)ls.resolves_deferred, (unsigned long long)ls.resolve_flushes);
+        CHECK(LAZY_AT(1, 1) == 0xABABABABu, "lazy: memory after the resolve %08X, want ABABABAB (as it was)",
+              LAZY_AT(1, 1));
+        /* sampled as written: the host picture, still nothing written; the swap shows red */
+        LAZY_SAMPLE(2u);
+        run(&cp);
+        xenos_gl_get_stats(g, &ls);
+        CHECK(ls.resolve_flushes == 0 && ls.copy_textures == 1 && LAZY_AT(37, 21) == 0xABABABABu,
+              "lazy, sampled from the picture: written %llu, picture textures %llu, memory %08X",
+              (unsigned long long)ls.resolve_flushes, (unsigned long long)ls.copy_textures, LAZY_AT(37, 21));
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        c = px(g, W / 2, H / 2);
+        CHECK(c[0] == 255 && c[1] == 0 && c[2] == 0, "lazy, sampled from the picture: %u,%u,%u, want red", c[0], c[1],
+              c[2]);
+        CHECK(LAZY_AT(1, 1) == 0xABABABABu, "lazy, one swap after the resolve: %08X, want ABABABAB", LAZY_AT(1, 1));
+        /* a second swap without a resolve: written */
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        xenos_gl_get_stats(g, &ls);
+        CHECK(ls.resolve_flushes == 1 && LAZY_AT(1, 1) == 0xFF0000FFu && LAZY_AT(37, 21) == 0xFF0000FFu,
+              "lazy, two swaps after the resolve: written %llu, memory %08X %08X, want 1, FF0000FF",
+              (unsigned long long)ls.resolve_flushes, LAZY_AT(1, 1), LAZY_AT(37, 21));
+        /* a green resolve, then DST read another way (endian 0): written first */
+        LAZY_QUAD(0, 1, 0);
+        LAZY_RESOLVE();
+        run(&cp);
+        CHECK(LAZY_AT(5, 5) == 0xFF0000FFu, "lazy, green resolved: %08X, want the red still", LAZY_AT(5, 5));
+        LAZY_SAMPLE(0u);
+        run(&cp);
+        xenos_gl_get_stats(g, &ls);
+        CHECK(ls.resolve_flushes == 2 && LAZY_AT(5, 5) == 0xFF00FF00u,
+              "lazy, read another way: written %llu, memory %08X, want 2, FF00FF00",
+              (unsigned long long)ls.resolve_flushes, LAZY_AT(5, 5));
+        /* a blue resolve, then a CPU write there before anything writes it: the CPU's bytes win, the rest of the
+         * memory stays green, the copy is dropped */
+        LAZY_QUAD(0, 0, 1);
+        LAZY_RESOLVE();
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        w32(DST + tiled_off(1, 1), 0x12345678u);
+        LAZY_SAMPLE(2u);
+        type3(PM4_XE_SWAP, swap, 4);
+        run(&cp);
+        xenos_gl_get_stats(g, &ls);
+        CHECK(ls.resolves_dropped == 1 && LAZY_AT(1, 1) == 0x12345678u && LAZY_AT(37, 21) == 0xFF00FF00u,
+              "lazy, CPU write first: dropped %llu, memory %08X %08X, want 1, 12345678, FF00FF00",
+              (unsigned long long)ls.resolves_dropped, LAZY_AT(1, 1), LAZY_AT(37, 21));
+        /* red, then xenos_gl_flush_resolves (a save state): written */
+        LAZY_QUAD(1, 0, 0);
+        LAZY_RESOLVE();
+        run(&cp);
+        xenos_gl_flush_resolves(g, &cp);
+        CHECK(LAZY_AT(1, 1) == 0xFF0000FFu && LAZY_AT(37, 21) == 0xFF0000FFu,
+              "lazy, xenos_gl_flush_resolves: %08X %08X, want FF0000FF", LAZY_AT(1, 1), LAZY_AT(37, 21));
+        /* green, then a state load (xenos_gl_reset): forgotten, memory is the state's */
+        LAZY_QUAD(0, 1, 0);
+        LAZY_RESOLVE();
+        run(&cp);
+        xenos_gl_reset(g);
+        xenos_gl_flush_resolves(g, &cp);
+        xenos_gl_get_stats(g, &ls);
+        CHECK(LAZY_AT(1, 1) == 0xFF0000FFu && ls.resolves_deferred == 5,
+              "lazy, pending at a state load: memory %08X (want FF0000FF), deferred %llu (want 5)", LAZY_AT(1, 1),
+              (unsigned long long)ls.resolves_deferred);
+        #undef LAZY_QUAD
+        #undef LAZY_RESOLVE
+        #undef LAZY_SAMPLE
+        #undef LAZY_AT
+        xenos_gl_destroy(g);
+    }
     free(pst);
     free(vs);
     free(ps);

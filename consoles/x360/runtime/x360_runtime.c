@@ -144,6 +144,31 @@ static x360_machine *s_x;
 static char s_work[1100], s_key[48], s_state_dir[1200];
 static int s_state_loaded;
 static unsigned s_saved_missed;
+static pthread_t s_machine_thread; /* runs the machine and owns the renderer's GL context */
+static int s_machine_thread_set;
+
+/* Per-title defaults: renderer options a title is known to want, by title ID (the key's X360-XXXXXXXX- prefix). Set
+ * unless something already did (the environment, recomp.cfg, the pack's env_force): the player can still say
+ * otherwise. */
+static const struct {
+    const char *key_prefix, *name, *value;
+} k_title_env[] = {
+    /* Adventure Time: Explore the Dungeon: every resolve is only sampled back by the GPU (its
+     * host picture) and the CPU never reads them: lazy resolves (WP-2), no read-back each frame */
+    {"X360-44500807-", "RECOMP_X360_RESOLVE", "lazy"},
+};
+
+static void title_env(const char *key)
+{
+    for (size_t i = 0; i < sizeof k_title_env / sizeof k_title_env[0]; i++)
+        if (!strncmp(key, k_title_env[i].key_prefix, strlen(k_title_env[i].key_prefix))) {
+            const char *had = getenv(k_title_env[i].name);
+            if (!had)
+                setenv(k_title_env[i].name, k_title_env[i].value, 0);
+            printf("x360: title default %s=%s%s\n", k_title_env[i].name, k_title_env[i].value,
+                   had ? " not applied (already set)" : "");
+        }
+}
 
 static int cmp_u32(const void *a, const void *b)
 {
@@ -308,6 +333,11 @@ static int state_save_op(int slot, void *user)
         pthread_mutex_unlock(&s_mu);
         return RECOMP_STATE_ENOGAME;
     }
+    /* Lazy resolves (RECOMP_X360_RESOLVE=lazy) into memory first, where the GL context is: on the machine's thread
+     * (a hotkey, the automatic slot at quit). Elsewhere (the menu, the automatic save thread) the state goes without
+     * the resolves of the last 2 frames: after a load the renderer starts over and the title resolves them again. */
+    if (s_machine_thread_set && pthread_equal(pthread_self(), s_machine_thread))
+        x360_render_flush(s_x);
     size_t cap = x360_state_size(s_x), n = 0;
     uint8_t *blob = malloc(cap);
     if (blob)
@@ -375,6 +405,8 @@ static size_t rewind_size(void *user)
     return x360_state_size((x360_machine *)user);
 }
 
+/* Rewind states are taken every frame: no flush of lazy resolves (that would be the read-back they avoid); a state goes
+ * without the last 2 frames' resolves, which the title resolves again after the step back (the renderer starts over). */
 static size_t rewind_save(uint8_t *out, size_t cap, void *user)
 {
     return x360_state_save((x360_machine *)user, s_key, out, cap);
@@ -517,6 +549,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
     console_pad_load(&s_pad_map, CONSOLE_PAD_X360, getenv(console_pad_env(CONSOLE_PAD_X360)));
     int upscale = o->upscale > 0 ? o->upscale : env_int("RECOMP_X360_UPSCALE", env_int("RECOMP_UPSCALE", 1));
     upscale = upscale < 1 ? 1 : upscale > 8 ? 8 : upscale;
+    title_env(key);
     stage("start the renderer");
     /* the renderer on the window's context (this thread runs the machine), or off-screen with frames read back */
     int render = x360_set_renderer_ex(x, cache, NULL, 0, RENDER_W, RENDER_H, upscale, window, why, sizeof why) == 0;
@@ -537,6 +570,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
 
     pthread_mutex_lock(&s_mu);
     s_x = x;
+    s_machine_thread = pthread_self(), s_machine_thread_set = 1;
     snprintf(s_key, sizeof s_key, "%s", key);
     pthread_mutex_unlock(&s_mu);
     recomp_exit_hook_set(on_exit_hook);
@@ -804,6 +838,7 @@ int x360_runtime_run(const x360_runtime_opts *o)
     pthread_mutex_lock(&s_mu);
     save_missed_locked();
     s_x = NULL;
+    s_machine_thread_set = 0;
     pthread_mutex_unlock(&s_mu);
     x360_destroy(x); /* the renderer first, while the window's context is current */
     if (window)
