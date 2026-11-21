@@ -4526,6 +4526,108 @@ def place_funclet_entries(translations, funclet_entries, manual=()):
             translations[k] = (a, n, c + "\n" + entry[2][:cut])
 
 
+class ChunkStream:
+    """The chunks of translate_batch_split(chunk_bytes=...) written while the
+    translation goes on, so that tools.prepare compiles them beside the
+    lift (tools/prepare/compile.py EarlyCompile) instead of after it.
+
+    A forecast, never the result: the end of translate_batch_split still
+    writes every file through write_if_changed, from the whole program, and
+    whatever it writes is what the lift produced. A chunk forecast right
+    (nearly all of them) is left as it is, same bytes, same stat; one that
+    differs is written again, and its early object is not used. The forecast
+    replays what the end does with what is known so far: the stable_chunks
+    cuts in address order, the funclet entries placed as
+    place_funclet_entries places them (an entry another function already
+    owns adds its copy to the parent, which is the function just
+    translated), and the declarations of the names the chunk uses among the
+    functions to translate, the hand-written ones and the call targets met
+    so far (all void(void), like _make_declaration's). The last chunk, and
+    the funclet entries placed after every function, are only written by
+    the end."""
+
+    def __init__(self, batch, output_dir, prefix, chunk_bytes, func_list, manual):
+        self.batch = batch
+        self.output_dir = output_dir
+        self.prefix = prefix
+        self.lo = max(1, chunk_bytes * 3 // 4)
+        self.hi = chunk_bytes * 3 // 2
+        self.tail = max(1, chunk_bytes - self.lo)
+        self.cur, self.size, self.index = [], 0, 0
+        self.written = 0
+        self.taken = {a for a, _ in func_list}
+        self.names = set()
+        self.known = set()
+        for addr, info in func_list:
+            name = _func_ident(addr, info.get("name", f"sub_{addr:08X}"))
+            if addr not in manual:
+                self.names.add(name)
+            self.known.add(name)
+            if info.get("wrapper_name"):
+                self.known.add(info["wrapper_name"])
+        self._types()
+
+    def _types(self):
+        """recomp_types.h first, as the end writes it: the chunks include it."""
+        src = os.path.join(os.path.dirname(__file__), "..", "..", "templates", "runtime", "recomp_types.h")
+        try:
+            with open(src, "r", encoding="utf-8") as f:
+                write_if_changed(os.path.join(self.output_dir, "recomp_types.h"), f.read())
+        except OSError:
+            pass                # the end says why
+
+    def add(self, addr, name, code, funclets):
+        """One translated function (in func_list order) and its funclet entries."""
+        for _parent_va, parent_name, entry in funclets:
+            if entry[0] not in self.taken and entry[1] not in self.names:
+                self.taken.add(entry[0])
+                self.names.add(entry[1])
+                self.known.add(entry[1])
+                continue
+            marker = (f"void {parent_name}__seh(uint32_t _seh_target);\n"
+                      f"void {entry[1]}(void) {{")
+            cut = entry[2].rfind(marker)
+            if cut > 0:
+                code = code + "\n" + entry[2][:cut]
+        self.cur.append((addr, name, code))
+        n = len(code) + 1
+        self.size += n
+        if self.size >= self.hi:
+            cut = True
+        elif self.size >= self.lo:
+            h = zlib.crc32(struct.pack("<I", addr & 0xFFFFFFFF))
+            cut = h * self.tail < n * 0x100000000
+        else:
+            cut = False
+        if cut:
+            self._write()
+
+    def _write(self):
+        chunk, self.cur, self.size = self.cur, [], 0
+        ci, self.index = self.index, self.index + 1
+        known = self.known | set(self.batch.translator.lifter.referenced_calls.values())
+        used = set()
+        for _, _, code in chunk:
+            used.update(_C_IDENT.findall(code))
+        c_lines = [
+            "/**",
+            f" * {_config.banner_name(getattr(self.batch, 'title', None))}"
+            f" - Recompiled code chunk {ci}",
+            f" * Functions: {len(chunk)} "
+            f"(0x{chunk[0][0]:08X} - 0x{chunk[-1][0]:08X})",
+            " */",
+            "",
+            "#define RECOMP_GENERATED_CODE",
+            '#include "recomp_types.h"', '#include <math.h>', "",
+        ]
+        c_lines += [f"void {n}(void);" for n in sorted(used & known)]
+        c_lines.append("")
+        for _, _, code in chunk:
+            c_lines.append(code)
+        write_if_changed(os.path.join(self.output_dir, f"{self.prefix}_{ci:04d}.c"), "\n".join(c_lines))
+        self.written += 1
+
+
 class BatchTranslator:
     """Translates multiple functions and writes C source files."""
 
@@ -4855,6 +4957,11 @@ class BatchTranslator:
             "total_lines": 0,
         }
 
+        # --split-bytes: the chunks written as they fill up (ChunkStream),
+        # checked again by the end below.
+        stream = (ChunkStream(self, output_dir, prefix, chunk_bytes, func_list, manual)
+                  if chunk_bytes else None)
+
         for i, (addr, func_info) in enumerate(func_list):
             name = _func_ident(addr, func_info.get("name", f"sub_{addr:08X}"))
             if verbose and (i % 500 == 0 or i == len(func_list) - 1):
@@ -4872,17 +4979,22 @@ class BatchTranslator:
                 stats["translated"] += 1
                 stats["total_lines"] += code.count("\n")
                 seh_entries = getattr(self.translator, "seh_funclet_entries", None)
+                mine = []
                 if seh_entries:
-                    funclet_entries.extend(
-                        (addr, name, entry) for entry in seh_entries(
+                    mine = [(addr, name, entry) for entry in seh_entries(
                             addr, name, code,
-                            getattr(self.translator, "_seh_frame", None)))
+                            getattr(self.translator, "_seh_frame", None))]
+                    funclet_entries.extend(mine)
+                if stream:
+                    stream.add(addr, name, code, mine)
             else:
                 # Stub for failed translations
                 stub = f"/* FAILED: {name} at 0x{addr:08X} */\n"
                 stub += f"void {name}(void) {{ /* translation failed */ }}\n"
                 translations.append((addr, name, stub))
                 stats["failed"] += 1
+                if stream:
+                    stream.add(addr, name, stub, [])
 
         # Exception funclets (XBA-112): a handler calls them through the
         # dispatch table and their own function calls them directly, so they
