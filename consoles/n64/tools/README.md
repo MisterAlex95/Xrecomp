@@ -122,9 +122,10 @@ compile time on the phone):
   to the interpreter with the rest of its block (one exit, no call into the core: small code).
 - 64-bit GPRs in C locals (only those the function uses, written back only when it writes them), 32-bit results
   sign-extended, delay slots inline, branch-likely skipping its slot, COP1 moves inline and arithmetic through
-  `n64_fpu.c` (identical results, flags, causes, exceptions), COP0 / exceptions / LL-SC / a branch in a delay slot
-  handed to the interpreter with the state in front of the instruction (exact EPC / BD / BadVAddr), calls and
-  indirect jumps through the dispatcher (bounded C stack).
+  `n64_fpu.c` (identical results, flags, causes, exceptions), MFC0 / DMFC0 through the core's COP0 read
+  (`n64_rc_mfc0`, XBA-295: a loop polling COUNT stays native), the other COP0 instructions / exceptions / LL-SC / a
+  branch in a delay slot handed to the interpreter with the state in front of the instruction (exact EPC / BD /
+  BadVAddr), calls and indirect jumps through the dispatcher (bounded C stack).
 - **Stable files.** Functions in address order, a file cut after a function whose identity (start, hash) hashes to
   0 mod 8 once it holds 1000 instructions (at 4000 at most); files are named after their first function. A
   discovery round changes only the files that gained functions, and the object cache (`n64_recomp_build.py`, Prepare)
@@ -133,6 +134,20 @@ compile time on the phone):
   -O2 keeps them in registers: about a fifth less on arm64, the same compile time).
 
 `--resume-all` makes every instruction a block of its own (debugging).
+
+**Resume points inside a block: measured, not taken (XBA-295).** After an event inside a block the interpreter runs
+to the block's end (about 2.9 % of a bench frame on x86-64: `n64_cpu_step_handed`). Two ways to resume in lifted code
+were measured on the bench (`tests/bench`, x86-64 and arm64 instructions per frame, `tools/bench/qprof.py`):
+- every instruction a resume point (an entry-switch `case` with its own check of the rest of the block, a bare label in
+  the straight code): the interpreted instructions fell by 43 %, but the labels are join points and the hot function
+  took 35 % more (4.63M to 6.27M per frame: the clock and the count are no longer summed over a block, values leave
+  registers) and clang compiled 2.8 times longer;
+- the GBA's way (XBA-281), the instruction after a call into the core (COP1 arithmetic, CTC1, a known IO address)
+  a block start: compile time the same, nothing saved on the bench, -2.4 % on x86-64 but +7 % on arm64.
+A label the entry switch reaches costs more than the whole tail. What paid instead: MFC0 lifted (above; the bench's
+COUNT polling screen, which it reaches after an FPE near frame 2420, runs 6.5 (arm64) to 7.3 (x86-64) times fewer
+instructions per frame) and one range test per inline store, the MI repeat mode folded into the own-code range
+(`RC_OWN_RANGE`: -6 % on x86-64, -3 % on arm64). `n64_run --stats` counts the hand-offs.
 
 ## Limits
 
