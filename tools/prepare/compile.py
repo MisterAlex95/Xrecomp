@@ -593,7 +593,9 @@ def plan_keys(sources, flags, cid, obj_dir):
         if sig[1] < now - RACY_NS:
             new_files[s] = sig + [ctx[which], key]
         plan.append((s, sig[0], os.path.join(obj_dir, key + ".o")))
-    keys = {"v": KEYS_VERSION, "files": new_files}
+    # The digests this plan used, whatever the headers' age: EarlyCompile's guess of a re-lift's keys (the lift
+    # writes recomp_funcs.h just before the compile, too recently for "headers" to remember it).
+    keys = {"v": KEYS_VERSION, "files": new_files, "digests": [headers, gen_headers]}
     if hnewest < now - RACY_NS:
         keys["headers"] = [hsig, headers, gen_headers]
     if keys != old:
@@ -966,10 +968,11 @@ class EarlyCompile:
                 cached_id = getattr(self.tc, "compiler_id_cached", None)
                 cid = cached_id(self.obj_dir) if cached_id else self.tc.compiler_id()
                 digests = {"all": [header_digest(self.dirs)], "gen": [header_digest(self.dirs, generated=True)]}
-                hk = _load_keys(self.obj_dir).get("headers")
-                if isinstance(hk, list) and len(hk) == 3:
-                    digests["all"].append(hk[1])
-                    digests["gen"].append(hk[2])
+                kj = _load_keys(self.obj_dir)
+                for got in (kj.get("digests"), (kj.get("headers") or [None])[1:]):
+                    if isinstance(got, list) and len(got) == 2 and all(isinstance(x, str) for x in got):
+                        digests["all"].append(got[0])
+                        digests["gen"].append(got[1])
                 self._ctx = ([portable(f) for f in self.flags], cid, digests)
             except Exception:       # no key, no skip: the file is compiled early as any other
                 self._ctx = False

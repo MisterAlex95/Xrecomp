@@ -363,9 +363,10 @@ def test_no_early_compile_for_what_the_cache_has(tmp_path, monkeypatch):
     early.start()
     _lift(tmp_path, early, 5, 0.2)
     early.finish()
-    sources = sorted(str(gen / fn) for fn in os.listdir(gen))
+    (gen / "recomp_funcs.h").write_text("void f0(void);\n")    # what tools.recomp writes last, just before the compile
+    sources = sorted(str(gen / fn) for fn in os.listdir(gen) if fn.endswith(".c"))
     cc.compile_all(sources, flags, tc, str(tmp_path / "obj"), 3, early=early)
-    for fn in os.listdir(gen):                       # the lift again: the same bytes, new files
+    for fn in os.listdir(gen):                       # the lift again: the same bytes, new files, the header last
         os.remove(gen / fn)
     os.remove(tmp_path / "cc.log")
     again = cc.EarlyCompile(str(gen), flags, tc, str(tmp_path / "obj"), 3, mem=None)
@@ -373,5 +374,6 @@ def test_no_early_compile_for_what_the_cache_has(tmp_path, monkeypatch):
     again.start()
     _lift(tmp_path, again, 5, 0.2)
     again.finish()
+    (gen / "recomp_funcs.h").write_text("void f0(void);\n")
     assert again.cached == 5 and again.compiled == 0 and not os.path.exists(tmp_path / "cc.log")
     assert cc.compile_all(sources, flags, tc, str(tmp_path / "obj"), 3, early=again)[1] == 0
