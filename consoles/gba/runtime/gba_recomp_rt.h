@@ -486,11 +486,10 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n_slow(gba_rc_head
     return total;
 }
 
-/* rc_pf_fetch_n: the frequent cases of N fetches back to back (X and S 0), with few registers; the others in
- * rc_pf_fetch_n_slow. At the buffer's head with the unit reading and nothing in the buffer: the rest of that read,
- * then a whole one each (the runs that follow a jump's refill). Elsewhere (a refill's target, the fetch after a
- * literal): the buffer stops (rc_pf_stop: a cycle's wait when a read was finishing), then a non-sequential access and
- * a whole read each. */
+/* rc_pf_fetch_n: N fetches back to back (X and S 0), the frequent case, with few registers; the others in
+ * rc_pf_fetch_n_slow. At the buffer's head with the unit reading: the reads completed meanwhile, then rc_pf_fetch_n_slow's
+ * closed form. Elsewhere (a refill's target, the fetch after a literal): the buffer stops (rc_pf_stop: a cycle's wait
+ * when a read was finishing), then a non-sequential access and a whole read each. */
 static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, uint64_t now, uint32_t addr,
                                                                 bool thumb, uint32_t ncost, uint32_t ns, uint64_t x)
 {
@@ -499,10 +498,42 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, 
         return rc_pf_fetch_n_slow(h, now, addr, thumb, ncost, ns, x);
     uint32_t w = thumb ? 2u : 4u, c, d;
     if (p->valid && addr == p->head && p->thumb == thumb && (p->run || p->count)) {
-        if (!p->run || p->count || now != p->time)
-            return rc_pf_fetch_n_slow(h, now, addr, thumb, ncost, ns, x);
+        const uint32_t cap = thumb ? 8u : 4u;
+        uint32_t left = p->left, count = p->count, ie;
         d = p->duty;
-        c = p->left + (ns - 1) * d;
+        if (!p->run || now < p->time)
+            return rc_pf_fetch_n_slow(h, now, addr, thumb, ncost, ns, x);
+        if (now > p->time) { /* rc_pf_advance */
+            uint64_t e = now - p->time;
+            if (e >= left) {
+                uint64_t m = (e - left) / d + 1;
+                if (count + m >= cap) /* full */
+                    return rc_pf_fetch_n_slow(h, now, addr, thumb, ncost, ns, x);
+                count += (uint32_t)m;
+                left = (uint32_t)(left + m * d - e);
+            } else {
+                left -= (uint32_t)e;
+            }
+        }
+        if (!left || count >= cap)
+            return rc_pf_fetch_n_slow(h, now, addr, thumb, ncost, ns, x);
+        if (count < left) /* the first fetch that finds the buffer empty (rc_pf_fetch_n_slow) */
+            ie = count;
+        else if (d >= 2)
+            ie = count + 1 + (count - left) / (d - 1);
+        else
+            ie = ns;
+        if (ie >= ns) { /* all from the buffer */
+            uint32_t r = ns - 1 >= left ? (ns - 1 - left) / d + 1 : 0;
+            p->count = (uint8_t)(count + r - ns);
+            p->left = left + r * d - (ns - 1);
+            p->time = now + (ns - 1);
+            p->head = addr + ns * w;
+            return ns;
+        }
+        uint32_t r = ie >= left ? (ie - left) / d + 1 : 0;
+        c = left + r * d + (ns - ie - 1) * d;
+        p->count = 0;
     } else {
         uint32_t wait = 0;
         if (p->run) { /* rc_pf_advance, then the wait (rc_pf_stop from the cartridge) */
