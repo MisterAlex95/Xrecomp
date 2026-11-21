@@ -212,6 +212,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))
 
 #define MAX_ATTRS 16
+#define UBO_BLOCK (4096 + 32 + 128 + 48) /* upload_constants: one stage's uniform block */
 #define MAX_SAMPLERS 16
 #define MAX_TEXTURES 128
 #define MAX_REASONS 32
@@ -317,6 +318,10 @@ struct xenos_gl {
     int attached;             /* on the caller's current context (xenos_gl_attach): no EGL of our own */
     int ready;                /* the GL objects exist (destroy deletes them) */
     GLuint fbo, rfbo, tfbo_draw, rtex, vao, vbo, ibo, ubo[2], tfbo, vbtex[MAX_ATTRS];
+    /* what each stage's uniform buffer holds (upload_constants skips an equal block), whether it is valid, and
+     * whether indices 0 / 1 must be bound again (an attached context's owner draws between frames) */
+    uint8_t ubo_shadow[2][UBO_BLOCK];
+    int ubo_valid[2], ubo_rebind;
     GLuint dprog, dtex;       /* depth resolves: the pass that packs depth into RGBA8, its target */
     GLint dprog_at;
     int dtex_w, dtex_h, dprog_failed;
@@ -581,6 +586,12 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     g->glGenBuffers(1, &g->vbo);
     g->glGenBuffers(1, &g->ibo);
     g->glGenBuffers(2, g->ubo);
+    for (int stage = 0; stage < 2; stage++) { /* bound once here; upload_constants fills them */
+        g->glBindBuffer(GL_UNIFORM_BUFFER, g->ubo[stage]);
+        g->glBufferData(GL_UNIFORM_BUFFER, UBO_BLOCK, NULL, GL_STREAM_DRAW);
+        g->glBindBufferBase(GL_UNIFORM_BUFFER, (GLuint)stage, g->ubo[stage]);
+        g->ubo_valid[stage] = 0;
+    }
     g->glGenBuffers(1, &g->tfbo);
     g->frame = calloc((size_t)g->width * g->height, 4);
     for (int i = 0; i < 4; i++)
@@ -792,6 +803,7 @@ static void do_reset(xenos_gl *g)
     g->cur_ds = -1;
     g->nresolved = 0;
     g->epoch++;
+    g->ubo_valid[0] = g->ubo_valid[1] = 0;
 }
 
 void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames)
@@ -1784,9 +1796,13 @@ static void viewport_transform(const xenos_gl *g, const xenos_cp *cp, float vp[4
     vp[0] = 2.0f * sx / w, vp[1] = 2.0f * sy / h, vp[2] = 2.0f * ox / w - 1.0f, vp[3] = 2.0f * oy / h - 1.0f;
 }
 
+/* each stage's block: 256 float constants, the 8 boolean and 32 loop constants, alpha test, param_gen, viewport. Sent
+ * only when it differs from what the buffer holds (about 95 % of the stage blocks are equal to the last draw's);
+ * indices 0 / 1 stay bound to the two buffers from set-up (nothing else here binds uniform buffers), again after an
+ * attached context's owner has drawn. The shadow goes with a state load (do_reset) and a new context (setup). */
 static void upload_constants(xenos_gl *g, const xenos_cp *cp)
 {
-    uint8_t block[4096 + 32 + 128 + 48];
+    uint8_t block[UBO_BLOCK];
     float vp[4];
     viewport_transform(g, cp, vp);
     uint32_t cc = cp->regs[0x2202];
@@ -1795,6 +1811,11 @@ static void upload_constants(xenos_gl *g, const xenos_cp *cp)
      * (0, y) - 0.5: guest pixels from the top-left at any internal resolution */
     float inv = 1.0f / (float)g->scale;
     float pg[4] = {(cp->regs[0x2180] >> 18) & 1 ? (float)((cp->regs[0x2181] >> 8) & 0xFF) : -1.0f, 0.0f, inv, inv};
+    if (g->ubo_rebind) {
+        g->ubo_rebind = 0;
+        for (int stage = 0; stage < 2; stage++)
+            g->glBindBufferBase(GL_UNIFORM_BUFFER, (GLuint)stage, g->ubo[stage]);
+    }
     for (int stage = 0; stage < 2; stage++) {
         memcpy(block, &cp->regs[0x4000 + 0x400 * stage], 4096); /* float constants: register values are the bits */
         memcpy(block + 4096, &cp->regs[0x4900], 32);
@@ -1802,9 +1823,14 @@ static void upload_constants(xenos_gl *g, const xenos_cp *cp)
         memcpy(block + 4096 + 32 + 128, at, 16); /* RB_COLORCONTROL's alpha test, RB_ALPHA_REF */
         memcpy(block + 4096 + 32 + 128 + 16, pg, 16);
         memcpy(block + 4096 + 32 + 128 + 32, vp, 16);
+        if (g->ubo_valid[stage] && !memcmp(block, g->ubo_shadow[stage], sizeof block))
+            continue;
         g->glBindBuffer(GL_UNIFORM_BUFFER, g->ubo[stage]);
+        /* a new store, not glBufferSubData: the last draw may still read the old one (Sub stalls on it: ANGLE's Metal
+         * went from 2.1 to 6-11 ms of uploads per frame); the binding points keep the buffer name */
         g->glBufferData(GL_UNIFORM_BUFFER, sizeof block, block, GL_STREAM_DRAW);
-        g->glBindBufferBase(GL_UNIFORM_BUFFER, (GLuint)stage, g->ubo[stage]);
+        memcpy(g->ubo_shadow[stage], block, sizeof block);
+        g->ubo_valid[stage] = 1;
     }
 }
 
@@ -4252,4 +4278,5 @@ void xenos_gl_end_frame(xenos_gl *g)
     g->glActiveTexture(GL_TEXTURE0);
     g->glBindVertexArray(0);
     g->glUseProgram(0);
+    g->ubo_rebind = 1; /* the owner's drawing may bind its own uniform buffers; the buffers' contents stay ours */
 }
