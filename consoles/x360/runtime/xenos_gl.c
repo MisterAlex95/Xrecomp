@@ -223,6 +223,22 @@ typedef struct attr {
     int exp_adjust;
 } attr;
 
+/* a vertex buffer fetched at computed indices, converted once into its RGBA32F texture (bind_vertex_buffers): reused
+ * while the key matches and the source bytes hash the same */
+typedef struct vb_cached {
+    uint32_t base, c1;           /* the fetch constant's address and its size / swap mode dword */
+    attr a;                      /* the layout read from it (fetch_constant cleared: not part of the key) */
+    uint32_t count;              /* elements converted */
+    size_t bytes;                /* the size of its texture */
+    uint64_t hash;               /* span_hash of those bytes when converted */
+    uint32_t checked;            /* the epoch the hash was last confirmed in */
+    unsigned used;               /* LRU clock */
+    GLuint tex;
+} vb_cached;
+
+#define MAX_VB_CACHE 64              /* Adventure Time's dungeon scene cycles through more than 32 */
+#define VB_CACHE_BYTES (64u << 20)   /* their textures' total size, beyond which the oldest are deleted */
+
 typedef struct program {
     uint32_t vs_crc, ps_crc;
     int kind;
@@ -331,8 +347,8 @@ struct xenos_gl {
     int stex_w, stex_h, sprog_failed;
     int rtex_w, rtex_h;
     GLenum rtex_fmt;
-    void *scratch[3];         /* reused read-back buffers (scratch_buf): grown, never shrunk */
-    size_t scratch_cap[3];
+    void *scratch[6];         /* reused buffers (scratch_buf: SCRATCH_SLOTS): grown, never shrunk */
+    size_t scratch_cap[6];
     int width, height;        /* the default target (a surface with pitch 0 / no scissor) and the frame size */
     int scale;                /* internal resolution: every surface is scale x its guest size */
     int max_tex;
@@ -366,6 +382,9 @@ struct xenos_gl {
     xenos_gl_stats st;
     texture textures[MAX_TEXTURES];
     unsigned tex_clock;
+    vb_cached vbc[MAX_VB_CACHE]; /* computed-index vertex buffers already converted */
+    unsigned vbc_clock, vbc_draw; /* LRU clock; its value when the current draw started binding them */
+    size_t vbc_bytes;             /* the cached textures' total size */
     uint32_t epoch;           /* moves at each swap and each resolve: cached textures are checked again */
     uint32_t resolved[16];    /* destination bases resolved to since the last swap (the front buffer's source) */
     int nresolved;
@@ -761,6 +780,9 @@ void xenos_gl_destroy(xenos_gl *g)
         for (int i = 0; i < MAX_ATTRS; i++)
             if (g->vbtex[i])
                 g->glDeleteTextures(1, &g->vbtex[i]);
+        for (int i = 0; i < MAX_VB_CACHE; i++)
+            if (g->vbc[i].tex)
+                g->glDeleteTextures(1, &g->vbc[i].tex);
         if (g->rtex)
             g->glDeleteTextures(1, &g->rtex);
         if (g->dtex)
@@ -792,7 +814,7 @@ void xenos_gl_destroy(xenos_gl *g)
     free(g->progs);
     free(g->prog_hash);
     free(g->frame);
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < (int)(sizeof g->scratch / sizeof *g->scratch); i++)
         free(g->scratch[i]);
     free(g);
 }
@@ -1296,69 +1318,139 @@ static float component(uint32_t v, unsigned offset, unsigned width, const attr *
     return a->is_integer ? (float)u : (float)u / (float)mask;
 }
 
-/* one attribute of one vertex as a vec4 (Xenia's spirv_shader_translator_fetch.cc gives the packings: X in the low
- * bits); 0 when the format is not handled */
-static int fetch_vertex(const xenos_cp *cp, uint32_t base, uint32_t endian, const attr *a, uint32_t index,
-                        float out[4])
+/* a 32-bit float component run with the swap mode E known at compile time: the guest's words byte-swapped straight
+ * into floats (gpu_read's cp->mem path, unrolled) */
+#define FETCH_F32(E)                                                                                                   \
+    for (uint32_t v = 0; v < count; v++, at += step) {                                                                 \
+        float *o = out + (size_t)v * ostride;                                                                          \
+        o[0] = o[1] = o[2] = 0.0f;                                                                                     \
+        o[3] = 1.0f;                                                                                                   \
+        for (int i = 0; i < n; i++) {                                                                                  \
+            uint32_t le;                                                                                               \
+            memcpy(&le, cp->mem + ((at + 4 * (uint32_t)i) & 0x1FFFFFFFu), 4);                                          \
+            le = gpu_swap(le, E);                                                                                      \
+            memcpy(&o[i], &le, 4);                                                                                     \
+        }                                                                                                              \
+    }
+
+/* one attribute of `count` vertices from index `first`, each as a vec4 `ostride` floats after the previous one
+ * (Xenia's spirv_shader_translator_fetch.cc gives the packings: X in the low bits); 0 when the format is not
+ * handled. The format is chosen once, then one loop runs over the vertices. */
+static int fetch_vertices(const xenos_cp *cp, uint32_t base, uint32_t endian, const attr *a, uint32_t first,
+                          uint32_t count, float *out, size_t ostride)
 {
-    uint32_t at = base + 4 * (a->offset + index * a->stride);
-    out[0] = out[1] = out[2] = 0.0f;
-    out[3] = 1.0f;
-    uint32_t w0 = gpu_read(cp, at, endian);
+    uint32_t step = 4 * a->stride, at = base + 4 * (a->offset + first * a->stride);
+    float *o;
     switch (a->format) {
     case 36: /* 32_FLOAT */
     case 37: /* 32_32_FLOAT */
     case 57: /* 32_32_32_FLOAT */
     case 38: { /* 32_32_32_32_FLOAT */
         int n = a->format == 36 ? 1 : a->format == 37 ? 2 : a->format == 57 ? 3 : 4;
-        for (int i = 0; i < n; i++)
-            out[i] = as_float(gpu_read(cp, at + 4 * i, endian));
-        break;
-    }
-    case 6: /* 8_8_8_8 */
-        for (int i = 0; i < 4; i++)
-            out[i] = component(w0, 8 * i, 8, a);
-        break;
-    case 7: /* 2_10_10_10 */
-        for (int i = 0; i < 3; i++)
-            out[i] = component(w0, 10 * i, 10, a);
-        out[3] = component(w0, 30, 2, a);
-        break;
-    case 16: /* 10_11_11: 11, 11, 10 bits from X */
-        out[0] = component(w0, 0, 11, a), out[1] = component(w0, 11, 11, a), out[2] = component(w0, 22, 10, a);
-        break;
-    case 17: /* 11_11_10: 10, 11, 11 bits from X */
-        out[0] = component(w0, 0, 10, a), out[1] = component(w0, 10, 11, a), out[2] = component(w0, 21, 11, a);
-        break;
-    case 25: /* 16_16 */
-    case 26: { /* 16_16_16_16 */
-        int n = a->format == 25 ? 2 : 4;
-        for (int i = 0; i < n; i++)
-            out[i] = component(i < 2 ? w0 : gpu_read(cp, at + 4, endian), 16 * (i & 1), 16, a);
-        break;
-    }
-    case 31: /* 16_16_FLOAT */
-    case 32: { /* 16_16_16_16_FLOAT */
-        int n = a->format == 31 ? 2 : 4;
-        for (int i = 0; i < n; i++)
-            out[i] = half_to_float(((i < 2 ? w0 : gpu_read(cp, at + 4, endian)) >> (16 * (i & 1))) & 0xFFFF);
+        if (cp->mem) {
+            switch (endian & 3) {
+            case 0: FETCH_F32(0) break;
+            case 1: FETCH_F32(1) break;
+            case 2: FETCH_F32(2) break;
+            default: FETCH_F32(3) break;
+            }
+        } else {
+            for (uint32_t v = 0; v < count; v++, at += step) {
+                o = out + (size_t)v * ostride;
+                o[0] = o[1] = o[2] = 0.0f;
+                o[3] = 1.0f;
+                for (int i = 0; i < n; i++)
+                    o[i] = as_float(gpu_read(cp, at + 4 * (uint32_t)i, endian));
+            }
+        }
         return 1; /* exp_adjust does not apply to floats */
     }
+    case 6: /* 8_8_8_8 */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian);
+            o = out + (size_t)v * ostride;
+            for (int i = 0; i < 4; i++)
+                o[i] = component(w0, 8 * i, 8, a);
+        }
+        break;
+    case 7: /* 2_10_10_10 */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian);
+            o = out + (size_t)v * ostride;
+            for (int i = 0; i < 3; i++)
+                o[i] = component(w0, 10 * i, 10, a);
+            o[3] = component(w0, 30, 2, a);
+        }
+        break;
+    case 16: /* 10_11_11: 11, 11, 10 bits from X */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian);
+            o = out + (size_t)v * ostride;
+            o[0] = component(w0, 0, 11, a), o[1] = component(w0, 11, 11, a), o[2] = component(w0, 22, 10, a);
+            o[3] = 1.0f;
+        }
+        break;
+    case 17: /* 11_11_10: 10, 11, 11 bits from X */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian);
+            o = out + (size_t)v * ostride;
+            o[0] = component(w0, 0, 10, a), o[1] = component(w0, 10, 11, a), o[2] = component(w0, 21, 11, a);
+            o[3] = 1.0f;
+        }
+        break;
+    case 25: /* 16_16 */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian);
+            o = out + (size_t)v * ostride;
+            o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+            o[2] = 0.0f, o[3] = 1.0f;
+        }
+        break;
+    case 26: /* 16_16_16_16 */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian), w1 = gpu_read(cp, at + 4, endian);
+            o = out + (size_t)v * ostride;
+            o[0] = component(w0, 0, 16, a), o[1] = component(w0, 16, 16, a);
+            o[2] = component(w1, 0, 16, a), o[3] = component(w1, 16, 16, a);
+        }
+        break;
+    case 31: /* 16_16_FLOAT */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian);
+            o = out + (size_t)v * ostride;
+            o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+            o[2] = 0.0f, o[3] = 1.0f;
+        }
+        return 1; /* exp_adjust does not apply to floats */
+    case 32: /* 16_16_16_16_FLOAT */
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            uint32_t w0 = gpu_read(cp, at, endian), w1 = gpu_read(cp, at + 4, endian);
+            o = out + (size_t)v * ostride;
+            o[0] = half_to_float(w0 & 0xFFFF), o[1] = half_to_float(w0 >> 16);
+            o[2] = half_to_float(w1 & 0xFFFF), o[3] = half_to_float(w1 >> 16);
+        }
+        return 1;
     case 33: /* 32 */
     case 34: /* 32_32 */
     case 35: { /* 32_32_32_32 */
         int n = a->format == 33 ? 1 : a->format == 34 ? 2 : 4;
-        for (int i = 0; i < n; i++)
-            out[i] = component(gpu_read(cp, at + 4 * i, endian), 0, 32, a);
+        for (uint32_t v = 0; v < count; v++, at += step) {
+            o = out + (size_t)v * ostride;
+            o[0] = o[1] = o[2] = 0.0f;
+            o[3] = 1.0f;
+            for (int i = 0; i < n; i++)
+                o[i] = component(gpu_read(cp, at + 4 * (uint32_t)i, endian), 0, 32, a);
+        }
         break;
     }
     default:
         return 0;
     }
-    if (a->exp_adjust && a->format != 36 && a->format != 37 && a->format != 57 && a->format != 38) {
+    if (a->exp_adjust) {
         float k = ldexpf(1.0f, a->exp_adjust); /* -32..31: no shift of 32 */
-        for (int i = 0; i < 4; i++)
-            out[i] *= k;
+        for (uint32_t v = 0; v < count; v++)
+            for (int i = 0; i < 4; i++)
+                out[(size_t)v * ostride + i] *= k;
     }
     return 1;
 }
@@ -2918,10 +3010,11 @@ static int is_float_fmt(GLenum ifmt)
     return ifmt == GL_RGBA16F || ifmt == GL_RG16F || ifmt == GL_R32F || ifmt == GL_RG32F || ifmt == GL_RGBA32F;
 }
 
-/* Reused read-back buffers (WP-1): resolves, their depth and stencil, and the frame read back at the swap take them
- * rather than a malloc / free pair each time (at 1080p a fresh 33 MB mapping: page faults, then an munmap, per
+/* Reused buffers (WP-1, WP-5): resolves, their depth and stencil, the frame read back at the swap, and each draw's
+ * indices and converted vertices take them rather than a malloc / free pair each time (at 1080p a fresh 33 MB mapping: page faults, then an munmap, per
  * resolve on Android). Grown, never shrunk; freed in xenos_gl_destroy. NULL when out of memory. */
-enum { SCRATCH_PIXELS, SCRATCH_STENCIL, SCRATCH_ROWS };
+enum { SCRATCH_PIXELS, SCRATCH_STENCIL, SCRATCH_ROWS, SCRATCH_INDICES, SCRATCH_VERTICES, SCRATCH_VBTEX, SCRATCH_SLOTS };
+_Static_assert(SCRATCH_SLOTS == sizeof ((xenos_gl *)0)->scratch / sizeof(void *), "xenos_gl.scratch: one per slot");
 static void *scratch_buf(xenos_gl *g, int slot, size_t bytes)
 {
     if (g->scratch_cap[slot] < bytes) {
@@ -4022,11 +4115,90 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
     }
 }
 
+/* one vertex buffer of a computed-index fetch converted to vec4s into the texture bound on the active unit;
+ * 0 when its format is not handled */
+static int upload_vertex_buffer(xenos_gl *g, const xenos_cp *cp, const attr *at, uint32_t base, uint32_t endian,
+                                uint32_t count)
+{
+    uint32_t rows = (count + 1023) / 1024, wid = count < 1024 ? count : 1024;
+    size_t total = (size_t)wid * rows * 4;
+    float *buf = scratch_buf(g, SCRATCH_VBTEX, total * sizeof(float));
+    if (!buf || !fetch_vertices(cp, base, endian, at, 0, count, buf, 4))
+        return 0;
+    g->st.vertices_fetched += count;
+    memset(buf + (size_t)count * 4, 0, (total - (size_t)count * 4) * sizeof(float)); /* the last row's tail */
+    g->glTexImage2D(GL_TEXTURE_2D, 0, (GLint)GL_RGBA32F, (GLsizei)wid, (GLsizei)rows, 0, GL_RGBA, GL_FLOAT, buf);
+    g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    return 1;
+}
+
+/* the cached texture of a computed-index vertex buffer, converted again only when its bytes changed. As for textures,
+ * the source is hashed again once per epoch (each swap, resolve and memory export), not at every draw: hashing at
+ * every use cost 6 ms a frame on the Adventure Time dungeon scene (130 uses of buffers of about 1 MB). A title that
+ * rewrites such a buffer between two draws with no swap or resolve between them would draw the old contents.
+ * *fresh: the texture must be (re)filled. */
+static vb_cached *vertex_buffer_cached(xenos_gl *g, const xenos_cp *cp, const attr *at, uint32_t base, uint32_t c1,
+                                       uint32_t count, uint32_t span, int *fresh)
+{
+    attr key = *at;
+    key.fetch_constant = 0;
+    vb_cached *hit = NULL, *victim = &g->vbc[0];
+    for (int i = 0; i < MAX_VB_CACHE; i++) {
+        vb_cached *c = &g->vbc[i];
+        if (c->tex && c->base == base && c->c1 == c1 && c->count == count && !memcmp(&c->a, &key, sizeof key)) {
+            hit = c;
+            break;
+        }
+        if (!c->tex || (victim->tex && c->used < victim->used))
+            victim = c;
+    }
+    *fresh = 0;
+    if (hit) {
+        if (hit->checked != g->epoch) {
+            uint64_t h = span_hash(cp->mem + base, span, 0);
+            if (h != hit->hash)
+                hit->hash = h, *fresh = 1;
+            hit->checked = g->epoch;
+        }
+        hit->used = ++g->vbc_clock;
+        return hit;
+    }
+    /* room under the size budget: the oldest go, but none bound for this draw already */
+    size_t bytes = (size_t)(count < 1024 ? count : 1024) * ((count + 1023) / 1024) * 16;
+    g->vbc_bytes -= victim->bytes, victim->bytes = 0;
+    while (g->vbc_bytes + bytes > VB_CACHE_BYTES) {
+        vb_cached *old = NULL;
+        for (int i = 0; i < MAX_VB_CACHE; i++) {
+            vb_cached *c = &g->vbc[i];
+            if (c->tex && c != victim && c->used <= g->vbc_draw && (!old || c->used < old->used))
+                old = c;
+        }
+        if (!old)
+            break;
+        g->vbc_bytes -= old->bytes;
+        g->glDeleteTextures(1, &old->tex);
+        memset(old, 0, sizeof *old);
+    }
+    if (!victim->tex)
+        g->glGenTextures(1, &victim->tex);
+    victim->bytes = bytes, g->vbc_bytes += bytes;
+    victim->base = base, victim->c1 = c1, victim->a = key, victim->count = count;
+    victim->hash = span_hash(cp->mem + base, span, 0);
+    victim->checked = g->epoch;
+    victim->used = ++g->vbc_clock;
+    *fresh = 1;
+    return victim;
+}
+
 /* the vertex buffers a program fetches at computed indices: each whole buffer (the fetch constant's size in dwords
  * over the stride) converted to vec4s in an RGBA32F texture of 1024 elements a row, on the units after the
- * samplers. 0 when a format is not handled. */
+ * samplers. With the guest memory mapped (cp->mem) the textures are cached by address and layout and reused while
+ * the source bytes do not change. 0 when a format is not handled. */
 static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p)
 {
+    g->vbc_draw = g->vbc_clock;
     for (int i = 0; i < p->nvb; i++) {
         const attr *at = &p->vbufs[i];
         uint32_t c0 = cp->regs[0x4800 + 2 * at->fetch_constant], c1 = cp->regs[0x4800 + 2 * at->fetch_constant + 1];
@@ -4036,25 +4208,30 @@ static int bind_vertex_buffers(xenos_gl *g, const xenos_cp *cp, const program *p
             count = 1;
         if (count > (1u << 20))
             count = 1u << 20;
-        uint32_t rows = (count + 1023) / 1024, wid = count < 1024 ? count : 1024;
-        float *buf = calloc((size_t)wid * rows, 16);
-        if (!buf)
-            return 0;
-        g->st.vertices_fetched += count;
-        for (uint32_t v = 0; v < count; v++)
-            if (!fetch_vertex(cp, c0 & ~3u, c1 & 3, at, v, &buf[4 * v])) {
-                free(buf);
+        uint32_t base = (c0 & ~3u) & 0x1FFFFFFFu;
+        /* the bytes the conversion reads: up to 4 dwords from the last element's start */
+        uint64_t span = 4 * ((uint64_t)at->offset + (uint64_t)(count - 1) * at->stride) + 16;
+        g->glActiveTexture(GL_TEXTURE0 + (GLenum)(p->nsamplers + i));
+        if (cp->mem && (c0 & ~3u) < 0x20000000u && base + span <= 0x20000000u) {
+            int fresh;
+            vb_cached *c = vertex_buffer_cached(g, cp, at, base, c1, count, (uint32_t)span, &fresh);
+            g->glBindTexture(GL_TEXTURE_2D, c->tex);
+            if (fresh && !upload_vertex_buffer(g, cp, at, c0 & ~3u, c1 & 3, count)) {
+                g->vbc_bytes -= c->bytes;
+                g->glDeleteTextures(1, &c->tex);
+                memset(c, 0, sizeof *c);
+                g->glActiveTexture(GL_TEXTURE0);
                 return 0;
             }
-        if (!g->vbtex[i])
-            g->glGenTextures(1, &g->vbtex[i]);
-        g->glActiveTexture(GL_TEXTURE0 + (GLenum)(p->nsamplers + i));
-        g->glBindTexture(GL_TEXTURE_2D, g->vbtex[i]);
-        g->glTexImage2D(GL_TEXTURE_2D, 0, (GLint)GL_RGBA32F, (GLsizei)wid, (GLsizei)rows, 0, GL_RGBA, GL_FLOAT, buf);
-        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-        free(buf);
+        } else {
+            if (!g->vbtex[i])
+                g->glGenTextures(1, &g->vbtex[i]);
+            g->glBindTexture(GL_TEXTURE_2D, g->vbtex[i]);
+            if (!upload_vertex_buffer(g, cp, at, c0 & ~3u, c1 & 3, count)) {
+                g->glActiveTexture(GL_TEXTURE0);
+                return 0;
+            }
+        }
         g->st.computed_fetches++;
     }
     g->glActiveTexture(GL_TEXTURE0);
@@ -4223,7 +4400,8 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         return;
     }
     /* indices: from the DMA buffer or the packet (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
-    uint32_t n = d->num_indices, *idx = NULL, max_index = n - 1;
+    uint32_t n = d->num_indices, *idx = NULL, max_index = n - 1, min_index = 0;
+    uint32_t *conv = NULL; /* convert_indices' array (idx then points at it), freed at the end */
     int convert = d->prim_type >= 12 && d->prim_type <= 15;
     /* VGT_INDX_OFFSET is added to every index (Direct3D's base vertex); with PA_SU_SC_MODE_CNTL's
      * multi_prim_ib_ena, VGT_MULTI_PRIM_IB_RESET_INDX cuts the strips, fans, loops and polygons */
@@ -4232,13 +4410,13 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     uint32_t reset_index = cp->regs[0x2103] & (d->index_size ? 0xFFFFFFFFu : 0xFFFFu);
     int restarted = 0;
     if (d->source_select != 2 || index_offset || convert) {
-        idx = malloc(4 * (size_t)n);
+        idx = scratch_buf(g, SCRATCH_INDICES, 4 * (size_t)n);
         if (!idx) {
             unsupported(g, "out of memory");
             return;
         }
         uint32_t endian = cp->regs[XENOS_REG_VGT_DMA_SIZE] >> 30;
-        max_index = 0;
+        max_index = 0, min_index = 0xFFFFFFFFu;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t v, at = d->index_size ? i : i / 2, w = 0;
             if (d->source_select == 0)
@@ -4258,48 +4436,50 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
             idx[i] = v;
             if (v > max_index)
                 max_index = v;
+            if (v < min_index)
+                min_index = v;
         }
+        if (min_index > max_index) /* only reset indices */
+            min_index = max_index;
         if (max_index > 0xFFFFF) {
-            free(idx);
             unsupported(g, "vertex index past 2^20");
             return;
         }
     }
     if (convert) {
-        uint32_t m = 0, *t = convert_indices(d->prim_type, idx, n, &m);
-        free(idx);
-        idx = t;
-        if (!t || !m) {
-            free(idx);
-            unsupported(g, t ? "primitive with too few vertices" : "out of memory");
+        uint32_t m = 0;
+        conv = convert_indices(d->prim_type, idx, n, &m);
+        idx = conv;
+        if (!conv || !m) {
+            free(conv);
+            unsupported(g, conv ? "primitive with too few vertices" : "out of memory");
             return;
         }
         n = m;
         restarted = 0; /* every run is its own primitives now */
     }
-    /* vertices: every attribute converted to vec4, interleaved */
-    uint32_t nv = max_index + 1, na = (uint32_t)p->nattr;
+    /* vertices: every attribute converted to vec4, interleaved; only those from min_index to max_index, placed at
+     * their own index in the vertex buffer (the indices and gl_VertexID, which shaders read as r0.x, stay as they
+     * are: the buffer's start is left unwritten) */
+    uint32_t nv = max_index + 1 - min_index, na = (uint32_t)p->nattr;
     g->st.vertices_fetched += na ? nv : 0;
-    float *vb = na ? malloc((size_t)nv * na * 16) : NULL;
+    float *vb = na ? scratch_buf(g, SCRATCH_VERTICES, (size_t)nv * na * 16) : NULL;
     if (na && !vb) {
-        free(idx);
+        free(conv);
         unsupported(g, "out of memory");
         return;
     }
     for (uint32_t a = 0; a < na; a++) {
         const attr *at = &p->attrs[a];
         uint32_t c0 = cp->regs[0x4800 + 2 * at->fetch_constant], c1 = cp->regs[0x4800 + 2 * at->fetch_constant + 1];
-        for (uint32_t v = 0; v < nv; v++)
-            if (!fetch_vertex(cp, c0 & ~3u, c1 & 3, at, v, &vb[(v * na + a) * 4])) {
-                free(vb);
-                free(idx);
-                unsupported(g, "vertex format");
-                return;
-            }
+        if (!fetch_vertices(cp, c0 & ~3u, c1 & 3, at, min_index, nv, vb + 4 * a, 4 * (size_t)na)) {
+            free(conv);
+            unsupported(g, "vertex format");
+            return;
+        }
     }
     if (!bind_targets(g, cp, (rp ? rp : p)->outputs)) { /* the eDRAM surfaces; the host viewport over them */
-        free(vb);
-        free(idx);
+        free(conv);
         unsupported(g, "no complete framebuffer for the render targets");
         return;
     }
@@ -4308,14 +4488,19 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     apply_state(g, cp, d->prim_type);
     bind_textures(g, cp, p);
     if (p->nvb && !bind_vertex_buffers(g, cp, p)) {
-        free(vb);
-        free(idx);
+        free(conv);
         unsupported(g, "vertex format of a computed-index fetch");
         return;
     }
     g->glBindVertexArray(g->vao);
     g->glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
-    g->glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nv * na * 16, vb, GL_STREAM_DRAW);
+    if (!min_index) {
+        g->glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nv * na * 16, vb, GL_STREAM_DRAW);
+    } else {
+        g->glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(max_index + 1) * na * 16, NULL, GL_STREAM_DRAW);
+        if (na)
+            g->glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)min_index * na * 16, (GLsizeiptr)nv * na * 16, vb);
+    }
     for (uint32_t a = 0; a < na; a++)
         if (p->loc[a] >= 0) {
             g->glEnableVertexAttribArray((GLuint)p->loc[a]);
@@ -4344,8 +4529,7 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         if (p->loc[a] >= 0)
             g->glDisableVertexAttribArray((GLuint)p->loc[a]);
     g->st.drawn++;
-    free(vb);
-    free(idx);
+    free(conv);
 }
 
 /* the frame texture: fw x fh guest pixels at the internal resolution, in a format a blit from ifmt can write */
