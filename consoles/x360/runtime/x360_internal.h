@@ -67,6 +67,7 @@ typedef struct x360_heap {
     uint32_t pages;
     uint32_t *len;             /* per page: allocation length in pages at its first page, 0 elsewhere / free */
     uint8_t *used;
+    uint32_t nused;            /* pages with used set: what MmQueryStatistics reports, kept up to date (no scan) */
     int physical;              /* backed by the physical memfd (always RW), not by mprotect */
 } x360_heap;
 

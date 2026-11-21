@@ -237,6 +237,7 @@ static void sec_heaps(x360_machine *x, io *s)
         }
         memset(h->len, 0, h->pages * sizeof *h->len);
         memset(h->used, 0, h->pages);
+        h->nused = 0;
         for (;;) {
             uint32_t first = 0, n = 0;
             io_u32(s, &first);
@@ -250,6 +251,9 @@ static void sec_heaps(x360_machine *x, io *s)
             h->len[first] = n;
             memset(h->used + first, 1, n);
         }
+        h->nused = 0; /* runs may overlap in a damaged state: count what is set */
+        for (uint32_t p = 0; p < h->pages; p++)
+            h->nused += h->used[p];
     }
 }
 

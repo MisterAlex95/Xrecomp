@@ -22,8 +22,17 @@
 #define XV_VSCR_SAT 0x00000001u
 
 /* Denormal lanes to a zero of the same sign while VSCR[NJ] is set. */
-static inline xe_v128 xv_daz(uint32_t vscr, xe_v128 v)
+XV_HOT xe_v128 xv_daz(uint32_t vscr, xe_v128 v)
 {
+#if XV_VEC
+    if (vscr & XV_VSCR_NJ) { /* every float vector op's inputs and result: no branch per lane */
+        xv_u32x4 x;
+        memcpy(&x, &v, 16);
+        x &= ~((xv_u32x4)((x & 0x7F800000u) == 0) & 0x7FFFFFFFu);
+        memcpy(&v, &x, 16);
+    }
+    return v;
+#endif
     if (vscr & XV_VSCR_NJ)
         for (int k = 0; k < 4; k++)
             if ((v.u32[k] & 0x7F800000u) == 0)
@@ -89,6 +98,30 @@ static inline int64_t xv_sat(int64_t v, int64_t lo, int64_t hi, uint32_t *vscr)
 #define XV_SW(x) ((int64_t)(int32_t)(x))
 
 /* Element-wise ops on bytes (B), halfwords (H) and words (W): `expr` sees x (from a) and y (from b), unsigned. */
+#if !defined(XV_SCALAR)
+/* Lane-wise ops pair lane k of a with lane k of b whatever the order of the lanes: the host-order u8 / u16 members
+ * (one load and one store per lane, where the element accessors shift and mask whole words). */
+#define XV_EB(name, expr)                                                                                              \
+    static inline xe_v128 name(xe_v128 a, xe_v128 b)                                                                   \
+    {                                                                                                                  \
+        xe_v128 r;                                                                                                     \
+        for (int i = 0; i < 16; i++) {                                                                                 \
+            uint32_t x = a.u8[i], y = b.u8[i];                                                                         \
+            r.u8[i] = (uint8_t)(expr);                                                                                 \
+        }                                                                                                              \
+        return r;                                                                                                      \
+    }
+#define XV_EH(name, expr)                                                                                              \
+    static inline xe_v128 name(xe_v128 a, xe_v128 b)                                                                   \
+    {                                                                                                                  \
+        xe_v128 r;                                                                                                     \
+        for (int i = 0; i < 8; i++) {                                                                                  \
+            uint32_t x = a.u16[i], y = b.u16[i];                                                                       \
+            r.u16[i] = (uint16_t)(expr);                                                                               \
+        }                                                                                                              \
+        return r;                                                                                                      \
+    }
+#else
 #define XV_EB(name, expr)                                                                                              \
     static inline xe_v128 name(xe_v128 a, xe_v128 b)                                                                   \
     {                                                                                                                  \
@@ -109,6 +142,7 @@ static inline int64_t xv_sat(int64_t v, int64_t lo, int64_t hi, uint32_t *vscr)
         }                                                                                                              \
         return r;                                                                                                      \
     }
+#endif
 #define XV_EW(name, expr)                                                                                              \
     static inline xe_v128 name(xe_v128 a, xe_v128 b)                                                                   \
     {                                                                                                                  \
@@ -120,6 +154,28 @@ static inline int64_t xv_sat(int64_t v, int64_t lo, int64_t hi, uint32_t *vscr)
         return r;                                                                                                      \
     }
 /* Saturating versions: `expr` is an int64_t, clamped to [lo, hi] (VSCR[SAT] set when it is). */
+#if !defined(XV_SCALAR)
+#define XV_SATB(name, expr, lo, hi)                                                                                    \
+    static inline xe_v128 name(xe_v128 a, xe_v128 b, uint32_t *vscr)                                                   \
+    {                                                                                                                  \
+        xe_v128 r;                                                                                                     \
+        for (int i = 0; i < 16; i++) {                                                                                 \
+            uint32_t x = a.u8[i], y = b.u8[i];                                                                         \
+            r.u8[i] = (uint8_t)xv_sat((expr), (lo), (hi), vscr);                                                       \
+        }                                                                                                              \
+        return r;                                                                                                      \
+    }
+#define XV_SATH(name, expr, lo, hi)                                                                                    \
+    static inline xe_v128 name(xe_v128 a, xe_v128 b, uint32_t *vscr)                                                   \
+    {                                                                                                                  \
+        xe_v128 r;                                                                                                     \
+        for (int i = 0; i < 8; i++) {                                                                                  \
+            uint32_t x = a.u16[i], y = b.u16[i];                                                                       \
+            r.u16[i] = (uint16_t)xv_sat((expr), (lo), (hi), vscr);                                                     \
+        }                                                                                                              \
+        return r;                                                                                                      \
+    }
+#else
 #define XV_SATB(name, expr, lo, hi)                                                                                    \
     static inline xe_v128 name(xe_v128 a, xe_v128 b, uint32_t *vscr)                                                   \
     {                                                                                                                  \
@@ -140,6 +196,7 @@ static inline int64_t xv_sat(int64_t v, int64_t lo, int64_t hi, uint32_t *vscr)
         }                                                                                                              \
         return r;                                                                                                      \
     }
+#endif
 #define XV_SATW(name, expr, lo, hi)                                                                                    \
     static inline xe_v128 name(xe_v128 a, xe_v128 b, uint32_t *vscr)                                                   \
     {                                                                                                                  \
@@ -151,21 +208,33 @@ static inline int64_t xv_sat(int64_t v, int64_t lo, int64_t hi, uint32_t *vscr)
         return r;                                                                                                      \
     }
 
+#if !XV_VEC
 XV_EB(xv_addubm, x + y)
+#endif
+#if !XV_VEC
 XV_EH(xv_adduhm, x + y)
+#endif
+#if !XV_VEC
 XV_EB(xv_sububm, x - y)
+#endif
+#if !XV_VEC
 XV_EH(xv_subuhm, x - y)
+#endif
 XV_SATB(xv_addubs, (int64_t)x + y, 0, 255)
 XV_SATH(xv_adduhs, (int64_t)x + y, 0, 65535)
 XV_SATW(xv_adduws, (int64_t)x + y, 0, 4294967295LL)
 XV_SATB(xv_addsbs, XV_SB(x) + XV_SB(y), -128, 127)
+#if !XV_VEC
 XV_SATH(xv_addshs, XV_SH(x) + XV_SH(y), -32768, 32767)
+#endif
 XV_SATW(xv_addsws, XV_SW(x) + XV_SW(y), INT32_MIN, INT32_MAX)
 XV_SATB(xv_sububs, (int64_t)x - y, 0, 255)
 XV_SATH(xv_subuhs, (int64_t)x - y, 0, 65535)
 XV_SATW(xv_subuws, (int64_t)x - y, 0, 4294967295LL)
 XV_SATB(xv_subsbs, XV_SB(x) - XV_SB(y), -128, 127)
+#if !XV_VEC
 XV_SATH(xv_subshs, XV_SH(x) - XV_SH(y), -32768, 32767)
+#endif
 XV_SATW(xv_subsws, XV_SW(x) - XV_SW(y), INT32_MIN, INT32_MAX)
 XV_EW(xv_addcuw, ((uint64_t)x + y) >> 32)
 XV_EW(xv_subcuw, x >= y)
@@ -188,17 +257,98 @@ XV_EW(xv_avgsw, (XV_SW(x) + XV_SW(y) + 1) >> 1)
 XV_EB(xv_rlb, ((x << (y & 7)) | (x >> ((8 - (y & 7)) & 7))) & 0xFF)
 XV_EH(xv_rlh, ((x << (y & 15)) | (x >> ((16 - (y & 15)) & 15))) & 0xFFFF)
 XV_EB(xv_slb, x << (y & 7))
+#if !XV_VEC
 XV_EH(xv_slh, x << (y & 15))
+#endif
 XV_EB(xv_srb, x >> (y & 7))
+#if !XV_VEC
 XV_EH(xv_srh, x >> (y & 15))
+#endif
 XV_EB(xv_srab, XV_SB(x) >> (y & 7))
+#if !XV_VEC
 XV_EH(xv_srah, XV_SH(x) >> (y & 15))
+#endif
+#if !XV_VEC
 XV_EB(xv_cmpequb, x == y ? 0xFF : 0)
+#endif
+#if !XV_VEC
 XV_EH(xv_cmpequh, x == y ? 0xFFFF : 0)
+#endif
 XV_EB(xv_cmpgtub, x > y ? 0xFF : 0)
 XV_EH(xv_cmpgtuh, x > y ? 0xFFFF : 0)
 XV_EB(xv_cmpgtsb, XV_SB(x) > XV_SB(y) ? 0xFF : 0)
 XV_EH(xv_cmpgtsh, XV_SH(x) > XV_SH(y) ? 0xFFFF : 0)
+
+#if XV_VEC
+/* The hottest lane-wise ops (Warhammer's movie decoder: vslh, vaddshs, vsubuhm, vsrah ... half of the host CPU in
+ * the lane loops) as GCC / clang vector ops on locals (memcpy in and out: xe_v128 keeps its layout): SSE2 / NEON
+ * instructions inline in the lifted code at any -O level. Same results and VSCR[SAT] as the loops above
+ * (x360_vmx_ref checks them against the plain C, -DXV_SCALAR). */
+#define XV_VBIN(name, T, op)                                                                                           \
+    XV_HOT xe_v128 name(xe_v128 a, xe_v128 b)                                                                          \
+    {                                                                                                                  \
+        T x, y;                                                                                                        \
+        memcpy(&x, &a, 16);                                                                                            \
+        memcpy(&y, &b, 16);                                                                                            \
+        x = op;                                                                                                        \
+        memcpy(&a, &x, 16);                                                                                            \
+        return a;                                                                                                      \
+    }
+XV_VBIN(xv_addubm, xv_u8x16, x + y)
+XV_VBIN(xv_adduhm, xv_u16x8, x + y)
+XV_VBIN(xv_sububm, xv_u8x16, x - y)
+XV_VBIN(xv_subuhm, xv_u16x8, x - y)
+XV_VBIN(xv_slh, xv_u16x8, x << (y & 15))
+XV_VBIN(xv_srh, xv_u16x8, x >> (y & 15))
+XV_VBIN(xv_cmpequb, xv_u8x16, (xv_u8x16)(x == y))
+XV_VBIN(xv_cmpequh, xv_u16x8, (xv_u16x8)(x == y))
+
+XV_HOT xe_v128 xv_srah(xe_v128 a, xe_v128 b)
+{
+    xv_s16x8 x;
+    xv_u16x8 y;
+    memcpy(&x, &a, 16);
+    memcpy(&y, &b, 16);
+    x = x >> (xv_s16x8)(y & 15); /* arithmetic: signed lanes */
+    memcpy(&a, &x, 16);
+    return a;
+}
+
+/* signed halfword sums / differences, saturated: s wrapped, overflow where the signs say s cannot be the result
+ * (a + b: both operands' signs differ from s's; a - b: a's differs from b's and from s's), clamped toward a's sign */
+XV_HOT xe_v128 xv_sat_h(xv_s16x8 a, xv_s16x8 s, xv_s16x8 ovf, uint32_t *vscr)
+{
+    const xv_s16x8 max = {0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF};
+    xv_s16x8 lim = (a >> 15) ^ max;
+    ovf = ovf >> 15; /* all ones where it overflowed */
+    s = (s & ~ovf) | (lim & ovf);
+    uint64_t o[2];
+    memcpy(o, &ovf, 16);
+    if (o[0] | o[1])
+        *vscr |= XV_VSCR_SAT;
+    xe_v128 r;
+    memcpy(&r, &s, 16);
+    return r;
+}
+
+XV_HOT xe_v128 xv_addshs(xe_v128 a, xe_v128 b, uint32_t *vscr)
+{
+    xv_u16x8 x, y;
+    memcpy(&x, &a, 16);
+    memcpy(&y, &b, 16);
+    xv_s16x8 sa = (xv_s16x8)x, sb = (xv_s16x8)y, s = (xv_s16x8)(x + y);
+    return xv_sat_h(sa, s, (sa ^ s) & (sb ^ s), vscr);
+}
+
+XV_HOT xe_v128 xv_subshs(xe_v128 a, xe_v128 b, uint32_t *vscr)
+{
+    xv_u16x8 x, y;
+    memcpy(&x, &a, 16);
+    memcpy(&y, &b, 16);
+    xv_s16x8 sa = (xv_s16x8)x, sb = (xv_s16x8)y, s = (xv_s16x8)(x - y);
+    return xv_sat_h(sa, s, (sa ^ sb) & (sa ^ s), vscr);
+}
+#endif
 
 /* vsl / vsr: the whole register shifted by (vB byte 15 & 7) bits. */
 static inline xe_v128 xv_sl(xe_v128 a, xe_v128 b)
@@ -222,6 +372,14 @@ static inline xe_v128 xv_sr(xe_v128 a, xe_v128 b)
 /* merges of bytes / halfwords: the high (lo = 0) or low (lo = 1) halves of a and b interleaved */
 static inline xe_v128 xv_mrgb(xe_v128 a, xe_v128 b, int lo)
 {
+#if XV_LE
+    xe_v128 m;
+    for (int i = 0; i < 8; i++) {
+        m.u8[(2 * i) ^ 3] = a.u8[(i + 8 * lo) ^ 3];
+        m.u8[(2 * i + 1) ^ 3] = b.u8[(i + 8 * lo) ^ 3];
+    }
+    return m;
+#endif
     xe_v128 r = a;
     for (int i = 0; i < 8; i++) {
         xv_pb(&r, 2 * i, xv_gb(a, i + 8 * lo));
@@ -232,6 +390,14 @@ static inline xe_v128 xv_mrgb(xe_v128 a, xe_v128 b, int lo)
 
 static inline xe_v128 xv_mrgh(xe_v128 a, xe_v128 b, int lo)
 {
+#if XV_LE
+    xe_v128 m;
+    for (int i = 0; i < 4; i++) {
+        m.u16[(2 * i) ^ 1] = a.u16[(i + 4 * lo) ^ 1];
+        m.u16[(2 * i + 1) ^ 1] = b.u16[(i + 4 * lo) ^ 1];
+    }
+    return m;
+#endif
     xe_v128 r = a;
     for (int i = 0; i < 4; i++) {
         xv_ph(&r, 2 * i, xv_gh(a, i + 4 * lo));
@@ -265,6 +431,18 @@ static inline xe_v128 xv_mulh(xe_v128 a, xe_v128 b, int odd, int sgn)
  * unsigned saturating, 3 signed -> signed saturating. */
 static inline xe_v128 xv_pkh(xe_v128 a, xe_v128 b, int mode, uint32_t *vscr)
 {
+#if XV_LE
+    xe_v128 p;
+    for (int i = 0; i < 16; i++) {
+        uint32_t x = i < 8 ? a.u16[i ^ 1] : b.u16[(i - 8) ^ 1];
+        int64_t v = mode == 0 ? (int64_t)(x & 0xFF)
+                  : mode == 1 ? xv_sat(x, 0, 255, vscr)
+                  : mode == 2 ? xv_sat(XV_SH(x), 0, 255, vscr)
+                              : xv_sat(XV_SH(x), -128, 127, vscr);
+        p.u8[i ^ 3] = (uint8_t)v;
+    }
+    return p;
+#endif
     xe_v128 r = a;
     for (int i = 0; i < 16; i++) {
         uint32_t x = i < 8 ? xv_gh(a, i) : xv_gh(b, i - 8);

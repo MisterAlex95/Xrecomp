@@ -822,6 +822,22 @@ static void test_more(const char *dir)
     x360_w32(X, p + 0x100, 104);
     CHECK(K(X360_xboxkrnl_MmQueryStatistics, 1, p + 0x100) == 0 && x360_r32(X, p + 0x104) == 0x20000 &&
               x360_r32(X, p + 0x10C) > 0 && x360_r32(X, p + 0x10C) <= 0x20000, "memory statistics");
+    {
+        /* the free physical pages follow allocations and frees exactly (the heap's count, no scan) */
+        uint32_t free0 = x360_r32(X, p + 0x10C);
+        uint32_t ph = x360_heap_alloc(X, &X->heap_phys, 0x3000, 0);
+        K(X360_xboxkrnl_MmQueryStatistics, 1, p + 0x100);
+        uint32_t free1 = x360_r32(X, p + 0x10C);
+        uint32_t freed = x360_heap_free(X, &X->heap_phys, ph);
+        K(X360_xboxkrnl_MmQueryStatistics, 1, p + 0x100);
+        uint32_t free2 = x360_r32(X, p + 0x10C);
+        uint32_t scan = 0;
+        for (uint32_t k = 0; k < X->heap_phys.pages; k++)
+            scan += X->heap_phys.used[k];
+        CHECK(ph && free1 == free0 - 3 && freed == 0x3000 && free2 == free0 && X->heap_phys.nused == scan &&
+                  free2 == 0x20000 - scan,
+              "memory statistics follow the heap: %X -> %X -> %X (scan %X)", free0, free1, free2, scan);
+    }
     /* save data: content created in the data directory, mounted on its root name */
     x360_set_data_dir(X, dir);
     uint32_t cd = x360_kalloc(X, 0x134), disp = x360_kalloc(X, 4);

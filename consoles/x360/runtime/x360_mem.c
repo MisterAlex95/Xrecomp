@@ -58,6 +58,7 @@ static int heap_init(x360_heap *h, const char *name, uint32_t base, uint32_t siz
     h->pages = size / page;
     h->len = calloc(h->pages, sizeof *h->len);
     h->used = calloc(h->pages, 1);
+    h->nused = 0;
     h->physical = physical;
     return h->len && h->used ? 0 : -1;
 }
@@ -190,6 +191,7 @@ static void mark(x360_heap *h, uint32_t first, uint32_t n)
 {
     h->len[first] = n;
     memset(h->used + first, 1, n);
+    h->nused += n; /* the callers checked that every page was free */
 }
 
 static uint32_t heap_addr(x360_heap *h, uint32_t page)
@@ -268,6 +270,7 @@ uint32_t x360_heap_free(x360_machine *x, x360_heap *h, uint32_t addr)
         return 0;
     h->len[p] = 0;
     memset(h->used + p, 0, n);
+    h->nused -= n;
     return n * h->page; /* the pages stay committed (their contents are cleared on the next allocation) */
 }
 

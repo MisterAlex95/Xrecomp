@@ -271,14 +271,14 @@ static inline void xe_stcx(xe_machine *m, xe_cpu *c, uint32_t ea, uint64_t v, un
 
 /* ---- vector loads / stores (16-byte blocks, big-endian) ---- */
 
-static inline xe_v128 xv_load(xe_machine *m, uint32_t ea)
+XV_HOT xe_v128 xv_load(xe_machine *m, uint32_t ea)
 {
     uint8_t *p = xe_ptr(m, ea & ~15u, 16);
     uint8_t z[16] = {0};
     return xv_from_bytes(p ? p : z);
 }
 
-static inline void xv_store(xe_machine *m, uint32_t ea, xe_v128 v)
+XV_HOT void xv_store(xe_machine *m, uint32_t ea, xe_v128 v)
 {
     uint8_t *p = xe_ptr(m, ea & ~15u, 16);
     if (p)
@@ -286,8 +286,11 @@ static inline void xv_store(xe_machine *m, uint32_t ea, xe_v128 v)
 }
 
 /* lvlx: the bytes from ea to the end of its 16-byte block, left-aligned, zeros after. */
-static inline xe_v128 xv_lvlx(xe_machine *m, uint32_t ea)
+XV_HOT xe_v128 xv_lvlx(xe_machine *m, uint32_t ea)
 {
+#if XV_U128
+    return xv_from_u128(xv_to_u128(xv_load(m, ea)) << (8 * (ea & 15)));
+#endif
     uint8_t blk[16], out[16] = {0};
     uint32_t eb = ea & 15;
     xv_to_bytes(xv_load(m, ea), blk);
@@ -297,8 +300,13 @@ static inline xe_v128 xv_lvlx(xe_machine *m, uint32_t ea)
 
 /* lvrx: the bytes from the block start up to ea, right-aligned, zeros before (all zeros when ea is aligned: no
  * access at all then, so a copy loop's tail may point past the end of a buffer). */
-static inline xe_v128 xv_lvrx(xe_machine *m, uint32_t ea)
+XV_HOT xe_v128 xv_lvrx(xe_machine *m, uint32_t ea)
 {
+#if XV_U128
+    if (!(ea & 15))
+        return xv_splat32(0);
+    return xv_from_u128(xv_to_u128(xv_load(m, ea)) >> (8 * (16 - (ea & 15))));
+#endif
     uint8_t blk[16], out[16] = {0};
     uint32_t eb = ea & 15;
     if (eb) {
@@ -313,6 +321,12 @@ static inline void xv_stvlx(xe_machine *m, uint32_t ea, xe_v128 v)
     uint8_t b[16];
     uint32_t eb = ea & 15;
     uint8_t *p = xe_ptr(m, ea, 16 - eb);
+#if XV_LE
+    if (p) /* bytes 0 .. 15 - eb of v from ea on (no variable-length memcpy: a libc call) */
+        for (uint32_t i = 0; i < 16 - eb; i++)
+            p[i] = v.u8[i ^ 3];
+    return;
+#endif
     xv_to_bytes(v, b);
     if (p)
         memcpy(p, b, 16 - eb);
@@ -325,28 +339,65 @@ static inline void xv_stvrx(xe_machine *m, uint32_t ea, xe_v128 v)
     if (!eb)
         return;
     uint8_t *p = xe_ptr(m, ea & ~15u, eb);
+#if XV_LE
+    if (p) /* bytes 16 - eb .. 15 of v up to ea */
+        for (uint32_t i = 0; i < eb; i++)
+            p[i] = v.u8[(16 - eb + i) ^ 3];
+    return;
+#endif
     xv_to_bytes(v, b);
     if (p)
         memcpy(p, b + 16 - eb, eb);
 }
 
 /* lvebx / lvehx / lvewx: one element at its place in the register (the others are left as they were). */
-static inline void xv_lve(xe_machine *m, xe_v128 *v, uint32_t ea, uint32_t size)
+XV_HOT void xv_lve(xe_machine *m, xe_v128 *v, uint32_t ea, uint32_t size)
 {
     uint8_t b[16];
     ea &= ~(size - 1);
     uint8_t *p = xe_ptr(m, ea, size);
+#if XV_LE
+    /* the element in place, in host order: byte i is u8[i ^ 3], halfword i u16[i ^ 1], word i u32[i] */
+    if (!p)
+        return;
+    if (size == 4) {
+        uint32_t w;
+        memcpy(&w, p, 4);
+        v->u32[(ea & 15) >> 2] = __builtin_bswap32(w);
+    } else if (size == 2) {
+        uint16_t h;
+        memcpy(&h, p, 2);
+        v->u16[((ea & 15) >> 1) ^ 1] = __builtin_bswap16(h);
+    } else {
+        v->u8[(ea & 15) ^ 3] = *p;
+    }
+    return;
+#endif
     xv_to_bytes(*v, b);
     if (p)
         memcpy(b + (ea & 15), p, size);
     *v = xv_from_bytes(b);
 }
 
-static inline void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
+XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 {
     uint8_t b[16];
     ea &= ~(size - 1);
     uint8_t *p = xe_ptr(m, ea, size);
+#if XV_LE
+    if (!p)
+        return;
+    if (size == 4) {
+        uint32_t w = __builtin_bswap32(v.u32[(ea & 15) >> 2]);
+        memcpy(p, &w, 4);
+    } else if (size == 2) {
+        uint16_t h = __builtin_bswap16(v.u16[((ea & 15) >> 1) ^ 1]);
+        memcpy(p, &h, 2);
+    } else {
+        *p = v.u8[(ea & 15) ^ 3];
+    }
+    return;
+#endif
     xv_to_bytes(v, b);
     if (p)
         memcpy(p, b + (ea & 15), size);

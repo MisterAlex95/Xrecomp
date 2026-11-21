@@ -161,22 +161,85 @@ typedef union xe_v128 {
     uint32_t u32[4];
     int32_t s32[4];
     float f32[4];
+    /* the same 16 bytes in host order, for the helpers that work lane by lane (no element order involved) or know the
+     * host's byte order (XV_LE): no member may change the union's size or alignment (xe_cpu, save states, old packs) */
+    uint16_t u16[8];
+    uint8_t u8[16];
 } xe_v128;
+#ifndef __cplusplus
+_Static_assert(sizeof(xe_v128) == 16 && _Alignof(xe_v128) == 4, "xe_v128 is 16 bytes, word-aligned");
+#endif
 
-static inline xe_v128 xv_words(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+/* XV_LE: a little-endian host, where PowerPC byte element i of a vector is u8[i ^ 3] and halfword element i u16[i ^ 1]
+ * (every host the runtime has: x86-64, arm64). XV_VEC: the compiler has GCC / clang vector extensions, which the
+ * hottest lane-wise ops use (SSE2 / NEON at any -O level; lane loops are not vectorized at the packs' -O1).
+ * -DXV_SCALAR leaves both out: the plain C of every helper (the reference the tests compare them with). */
+#if !defined(XV_SCALAR) && defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define XV_LE 1
+#else
+#define XV_LE 0
+#endif
+#if !defined(XV_SCALAR) && (defined(__GNUC__) || defined(__clang__))
+#define XV_VEC 1
+typedef uint8_t xv_u8x16 __attribute__((vector_size(16)));
+typedef int8_t xv_s8x16 __attribute__((vector_size(16)));
+typedef uint16_t xv_u16x8 __attribute__((vector_size(16)));
+typedef int16_t xv_s16x8 __attribute__((vector_size(16)));
+typedef uint32_t xv_u32x4 __attribute__((vector_size(16)));
+#else
+#define XV_VEC 0
+#endif
+/* XV_HOT: the small helpers of the hot paths, inlined even at -O1 where GCC keeps "static inline" functions out of
+ * line once their body passes a few instructions (a call per vector op, its operands through the stack) */
+#if !defined(XV_SCALAR) && (defined(__GNUC__) || defined(__clang__))
+#define XV_HOT static inline __attribute__((always_inline))
+#else
+#define XV_HOT static inline
+#endif
+
+XV_HOT xe_v128 xv_words(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
 {
     xe_v128 r;
     r.u32[0] = a, r.u32[1] = b, r.u32[2] = c, r.u32[3] = d;
     return r;
 }
 
-static inline xe_v128 xv_splat32(uint32_t v)
+XV_HOT xe_v128 xv_splat32(uint32_t v)
 {
     return xv_words(v, v, v, v);
 }
 
-static inline void xv_to_bytes(xe_v128 v, uint8_t b[16])
+#if XV_LE && defined(__SIZEOF_INT128__)
+/* the 16 bytes of a vector as one big-endian 128-bit number (byte 0 the most significant) and back: lvlx / lvrx and
+ * vsldoi are shifts of it */
+XV_HOT unsigned __int128 xv_to_u128(xe_v128 v)
 {
+    return (unsigned __int128)((uint64_t)v.u32[0] << 32 | v.u32[1]) << 64 | ((uint64_t)v.u32[2] << 32 | v.u32[3]);
+}
+
+XV_HOT xe_v128 xv_from_u128(unsigned __int128 x)
+{
+    uint64_t hi = (uint64_t)(x >> 64), lo = (uint64_t)x;
+    return xv_words((uint32_t)(hi >> 32), (uint32_t)hi, (uint32_t)(lo >> 32), (uint32_t)lo);
+}
+#define XV_U128 1
+#else
+#define XV_U128 0
+#endif
+
+XV_HOT void xv_to_bytes(xe_v128 v, uint8_t b[16])
+{
+#if XV_LE
+    /* unrolled: constant offsets (a loop at -O1 leaves b + 4 k variable, and _FORTIFY_SOURCE then calls
+     * __memcpy_chk for each word) */
+    uint32_t w0 = __builtin_bswap32(v.u32[0]), w1 = __builtin_bswap32(v.u32[1]), w2 = __builtin_bswap32(v.u32[2]),
+             w3 = __builtin_bswap32(v.u32[3]);
+    memcpy(b, &w0, 4);
+    memcpy(b + 4, &w1, 4);
+    memcpy(b + 8, &w2, 4);
+    memcpy(b + 12, &w3, 4);
+    return;
+#endif
     for (int k = 0; k < 4; k++) {
         b[4 * k] = (uint8_t)(v.u32[k] >> 24);
         b[4 * k + 1] = (uint8_t)(v.u32[k] >> 16);
@@ -185,9 +248,19 @@ static inline void xv_to_bytes(xe_v128 v, uint8_t b[16])
     }
 }
 
-static inline xe_v128 xv_from_bytes(const uint8_t b[16])
+XV_HOT xe_v128 xv_from_bytes(const uint8_t b[16])
 {
     xe_v128 r;
+#if XV_LE
+    uint32_t w0, w1, w2, w3;
+    memcpy(&w0, b, 4);
+    memcpy(&w1, b + 4, 4);
+    memcpy(&w2, b + 8, 4);
+    memcpy(&w3, b + 12, 4);
+    r.u32[0] = __builtin_bswap32(w0), r.u32[1] = __builtin_bswap32(w1), r.u32[2] = __builtin_bswap32(w2);
+    r.u32[3] = __builtin_bswap32(w3);
+    return r;
+#endif
     for (int k = 0; k < 4; k++)
         r.u32[k] = (uint32_t)b[4 * k] << 24 | (uint32_t)b[4 * k + 1] << 16 | (uint32_t)b[4 * k + 2] << 8 | b[4 * k + 3];
     return r;
@@ -381,6 +454,15 @@ static inline xe_v128 xv_sel(xe_v128 a, xe_v128 b, xe_v128 ctl)
 
 static inline xe_v128 xv_perm(xe_v128 a, xe_v128 b, xe_v128 ctl)
 {
+#if XV_LE
+    /* byte i of the result is byte (ctl's byte i & 31) of a:b, bytes in PowerPC order (u8[i ^ 3]) */
+    xe_v128 r;
+    for (int i = 0; i < 16; i++) {
+        unsigned k = ctl.u8[i ^ 3] & 31u;
+        r.u8[i ^ 3] = k < 16 ? a.u8[k ^ 3] : b.u8[(k - 16) ^ 3];
+    }
+    return r;
+#endif
     uint8_t src[32], c[16], out[16];
     xv_to_bytes(a, src);
     xv_to_bytes(b, src + 16);
@@ -390,8 +472,14 @@ static inline xe_v128 xv_perm(xe_v128 a, xe_v128 b, xe_v128 ctl)
     return xv_from_bytes(out);
 }
 
-static inline xe_v128 xv_sldoi(xe_v128 a, xe_v128 b, int sh)
+XV_HOT xe_v128 xv_sldoi(xe_v128 a, xe_v128 b, int sh)
 {
+#if XV_U128
+    /* bytes sh .. sh + 15 of a:b */
+    if (!(sh & 15))
+        return a;
+    return xv_from_u128(xv_to_u128(a) << (8 * (sh & 15)) | xv_to_u128(b) >> (128 - 8 * (sh & 15)));
+#endif
     uint8_t src[32];
     xv_to_bytes(a, src);
     xv_to_bytes(b, src + 16);
@@ -456,16 +544,25 @@ static inline xe_v128 xv_rlimi(xe_v128 d, xe_v128 b, int mask, int z)
     return r;
 }
 
-static inline xe_v128 xv_lvsl(uint32_t ea)
+XV_HOT xe_v128 xv_lvsl(uint32_t ea)
 {
+#if !defined(XV_SCALAR)
+    /* bytes sh, sh + 1 ... sh + 15 (at most 30: no carry between bytes), word k = sh + 4k .. sh + 4k + 3 */
+    uint32_t w = 0x00010203u + (ea & 15) * 0x01010101u;
+    return xv_words(w, w + 0x04040404u, w + 0x08080808u, w + 0x0C0C0C0Cu);
+#endif
     uint8_t x[16];
     for (int i = 0; i < 16; i++)
         x[i] = (uint8_t)((ea & 15) + i);
     return xv_from_bytes(x);
 }
 
-static inline xe_v128 xv_lvsr(uint32_t ea)
+XV_HOT xe_v128 xv_lvsr(uint32_t ea)
 {
+#if !defined(XV_SCALAR)
+    uint32_t w = 0x00010203u + (16 - (ea & 15)) * 0x01010101u; /* bytes 16 - sh ... 31 - sh */
+    return xv_words(w, w + 0x04040404u, w + 0x08080808u, w + 0x0C0C0C0Cu);
+#endif
     uint8_t x[16];
     for (int i = 0; i < 16; i++)
         x[i] = (uint8_t)(16 - (ea & 15) + i);
