@@ -3,6 +3,7 @@
  * the formatters, reserve-then-commit memory, physical memory, mutants, semaphore limits, pulses, timers, waits on
  * several objects, duplicated handles, suspend / resume, absolute timeouts, files written in the data directory and
  * symbolic links. Argument orders and structure layouts follow Xenia's kernel (src/xenia/kernel, BSD). */
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -413,6 +414,24 @@ static void test_system(void)
     CHECK(XM(X360_xam_XamFree, 1, x360_r32(X, p)) == 0, "XamFree");
 }
 
+/* test_gpu's seam check: a state saved (and the lazy resolves flushed) from a thread that is not the GPU's */
+typedef struct {
+    size_t n;
+    uint8_t *blob;
+    uint32_t addr, seen; /* the MEM_WRITE's target, and its value as that thread saw it after the save */
+} seam_save;
+
+static void *save_elsewhere(void *arg)
+{
+    seam_save *sv = arg;
+    x360_render_flush(X);
+    size_t cap = x360_state_size(X);
+    sv->blob = malloc(cap);
+    sv->n = sv->blob ? x360_state_save(X, NULL, sv->blob, cap) : 0;
+    sv->seen = x360_r32(X, sv->addr);
+    return NULL;
+}
+
 static void test_gpu(void)
 {
     uint32_t ring = K(X360_xboxkrnl_MmAllocatePhysicalMemoryEx, 6, 0, 0x2000, 4, 0, 0xFFFFFFFFu, 0);
@@ -601,6 +620,37 @@ static void test_gpu(void)
     x360_w32(X, ring + 4 * rp++, 3u << 30 | (uint32_t)PM4_SET_BIN_SELECT_LO << 8);
     x360_w32(X, ring + 4 * rp++, 0xFFFFFFFFu);
     x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
+    /* WP-22: the GPU's run half (the command processor, the renderer) runs only on its own thread (here this one, the
+     * first to run packets). Work posted but not run (deferred: the poll only posts) is left posted by a state saved
+     * on another thread (an app's menu or auto-save thread, which has no GL context) and by x360_render_flush there;
+     * a drain on the run half's thread runs it; the state saved elsewhere, loaded, posts it again. */
+    uint32_t seam = misc + 0x10C;
+    x360_w32(X, seam, 0);
+    x360_gpu_set_deferred(X, 1);
+    x360_w32(X, ring + 4 * rp++, 3u << 30 | 1u << 16 | (uint32_t)PM4_MEM_WRITE << 8);
+    x360_w32(X, ring + 4 * rp++, (misc_phys + 0x10C) | 2);
+    x360_w32(X, ring + 4 * rp++, 0xFEED);
+    x360_w32(X, 0x7FC80000u + 4 * XENOS_REG_CP_RB_WPTR, rp);
+    x360_gpu_poll(X);
+    CHECK(x360_r32(X, seam) == 0, "deferred: the write pointer posted, the packet not run (%08X)", x360_r32(X, seam));
+    seam_save sv = {0, NULL, seam, 0xFFFFFFFFu};
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, save_elsewhere, &sv) == 0 && pthread_join(th, NULL) == 0, "other thread");
+    CHECK(sv.n > 0 && sv.seen == 0 && x360_r32(X, seam) == 0,
+          "a state saved on another thread runs nothing there (%zu bytes, memory %08X)", sv.n, sv.seen);
+    x360_gpu_drain(X, 0);
+    CHECK(x360_r32(X, seam) == 0xFEED && x360_r32(X, wb) == rp,
+          "the drain on the run half's thread runs what stayed posted (%08X, read pointer %u)", x360_r32(X, seam),
+          x360_r32(X, wb));
+    char why2[256] = "";
+    CHECK(sv.n && x360_state_load(X, NULL, sv.blob, sv.n, why2, sizeof why2) == 0 && x360_r32(X, seam) == 0,
+          "that state loaded: the packet not run in it (%s, %08X)", why2, x360_r32(X, seam));
+    x360_gpu_drain(X, 0);
+    CHECK(x360_r32(X, seam) == 0xFEED, "and posted again by the load: run by the next drain (%08X)",
+          x360_r32(X, seam));
+    free(sv.blob);
+    x360_gpu_set_deferred(X, 0);
     x360_gpu_poll(X);
 }
 

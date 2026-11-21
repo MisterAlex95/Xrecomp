@@ -204,6 +204,7 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glReadBuffer, (GLenum))                                                                                    \
     X(void, glClearBufferfv, (GLenum, GLint, const GLfloat *))                                                        \
     X(void, glClearBufferfi, (GLenum, GLint, GLfloat, GLint))                                                         \
+    X(void, glInvalidateFramebuffer, (GLenum, GLsizei, const GLenum *))                                               \
     X(void, glTexImage3D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *))   \
     X(void, glFramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint))                                          \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))          \
@@ -213,7 +214,6 @@ typedef unsigned int EGLBoolean, EGLenum;
     X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))                            \
     X(void, glGetInternalformativ, (GLenum, GLenum, GLenum, GLsizei, GLint *))                                        \
     X(void, glUniform3i, (GLint, GLint, GLint, GLint))                                                               \
-    X(void, glInvalidateFramebuffer, (GLenum, GLsizei, const GLenum *))                                               \
     X(void, glGenSamplers, (GLsizei, GLuint *))                                                                        \
     X(void, glDeleteSamplers, (GLsizei, const GLuint *))                                                               \
     X(void, glBindSampler, (GLuint, GLuint))                                                                           \
@@ -360,6 +360,12 @@ typedef struct rt_copy {
 #define RECT_CHUNK 16
 #define RECT_CHUNK_BYTES (RECT_CHUNK * 3 * 16 * 16)
 
+#define GPU_TIMER_QUERIES 4 /* frames in flight a timer query may trail by */
+#define GL_TIME_ELAPSED_EXT 0x88BF
+#define GL_QUERY_RESULT 0x8866
+#define GL_QUERY_RESULT_AVAILABLE 0x8867
+#define GL_GPU_DISJOINT_EXT 0x8FBB
+
 struct xenos_gl {
 #define DECL(ret, name, args) ret(*name) args;
     GLFUNCS(DECL)
@@ -375,6 +381,17 @@ struct xenos_gl {
     EGLBoolean (*eglTerminate)(EGLDisplay);
     void *egl_lib, *gles_lib;
     int angle; /* loaded from X360_ANGLE_DIR: its default display, not the surfaceless one */
+    /* WP-19, the perf line's GPU time: GL_TIME_ELAPSED_EXT queries (EXT_disjoint_timer_query) from one swap to the
+     * next, a ring of GPU_TIMER_QUERIES read when their result is there (never waited for); gpu_timer 0: none */
+    int gpu_timer, tq_active;
+    unsigned tq_head, tq_n;   /* the oldest query ended and not read yet, how many */
+    GLuint tq[GPU_TIMER_QUERIES];
+    void (*glGenQueriesT)(GLsizei, GLuint *);
+    void (*glDeleteQueriesT)(GLsizei, const GLuint *);
+    void (*glBeginQueryT)(GLenum, GLuint);
+    void (*glEndQueryT)(GLenum);
+    void (*glGetQueryObjectuivT)(GLuint, GLenum, GLuint *);
+    void (*glGetQueryObjectui64vT)(GLuint, GLenum, uint64_t *);
     EGLDisplay dpy;
     EGLContext ctx;
     int attached;             /* on the caller's current context (xenos_gl_attach): no EGL of our own */
@@ -571,7 +588,18 @@ static uint64_t mono_ns(void)
  * ~40 places that bind framebuffers. A pass starts at the first draw, clear or blit after the draw framebuffer or one
  * of its attachments changed. The wrappers go in g's function table (load_gl); the real entry points and the count are
  * process-wide (the renderers of a process share one GLES library, and in practice there is one renderer, on one
- * thread). A renderer whose entry points are not the ones the wrappers call keeps its own, uncounted. */
+ * thread). A renderer whose entry points are not the ones the wrappers call keeps its own, uncounted.
+ *
+ * WP-19, loads: the attachments a tiler reads back from memory at the start of a pass, those of the draw framebuffer
+ * that the pass's first operation neither clears whole (glClear / glClearBuffer* with the scissor test off and the
+ * colour / depth write mask on) nor finds invalidated (glInvalidateFramebuffer since the framebuffer was bound). A
+ * depth-stencil buffer counts once, loaded unless both depth and stencil are cleared or invalidated. The attachments
+ * of each framebuffer are followed in the wrappers too (names up to PC_FBS; a larger one counts as one colour
+ * buffer); the colour masks of render targets 0-3 through glColorMask / glColorMaski. */
+#define PC_FBS 4096
+#define PC_COLOR 0x0Fu /* attachment bits: colour 0-3, depth, stencil */
+#define PC_DEPTH 0x10u
+#define PC_STENCIL 0x20u
 static struct {
     void (*bind)(GLenum, GLuint);
     void (*tex2d)(GLenum, GLenum, GLenum, GLuint, GLint);
@@ -580,78 +608,182 @@ static struct {
     void (*draw_elements)(GLenum, GLsizei, GLenum, const void *);
     void (*clear)(GLbitfield);
     void (*clear_fv)(GLenum, GLint, const GLfloat *);
+    void (*clear_fi)(GLenum, GLint, GLfloat, GLint);
     void (*blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
-    GLuint draw_fb;
+    void (*gen_fb)(GLsizei, GLuint *);
+    void (*invalidate)(GLenum, GLsizei, const GLenum *);
+    void (*enable)(GLenum);
+    void (*disable)(GLenum);
+    void (*color_mask)(GLboolean, GLboolean, GLboolean, GLboolean);
+    void (*color_maski)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean);
+    void (*depth_mask)(GLboolean);
+    GLuint draw_fb, read_fb;
     int changed;
-    uint64_t passes;
+    int scissor;          /* GL_SCISSOR_TEST on */
+    unsigned masked;      /* attachment bits whose writes are masked (colour targets not RGBA, depth writes off) */
+    unsigned invalidated; /* attachment bits of the draw framebuffer invalidated since it was bound */
+    uint8_t att[PC_FBS];  /* each framebuffer's attachment bits */
+    uint64_t passes, loads;
 } pc = {.changed = 1};
 static uint64_t hashed_bytes; /* WP-15: bytes of guest memory hashed (textures, copies, vertex buffers), process-wide */
 
 #define PC_DRAW_TARGET(t) ((t) == GL_FRAMEBUFFER || (t) == GL_DRAW_FRAMEBUFFER)
-static inline void pc_render(void)
+#define PC_READ_TARGET(t) ((t) == GL_FRAMEBUFFER || (t) == GL_READ_FRAMEBUFFER)
+static unsigned pc_att_bits(GLenum a)
 {
-    if (pc.changed)
+    if (a >= 0x8CE0 && a < 0x8CE4) /* GL_COLOR_ATTACHMENT0-3 */
+        return 1u << (a - 0x8CE0);
+    return a == 0x8D00 ? PC_DEPTH : a == 0x8D20 ? PC_STENCIL : a == 0x821A ? PC_DEPTH | PC_STENCIL : 0;
+}
+/* the pass's first operation clears `cleared` (attachment bits; a masked or scissored clear clears nothing whole) */
+static inline void pc_render(unsigned cleared)
+{
+    if (pc.changed) {
         pc.changed = 0, pc.passes++;
+        unsigned a = pc.draw_fb < PC_FBS ? pc.att[pc.draw_fb] : 1u;
+        if (!pc.scissor)
+            a &= ~(cleared & ~pc.masked);
+        a &= ~pc.invalidated;
+        pc.loads += (uint64_t)__builtin_popcount(a & PC_COLOR) + ((a & (PC_DEPTH | PC_STENCIL)) != 0);
+    }
 }
 static void pc_bind(GLenum t, GLuint fb)
 {
     pc.bind(t, fb);
+    if (PC_READ_TARGET(t))
+        pc.read_fb = fb;
     if (PC_DRAW_TARGET(t) && fb != pc.draw_fb)
-        pc.draw_fb = fb, pc.changed = 1;
+        pc.draw_fb = fb, pc.changed = 1, pc.invalidated = 0;
+}
+/* an attachment of the framebuffer bound to t changed: its bits */
+static void pc_attach(GLenum t, GLenum a, GLuint obj)
+{
+    unsigned bits = pc_att_bits(a);
+    if (PC_DRAW_TARGET(t)) {
+        pc.changed = 1, pc.invalidated &= ~bits;
+        if (pc.draw_fb < PC_FBS)
+            pc.att[pc.draw_fb] = (uint8_t)(obj ? pc.att[pc.draw_fb] | bits : pc.att[pc.draw_fb] & ~bits);
+    } else if (PC_READ_TARGET(t) && pc.read_fb < PC_FBS)
+        pc.att[pc.read_fb] = (uint8_t)(obj ? pc.att[pc.read_fb] | bits : pc.att[pc.read_fb] & ~bits);
 }
 static void pc_tex2d(GLenum t, GLenum a, GLenum tt, GLuint tex, GLint l)
 {
     pc.tex2d(t, a, tt, tex, l);
-    if (PC_DRAW_TARGET(t))
-        pc.changed = 1;
+    pc_attach(t, a, tex);
 }
 static void pc_rb(GLenum t, GLenum a, GLenum rt, GLuint rb)
 {
     pc.rb(t, a, rt, rb);
+    pc_attach(t, a, rb);
+}
+static void pc_gen_fb(GLsizei n, GLuint *fbs)
+{
+    pc.gen_fb(n, fbs);
+    for (GLsizei i = 0; i < n; i++)
+        if (fbs[i] < PC_FBS)
+            pc.att[fbs[i]] = 0; /* a name used before: none of its old attachments */
+}
+static void pc_invalidate(GLenum t, GLsizei n, const GLenum *a)
+{
+    pc.invalidate(t, n, a);
     if (PC_DRAW_TARGET(t))
-        pc.changed = 1;
+        for (GLsizei i = 0; i < n; i++)
+            pc.invalidated |= a[i] == 0x1800 /* GL_COLOR (framebuffer 0) */ ? 1u : pc_att_bits(a[i]);
+}
+static void pc_enable(GLenum cap)
+{
+    pc.enable(cap);
+    if (cap == GL_SCISSOR_TEST)
+        pc.scissor = 1;
+}
+static void pc_disable(GLenum cap)
+{
+    pc.disable(cap);
+    if (cap == GL_SCISSOR_TEST)
+        pc.scissor = 0;
+}
+static void pc_color_mask(GLboolean r, GLboolean gr, GLboolean b, GLboolean al)
+{
+    pc.color_mask(r, gr, b, al);
+    pc.masked = (pc.masked & ~PC_COLOR) | (r && gr && b && al ? 0 : PC_COLOR);
+}
+static void pc_color_maski(GLuint i, GLboolean r, GLboolean gr, GLboolean b, GLboolean al)
+{
+    pc.color_maski(i, r, gr, b, al);
+    if (i < 4)
+        pc.masked = (pc.masked & ~(1u << i)) | (r && gr && b && al ? 0 : 1u << i);
+}
+static void pc_depth_mask(GLboolean on)
+{
+    pc.depth_mask(on);
+    pc.masked = (pc.masked & ~PC_DEPTH) | (on ? 0 : PC_DEPTH);
 }
 static void pc_draw_arrays(GLenum m, GLint f, GLsizei n)
 {
-    pc_render();
+    pc_render(0);
     pc.draw_arrays(m, f, n);
 }
 static void pc_draw_elements(GLenum m, GLsizei n, GLenum t, const void *i)
 {
-    pc_render();
+    pc_render(0);
     pc.draw_elements(m, n, t, i);
 }
 static void pc_clear(GLbitfield b)
 {
-    pc_render();
+    pc_render((b & GL_COLOR_BUFFER_BIT ? PC_COLOR : 0) | (b & GL_DEPTH_BUFFER_BIT ? PC_DEPTH : 0) |
+              (b & GL_STENCIL_BUFFER_BIT ? PC_STENCIL : 0));
     pc.clear(b);
 }
 static void pc_clear_fv(GLenum b, GLint i, const GLfloat *v)
 {
-    pc_render();
+    pc_render(b == 0x1800 /* GL_COLOR */ ? (i >= 0 && i < 4 ? 1u << i : 0) : b == 0x1801 /* GL_DEPTH */ ? PC_DEPTH : 0);
     pc.clear_fv(b, i, v);
+}
+static void pc_clear_fi(GLenum b, GLint i, GLfloat d, GLint st)
+{
+    pc_render(PC_DEPTH | PC_STENCIL); /* GL_DEPTH_STENCIL, the only buffer it takes */
+    pc.clear_fi(b, i, d, st);
 }
 static void pc_blit(GLint a, GLint b, GLint c, GLint d, GLint e, GLint f, GLint h, GLint i, GLbitfield m, GLenum fl)
 {
-    pc_render();
+    pc_render(0);
     pc.blit(a, b, c, d, e, f, h, i, m, fl);
 }
 
+/* the wrappers into g's table, when its entry points are the ones they call */
 static void count_passes(xenos_gl *g)
 {
     if (!pc.bind) {
         pc.bind = g->glBindFramebuffer, pc.tex2d = g->glFramebufferTexture2D, pc.rb = g->glFramebufferRenderbuffer;
         pc.draw_arrays = g->glDrawArrays, pc.draw_elements = g->glDrawElements;
-        pc.clear = g->glClear, pc.clear_fv = g->glClearBufferfv, pc.blit = g->glBlitFramebuffer;
+        pc.clear = g->glClear, pc.clear_fv = g->glClearBufferfv, pc.clear_fi = g->glClearBufferfi;
+        pc.blit = g->glBlitFramebuffer, pc.gen_fb = g->glGenFramebuffers, pc.invalidate = g->glInvalidateFramebuffer;
+        pc.enable = g->glEnable, pc.disable = g->glDisable, pc.color_mask = g->glColorMask;
+        pc.depth_mask = g->glDepthMask;
     }
     if (pc.bind != g->glBindFramebuffer || pc.tex2d != g->glFramebufferTexture2D ||
         pc.rb != g->glFramebufferRenderbuffer || pc.draw_arrays != g->glDrawArrays ||
         pc.draw_elements != g->glDrawElements || pc.clear != g->glClear || pc.clear_fv != g->glClearBufferfv ||
-        pc.blit != g->glBlitFramebuffer)
+        pc.clear_fi != g->glClearBufferfi || pc.blit != g->glBlitFramebuffer || pc.gen_fb != g->glGenFramebuffers ||
+        pc.invalidate != g->glInvalidateFramebuffer || pc.enable != g->glEnable || pc.disable != g->glDisable ||
+        pc.color_mask != g->glColorMask || pc.depth_mask != g->glDepthMask)
         return;
     g->glBindFramebuffer = pc_bind, g->glFramebufferTexture2D = pc_tex2d, g->glFramebufferRenderbuffer = pc_rb;
     g->glDrawArrays = pc_draw_arrays, g->glDrawElements = pc_draw_elements;
-    g->glClear = pc_clear, g->glClearBufferfv = pc_clear_fv, g->glBlitFramebuffer = pc_blit;
+    g->glClear = pc_clear, g->glClearBufferfv = pc_clear_fv, g->glClearBufferfi = pc_clear_fi;
+    g->glBlitFramebuffer = pc_blit, g->glGenFramebuffers = pc_gen_fb, g->glInvalidateFramebuffer = pc_invalidate;
+    g->glEnable = pc_enable, g->glDisable = pc_disable, g->glColorMask = pc_color_mask;
+    g->glDepthMask = pc_depth_mask;
+}
+/* glColorMaski comes later (draw_buffers_caps), optional: wrapped when g's table holds the other wrappers */
+static void count_passes_maski(xenos_gl *g)
+{
+    if (!g->glColorMaski || g->glBindFramebuffer != pc_bind)
+        return;
+    if (!pc.color_maski)
+        pc.color_maski = g->glColorMaski;
+    if (pc.color_maski == g->glColorMaski)
+        g->glColorMaski = pc_color_maski;
 }
 
 static void fail(char *why, size_t n, const char *msg)
@@ -838,11 +970,65 @@ static void draw_buffers_caps(xenos_gl *g)
         !g->glColorMaski)
         g->glEnablei = NULL, g->glDisablei = NULL, g->glBlendFuncSeparatei = NULL, g->glBlendEquationSeparatei = NULL,
         g->glColorMaski = NULL;
+    count_passes_maski(g);
     fprintf(g->log, "xenos: per-target blend and colour mask %s\n",
             g->glEnablei ? "on" : "off (render target 0's state for all)");
     /* RECOMP_X360_FLOAT_BLEND=0 behaves as a driver without the extension (tests) */
     const char *fb = getenv("RECOMP_X360_FLOAT_BLEND");
     g->float_blend = has_ext(g, "GL_EXT_float_blend") && !(fb && !strcmp(fb, "0"));
+}
+
+/* WP-19: GPU time per frame with EXT_disjoint_timer_query (its EXT entry points, else GLES 3.0's for all but the
+ * 64-bit result); RECOMP_X360_GPU_TIMER=0 leaves it off. Most desktop drivers behind ANGLE have no such extension. */
+static void gpu_timer_init(xenos_gl *g)
+{
+    const char *env = getenv("RECOMP_X360_GPU_TIMER");
+    g->gpu_timer = 0;
+    if ((env && !strcmp(env, "0")) || !has_ext(g, "GL_EXT_disjoint_timer_query"))
+        return;
+#define TSYM(field, name)                                                                                              \
+    if (!(*(void **)&g->field = gl_proc(g, name "EXT")))                                                               \
+        *(void **)&g->field = gl_proc(g, name)
+    TSYM(glGenQueriesT, "glGenQueries");
+    TSYM(glDeleteQueriesT, "glDeleteQueries");
+    TSYM(glBeginQueryT, "glBeginQuery");
+    TSYM(glEndQueryT, "glEndQuery");
+    TSYM(glGetQueryObjectuivT, "glGetQueryObjectuiv");
+#undef TSYM
+    *(void **)&g->glGetQueryObjectui64vT = gl_proc(g, "glGetQueryObjectui64vEXT");
+    if (!g->glGenQueriesT || !g->glDeleteQueriesT || !g->glBeginQueryT || !g->glEndQueryT ||
+        !g->glGetQueryObjectuivT || !g->glGetQueryObjectui64vT)
+        return;
+    g->glGenQueriesT(GPU_TIMER_QUERIES, g->tq);
+    g->tq_head = g->tq_n = 0, g->tq_active = 0;
+    GLint disjoint;
+    g->glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint); /* clears the flag */
+    g->gpu_timer = 1;
+}
+
+/* At each swap: the running query ends, those whose result is there are read (dropped when the GPU's timing was
+ * disjoint since the last look: a clock change, a context loss), the next starts while one is free. Never waits. */
+static void gpu_timer_frame(xenos_gl *g)
+{
+    if (!g->gpu_timer)
+        return;
+    if (g->tq_active)
+        g->glEndQueryT(GL_TIME_ELAPSED_EXT), g->tq_active = 0, g->tq_n++;
+    GLint disjoint = 0;
+    g->glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+    while (g->tq_n) {
+        GLuint q = g->tq[g->tq_head], avail = 0;
+        g->glGetQueryObjectuivT(q, GL_QUERY_RESULT_AVAILABLE, &avail);
+        if (!avail)
+            break;
+        uint64_t ns = 0;
+        g->glGetQueryObjectui64vT(q, GL_QUERY_RESULT, &ns);
+        if (!disjoint)
+            g->st.gpu_time_ns += ns, g->st.gpu_time_frames++;
+        g->tq_head = (g->tq_head + 1) % GPU_TIMER_QUERIES, g->tq_n--;
+    }
+    if (g->tq_n < GPU_TIMER_QUERIES)
+        g->glBeginQueryT(GL_TIME_ELAPSED_EXT, g->tq[(g->tq_head + g->tq_n) % GPU_TIMER_QUERIES]), g->tq_active = 1;
 }
 
 static int setup(xenos_gl *g, char *why, size_t why_n)
@@ -854,6 +1040,8 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     texture_options(g);
     memexport_caps(g);
     draw_buffers_caps(g);
+    gpu_timer_init(g);
+    fprintf(g->log, "xenos: GPU timer %s\n", g->gpu_timer ? "on (EXT_disjoint_timer_query)" : "off");
     const char *msaa_env = getenv("RECOMP_X360_MSAA");
     g->msaa_on = !(msaa_env && !strcmp(msaa_env, "0"));
     const char *resolve_env = getenv("RECOMP_X360_RESOLVE"); /* eager (default) | lazy (WP-2) */
@@ -1020,6 +1208,11 @@ void xenos_gl_destroy(xenos_gl *g)
     if (!g)
         return;
     if (g->ready) {
+        if (g->gpu_timer) {
+            if (g->tq_active)
+                g->glEndQueryT(GL_TIME_ELAPSED_EXT);
+            g->glDeleteQueriesT(GPU_TIMER_QUERIES, g->tq);
+        }
         for (int i = 0; i < g->nprogs; i++)
             if (g->progs[i]->prog)
                 g->glDeleteProgram(g->progs[i]->prog);
@@ -1180,6 +1373,7 @@ void xenos_gl_get_stats(const xenos_gl *g, xenos_gl_stats *s)
     *s = g->st;
     s->missing_shaders = (uint32_t)g->nmissing;
     s->passes = pc.passes, s->hashed_bytes = hashed_bytes;
+    s->loads = pc.loads, s->gpu_timer = g->gpu_timer;
 }
 
 /* ---- shaders ---- */
@@ -5810,6 +6004,7 @@ static int frame_encode(xenos_gl *g, GLuint src, int fw, int fh)
 void xenos_gl_swap(xenos_gl *g, const xenos_cp *cp)
 {
     GS_DIRTY(g); /* WP-24: GL state apply_state shadows changes here */
+    gpu_timer_frame(g);
     if (g->reset_pending)
         do_reset(g);
     static const GLint swz[6] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};

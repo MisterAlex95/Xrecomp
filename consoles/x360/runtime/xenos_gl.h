@@ -98,6 +98,12 @@ typedef struct xenos_gl_stats {
     uint64_t pending_clears;       /* WP-17: resolve clears left for the next pass that binds their surface */
     uint64_t copy_blits;           /* WP-18: of copy_textures, those copied into a texture of their own (smaller than
                                     * the picture, or RECOMP_X360_COPY_TEXTURES=blit); the others sample it in place */
+    /* WP-19, the perf line */
+    uint64_t loads;                /* attachments loaded at the start of a pass (not cleared whole nor invalidated
+                                    * by its first operation: what a tiler reads back from memory), process-wide */
+    int gpu_timer;                 /* 1: the GPU's time is measured (EXT_disjoint_timer_query) */
+    uint64_t gpu_time_ns;          /* GPU time from swap to swap (GL_TIME_ELAPSED_EXT), of gpu_time_frames frames */
+    uint64_t gpu_time_frames;
 } xenos_gl_stats;
 
 /* NULL with a reason when EGL / GLES 3.0 cannot be had. width x height: the render target. */

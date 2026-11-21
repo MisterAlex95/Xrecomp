@@ -521,6 +521,7 @@ size_t x360_state_save(x360_machine *x, const char *key, uint8_t *out, size_t ca
 {
     if (!x || !out || x->status == X360_ERROR || x->status == X360_MISSED || x->host)
         return 0;
+    x360_gpu_drain(x, 0); /* the GPU's run half done with what was posted: its memory writes are in MEM (WP-22) */
     size_t need = x360_state_size(x);
     if (cap < need)
         return 0;
@@ -619,6 +620,7 @@ static int state_load(x360_machine *x, const char *key, const uint8_t *data, siz
         if (before)
             before_n = x360_state_save(x, key, before, cap);
     }
+    x360_gpu_drain(x, 0); /* nothing posted before the load runs after it (WP-22) */
     x360_kobj_reset(x); /* a state from before XBA-296 has no KOBJ section: none of that state */
     x360_gpu_bin_reset(x); /* nor has an older one a GBIN section */
     for (size_t j = 0; j < NSEC; j++) {
