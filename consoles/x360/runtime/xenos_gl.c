@@ -1068,13 +1068,16 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     g->keep_noop = noop_env && !strcmp(noop_env, "keep");
     /* WP-10: a rectangle list's captured vertices are read by the second pass as a uniform block of RECT_CHUNK
      * rectangles, bound at a multiple of its size in the capture buffer */
-    const char *rects_env = getenv("RECOMP_X360_RECTS"); /* gpu (default) | cpu (read back, the corner on the CPU) */
+    /* cpu (default: read back, the corner on the CPU) | gpu. The GPU path lost clears at random on ANGLE/Vulkan
+     * (SwiftShader) in the 2026-11-21 runs, cause unknown: opt-in until checked on devices */
+    const char *rects_env = getenv("RECOMP_X360_RECTS");
     GLint ublock = 0, ualign = 0;
     g->glGetIntegerv(0x8A30 /* GL_MAX_UNIFORM_BLOCK_SIZE */, &ublock);
     g->glGetIntegerv(0x8A34 /* GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT */, &ualign);
-    g->rects_gpu = !(rects_env && !strcmp(rects_env, "cpu")) && ublock >= RECT_CHUNK_BYTES && ualign > 0 &&
+    int rects_want_gpu = rects_env && !strcmp(rects_env, "gpu");
+    g->rects_gpu = rects_want_gpu && ublock >= RECT_CHUNK_BYTES && ualign > 0 &&
                    RECT_CHUNK_BYTES % ualign == 0;
-    if (!g->rects_gpu && !(rects_env && !strcmp(rects_env, "cpu")))
+    if (!g->rects_gpu && rects_want_gpu)
         fprintf(g->log, "xenos_gl: rectangle lists read back (uniform block size %d, offset alignment %d)\n", ublock,
                 ualign);
     const char *tiler_env = getenv("RECOMP_X360_TILER"); /* on (default) | 0 | magenta (WP-17) */
