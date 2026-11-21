@@ -798,6 +798,7 @@ static void host_run_thread(x360_machine *x, int k)
     lm.rt = x;
     lm.cur = c;
     lm.rc_stop = UINT64_MAX; /* WP-16: the loop below has no budget of its own, as RC_CALL then sees it */
+    lm.rc_fence = 1;         /* the other workers run guest code at the same time: sync is a real fence */
     lm.rc_fn_tab = x->m.rc_fn_tab;
     lm.rc_code_lo = x->m.rc_code_lo, lm.rc_code_span = x->m.rc_code_span;
     lm.rc_thunk_lo = x->m.rc_thunk_lo, lm.rc_thunk_span = x->m.rc_thunk_span;
@@ -1039,6 +1040,7 @@ int x360_set_host_threads(x360_machine *x, int on)
     pthread_cond_init(&h->main, NULL);
     uint64_t now = x360_now(x);
     x->host = h;
+    x->m.rc_fence = 1; /* the workers have their own machines (host_run_thread sets theirs): this one too, to be sure */
     x->host_t0 = host_now_100ns() - now + x->time_skip; /* the clock goes on from where it was */
     return 0;
 }

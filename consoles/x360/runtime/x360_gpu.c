@@ -872,6 +872,9 @@ int x360_gpu_overlap(x360_machine *x, int (*job)(x360_machine *, uint64_t), uint
     pthread_mutex_lock(&o->mu);
     o->lockstep = ls && *ls == '1';
     o->gl = pthread_self();
+    /* the GL thread reads and writes guest memory while the guest runs on the worker: sync, lwsync and eieio in lifted
+     * code are real fences (xe_machine.rc_fence), set before the job is handed over (the lock publishes it) */
+    x->m.rc_fence = 1;
     o->job = job, o->arg = arg, o->job_done = 0, o->job_pending = 1;
     __atomic_store_n(&o->active, 1, __ATOMIC_RELEASE);
     pthread_cond_signal(&o->job_cv);

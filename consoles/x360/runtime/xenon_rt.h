@@ -70,6 +70,11 @@ typedef struct xe_machine {
      * tests first (x360_thunk_at) */
     void (**rc_fn_tab)(struct xe_machine *m);
     uint32_t rc_code_lo, rc_code_span, rc_thunk_lo, rc_thunk_span;
+    /* after every older field (XE_RC_FEAT_SYNC_FLAG): 1 when another host thread shares guest memory with the lifted
+     * code (guest threads on host threads, XBA-283; the GPU thread's CPU worker, WP-22), so sync / lwsync / eieio
+     * (RC_SYNC) are a real fence; 0 in the cooperative mode, where every guest thread runs on this host thread and
+     * nothing else touches guest memory meanwhile: a compiler barrier keeps the order of the guest's accesses */
+    uint8_t rc_fence;
 } xe_machine;
 
 /* XE_VIEW4K_DYNAMIC: 1, xe_ptr reads view4k_skew and the code runs on a host of any page size; 0, it does not (one
@@ -86,13 +91,16 @@ typedef struct xe_machine {
 #endif
 #endif
 #define XE_RC_FEAT_VIEW4K 2u /* xe_rc_features: the pack's memory accesses go through view4k_skew */
-#define XE_RC_PACK_FEATURES (XE_VIEW4K_DYNAMIC ? XE_RC_FEAT_VIEW4K : 0u) /* what this build of a pack adds to them */
+/* what this build of a pack adds to them (XE_RC_FEAT_SYNC_FLAG, defined below: RC_SYNC) */
+#define XE_RC_PACK_FEATURES ((XE_VIEW4K_DYNAMIC ? XE_RC_FEAT_VIEW4K : 0u) | XE_RC_FEAT_SYNC_FLAG)
 /* WP-16: the pack's lifted functions call each other straight from C (RC_CALL) and read xe_machine's rc_stop and
  * rc_depth. A runtime made before has neither and ignores feature bits it does not know, so such a pack also names its
  * CRC xe_rc_image_crc2 instead of xe_rc_image_crc: an older runtime does not find it and refuses the pack ("not an
  * x360_tools.recomp pack"); this one reads either, and refuses a pack with a feature bit it does not know. */
 #define XE_RC_FEAT_DIRECT_CALLS 4u
-#define XE_RC_FEATS_KNOWN (1u | XE_RC_FEAT_VIEW4K | XE_RC_FEAT_DIRECT_CALLS) /* what this runtime can run */
+/* RC_SYNC reads xe_machine's rc_fence: a runtime made before has no such field (it refuses the unknown bit) */
+#define XE_RC_FEAT_SYNC_FLAG 8u
+#define XE_RC_FEATS_KNOWN (1u | XE_RC_FEAT_VIEW4K | XE_RC_FEAT_DIRECT_CALLS | XE_RC_FEAT_SYNC_FLAG) /* what this runtime can run */
 /* the declaration recomp.py gives a function another one calls directly: hidden, so the call is a plain branch (no
  * PLT; nothing looks the functions up by name, the tables hold their addresses) */
 #if defined(__GNUC__) && !defined(_WIN32)
@@ -542,7 +550,14 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 #define RC_STH(ea, v) xe_sth(m_, (ea), (v))
 #define RC_STW(ea, v) xe_stw(m_, (ea), (v))
 #define RC_ST64(ea, v) xe_std(m_, (ea), (v))
-#define RC_SYNC() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+/* sync / lwsync / eieio: a host fence only when another host thread shares guest memory (xe_machine.rc_fence) */
+#define RC_SYNC()                                                                                                     \
+    do {                                                                                                               \
+        if (__builtin_expect(m_->rc_fence, 0))                                                                         \
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);                                                                   \
+        else                                                                                                           \
+            __atomic_signal_fence(__ATOMIC_SEQ_CST);                                                                   \
+    } while (0)
 #define RC_LWARX(ea) xe_lwarx(m_, c, (ea))
 #define RC_LDARX(ea) xe_ldarx(m_, c, (ea))
 #define RC_STWCX(ea, v) xe_stcx(m_, c, (ea), (v), 4)

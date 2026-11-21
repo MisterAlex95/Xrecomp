@@ -1416,6 +1416,17 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   before, at the old speed); the toolkit digest changes with the headers, so the launcher offers « Prepare again »,
   which is what brings the gain.
 
+- **sync without a fence in the cooperative mode (CPU night 3).** `sync` / `lwsync` / `eieio` (`RC_SYNC` in
+  `consoles/x360/runtime/xenon_rt.h`) were a sequentially consistent host fence everywhere (a locked instruction on
+  x86-64, `dmb ish` on arm64). In the default mode every guest thread runs on one host thread and nothing else touches
+  guest memory meanwhile, so they are now a compiler barrier there; they stay a real fence when `xe_machine.rc_fence`
+  is 1: guest threads on host threads (XBA-283, every worker's machine) and the GPU thread (WP-22, set before each job
+  goes to the CPU worker). The interpreter keeps its fence. Warhammer, a busy battle (headless x86-64, 20 billion
+  instructions): about 3.5 % fewer host CPU samples, the same stats and save state byte for byte. A pack that reads
+  the flag says so (`xe_rc_features` bit 3, from the headers): an app made before refuses it instead of reading past
+  its machine; this runtime runs older packs as before (with the fence). The headers change, so « Prepare again »
+  brings the gain.
+
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
 `X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round
 loop on the test titles) and `x360_missed`.

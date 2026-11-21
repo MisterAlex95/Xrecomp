@@ -217,7 +217,9 @@ The SDL thread keeps the window pump, the GPU loop and the present.
   `link.irq` is set with release and taken with acquire, so an interrupt handler sees the scratch / fence values
   written before the `PM4_INTERRUPT`.
 - Guest memory is shared like a bus: plain loads and stores on both sides (as the host-threads mode already does for
-  guest CPUs). The guest's own `lwsync` / `eieio` and the edges above are the only ordering, as on hardware.
+  guest CPUs). The guest's own `lwsync` / `eieio` and the edges above are the only ordering, as on hardware. Lifted
+  code's `sync` / `lwsync` / `eieio` are a real host fence while the GPU thread is in use (`x360_gpu_overlap` sets
+  `xe_machine.rc_fence` before each job); without it they are a compiler barrier (CPU night 3).
 - **Late reads**: the run half reads textures, vertices, indices and indirect buffers later than in stage 1, up to the
   queue depth (two swaps) behind the CPU. That is what real hardware does, and Direct3D guards buffer reuse with fences
   (`EVENT_WRITE_SHD`, the read pointer), but a title that rewrites a buffer it has handed to the GPU without a fence
