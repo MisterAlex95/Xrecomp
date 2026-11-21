@@ -354,3 +354,24 @@ def test_compiles_running_when_the_lift_ends_are_waited_for_not_redone(tmp_path,
             want[os.path.basename(o)] = b"obj:" + f.read()
     assert _objects(objs) == want
     assert not [fn for fn in os.listdir(tmp_path / "obj") if fn.startswith(cc.EARLY_PREFIX)]
+
+
+def test_no_early_compile_for_what_the_cache_has(tmp_path, monkeypatch):
+    """A re-lift that writes the same C (an app update, the self-healing loop) over a warm object cache: nothing is
+    compiled early (no clang for nothing during the lift), and compile_all compiles nothing either."""
+    gen, flags, tc, early = _setup(tmp_path, monkeypatch, sleep="0.2")
+    early.start()
+    _lift(tmp_path, early, 5, 0.2)
+    early.finish()
+    sources = sorted(str(gen / fn) for fn in os.listdir(gen))
+    cc.compile_all(sources, flags, tc, str(tmp_path / "obj"), 3, early=early)
+    for fn in os.listdir(gen):                       # the lift again: the same bytes, new files
+        os.remove(gen / fn)
+    os.remove(tmp_path / "cc.log")
+    again = cc.EarlyCompile(str(gen), flags, tc, str(tmp_path / "obj"), 3, mem=None)
+    again.POLL_S = 0.05
+    again.start()
+    _lift(tmp_path, again, 5, 0.2)
+    again.finish()
+    assert again.cached == 5 and again.compiled == 0 and not os.path.exists(tmp_path / "cc.log")
+    assert cc.compile_all(sources, flags, tc, str(tmp_path / "obj"), 3, early=again)[1] == 0

@@ -329,7 +329,7 @@ class Run:
         then reports why)."""
         try:
             tc, flags, jobs, limit = self.compile_setup()
-        except (cc.StepError, AttributeError, TypeError, OSError):
+        except cc.StepError:
             return None
         return cc.EarlyCompile(gen, flags, tc, os.path.join(self.work, "obj"), jobs, limit=limit,
                                log=self.log).start()

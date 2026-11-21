@@ -760,6 +760,8 @@ def _compile_plan(plan, flags, tc, jobs, log, on_progress, limit, stats, early):
             # queued ones return at once (failed / cancelled checked first).
             ex.shutdown(wait=True, cancel_futures=True)
 
+    if busy:
+        early.kill([p[0] for p in plan if p[0] in busy and os.path.isfile(p[2])])
     pool(todo)
     if busy and not failed and not tc.procs.cancelled.is_set():
         # The early compiles that were running when the lift ended: adopted, or compiled again here.
@@ -824,6 +826,8 @@ class EarlyCompile:
         self.done = {}            # source -> (temporary object, source stat, headers' stat digest, includes FUNCS_H)
         self.peaks = []           # each early compile's peak RSS (kB)
         self.compiled = 0         # early compiles that succeeded (adopted or not)
+        self.cached = 0           # files not compiled early: their object is in the cache already
+        self._ctx = None          # what the cache keys need (_context)
         self.failed = 0           # early compiles that failed or whose source changed under them
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
@@ -832,6 +836,7 @@ class EarlyCompile:
         self._taken = {}          # source -> the stat it was queued with
         self._running = 0
         self._busy = set()
+        self._proc_of = {}        # source -> its compile (Popen)
         self._live = set()        # the clang processes running now (Popen)
         self._threads = []
         self._stop = False
@@ -924,6 +929,10 @@ class EarlyCompile:
             self._seen[src] = sig
             if sig == last and self._taken.get(src) != sig:
                 self._taken[src] = sig
+                if self._in_cache(src):
+                    with self._lock:
+                        self.cached += 1
+                    continue
                 with self._lock:
                     self._queue.append(src)
 
@@ -946,6 +955,53 @@ class EarlyCompile:
         except Exception:           # a bug here must not break the lift: compile_all does the work
             with self._cv:
                 self._stop = True
+
+    def _context(self):
+        """(portable flags, compiler id, {"all": [header digests], "gen": [...]}) for the cache keys, or False when
+        they cannot be had. The digests: the headers as they are now (right where the lift writes none: x360), and
+        the ones keys.json remembers from the last compile (right for a re-lift whose recomp_funcs.h has the same
+        shape: the key of the lifted C leaves its declarations out)."""
+        if self._ctx is None:
+            try:
+                cached_id = getattr(self.tc, "compiler_id_cached", None)
+                cid = cached_id(self.obj_dir) if cached_id else self.tc.compiler_id()
+                digests = {"all": [header_digest(self.dirs)], "gen": [header_digest(self.dirs, generated=True)]}
+                hk = _load_keys(self.obj_dir).get("headers")
+                if isinstance(hk, list) and len(hk) == 3:
+                    digests["all"].append(hk[1])
+                    digests["gen"].append(hk[2])
+                self._ctx = ([portable(f) for f in self.flags], cid, digests)
+            except Exception:       # no key, no skip: the file is compiled early as any other
+                self._ctx = False
+        return self._ctx
+
+    def _in_cache(self, src):
+        """Whether src's object is in the cache under a key compile_all may compute (a re-lift that wrote the same
+        C: an app update, the self-healing loop): no early compile for it, its slot goes to another file."""
+        ctx = self._context()
+        if not ctx:
+            return False
+        kflags, cid, digests = ctx
+        try:
+            with open(src, "rb") as f:
+                data = f.read()
+        except OSError:
+            return False
+        for hd in digests["gen" if is_generated(src) else "all"]:
+            key = cache_key(portable(src), data, kflags, cid, hd)
+            if os.path.isfile(os.path.join(self.obj_dir, key + ".o")):
+                return True
+        return False
+
+    def kill(self, sources):
+        """Stops the early compiles of these sources (compile_all found their objects in the cache)."""
+        with self._lock:
+            procs = [self._proc_of[s] for s in sources if s in self._proc_of]
+        for p in procs:
+            try:
+                p.kill()
+            except OSError:
+                pass
 
     def _room(self):
         if self.mem is None:
@@ -976,7 +1032,7 @@ class EarlyCompile:
             with self._lock:
                 self._seq += 1
                 tmp = os.path.join(self.obj_dir, "%s%d.%d.o" % (EARLY_PREFIX, os.getpid(), self._seq))
-            rc, peak = self._run(self.tc.compile_args(self.flags, src, tmp))
+            rc, peak = self._run(self.tc.compile_args(self.flags, src, tmp), src)
             if peak:
                 with self._lock:
                     self.peaks.append(peak)
@@ -1001,7 +1057,7 @@ class EarlyCompile:
                 self._busy.discard(src)
                 self._cv.notify_all()
 
-    def _run(self, args):
+    def _run(self, args, src=None):
         """(returncode, peak RSS kB) of one compile, its output dropped (compile_all reports a real error)."""
         procs = self.tc.procs
         with self._lock:
@@ -1010,6 +1066,7 @@ class EarlyCompile:
         p = procs.start(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         with self._lock:
             self._live.add(p)
+            self._proc_of[src] = p
             stop = self._stop
         if stop:                    # abort() copied _live before this one was in it
             p.kill()
@@ -1023,6 +1080,8 @@ class EarlyCompile:
             procs.done(p)
             with self._lock:
                 self._live.discard(p)
+                if self._proc_of.get(src) is p:
+                    del self._proc_of[src]
         if procs.cancelled.is_set():
             raise Cancelled()
         return p.returncode, peak
