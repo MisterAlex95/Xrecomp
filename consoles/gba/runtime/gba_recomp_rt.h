@@ -486,12 +486,13 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n_slow(gba_rc_head
     return total;
 }
 
-/* rc_pf_fetch_n: N fetches back to back (X and S 0), the frequent case, with few registers; the others in
+/* rc_pf_fetch_n's middle: N fetches back to back (X and S 0), the frequent case, with few registers; the others in
  * rc_pf_fetch_n_slow. At the buffer's head with the unit reading: the reads completed meanwhile, then rc_pf_fetch_n_slow's
  * closed form. Elsewhere (a refill's target, the fetch after a literal): the buffer stops (rc_pf_stop: a cycle's wait
  * when a read was finishing), then a non-sequential access and a whole read each. */
-static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, uint64_t now, uint32_t addr,
-                                                                bool thumb, uint32_t ncost, uint32_t ns, uint64_t x)
+static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n_mid(gba_rc_head *h, uint64_t now, uint32_t addr,
+                                                                    bool thumb, uint32_t ncost, uint32_t ns,
+                                                                    uint64_t x)
 {
     gba_rc_prefetch *p = &h->pf;
     if (__builtin_expect(ns > 0xFFu || x, 0))
@@ -566,6 +567,45 @@ static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, 
     p->left = d;
     p->time = now + c;
     return c;
+}
+
+/* rc_pf_fetch_n: the two most frequent cases with almost no registers (no frame), the others in rc_pf_fetch_n_mid (a
+ * tail call), same results: at the buffer's head with it empty and no read completed since (each fetch waits for the
+ * opcode being read: the rest of that read, then a whole one each), and a new start (a refill's target) while the unit
+ * is idle or its state is not behind `now` (rc_pf_stop's wait as it stands, then a non-sequential access and a whole
+ * read each). */
+static __attribute__((noinline, unused)) uint32_t rc_pf_fetch_n(gba_rc_head *h, uint64_t now, uint32_t addr,
+                                                                bool thumb, uint32_t ncost, uint32_t ns, uint64_t x)
+{
+    gba_rc_prefetch *p = &h->pf;
+    if (__builtin_expect(ns <= 0xFFu && !x, 1)) {
+        const uint32_t w = thumb ? 2u : 4u;
+        bool at = p->valid && addr == p->head && p->thumb == thumb;
+        if (at && p->run && !p->count && now >= p->time) {
+            uint64_t e = now - p->time;
+            if (e < p->left) {
+                uint32_t d = p->duty, c = p->left - (uint32_t)e + (ns - 1) * d;
+                p->head = addr + ns * w;
+                p->left = d;
+                p->time = now + c;
+                return c;
+            }
+        } else if (!(at && (p->run || p->count)) && (!p->run || now <= p->time)) {
+            uint32_t wait = p->run && (p->left == 1 || (!p->thumb && p->left == p->duty / 2u + 1u));
+            uint32_t s16 = h->wait16[(addr >> 24) & 15][1];
+            uint32_t d = thumb ? s16 : 2 * s16, c = wait + ncost + (ns - 1) * d;
+            p->valid = p->run = true;
+            p->thumb = thumb;
+            p->count = 0;
+            p->cap = thumb ? 8 : 4;
+            p->duty = (uint8_t)d;
+            p->head = addr + ns * w;
+            p->left = d;
+            p->time = now + c;
+            return c;
+        }
+    }
+    return rc_pf_fetch_n_mid(h, now, addr, thumb, ncost, ns, x);
 }
 
 /* The opcode fetch at the start of the instruction at pc (the pipeline reads the opcode at pc + 8 / + 4 meanwhile):
