@@ -2,7 +2,6 @@ package fr.adserver.xrecomp;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -482,30 +481,31 @@ final class LibraryScreen {
 
     // ---- Art --------------------------------------------------------------------------------------------------------
 
-    /** The title image from the shared cache (files/art/<TID>.png, TitleArt), decoded once per title; null if none. */
-    static Bitmap art(File filesDir, Map<String, Bitmap> cache, Entry e) {
-        if (RemoteLibrary.isRemoteKey(e.tid)) {   // XBA-332: its cover downloaded by name (CoverArt), else the cloud art
-            if (!cache.containsKey(e.tid))
-                cache.put(e.tid, CoverArt.load(filesDir, e.tid));
-            return cache.get(e.tid);
-        }
-        if (e.otherConsole() && !Library.isLocalKey(e.tid)) {   // a GBA / PS1 / N64 game: its cover (CoverArt)
-            if (!cache.containsKey(e.tid))
-                cache.put(e.tid, CoverArt.load(filesDir, e.tid));
-            return cache.get(e.tid);
-        }
+    /**
+     * How ArtCache reads e's art (on its executor; e's key is the cache's): a network or other console game's cover
+     * (CoverArt), else an Xbox title's image from the shared cache (files/art/<TID>.png), else from its XBE
+     * (TitleArt.load, which caches it). null when e can have none (no real title ID).
+     */
+    static ArtCache.Loader artLoader(File filesDir, Entry e) {
+        if (RemoteLibrary.isRemoteKey(e.tid)   // XBA-332: its cover downloaded by name (CoverArt), else the cloud art
+            || e.otherConsole() && !Library.isLocalKey(e.tid))   // a GBA / PS1 / N64 game: its cover (CoverArt)
+            return px -> CoverArt.load(filesDir, e.tid, px);
         if (!e.realTid())
             return null;
-        if (cache.containsKey(e.tid))
-            return cache.get(e.tid);
-        File f = TitleArt.cacheFile(filesDir, e.tid);
-        Bitmap b = f.isFile() ? BitmapFactory.decodeFile(f.getPath()) : null;
-        if (b == null && e.hasData()) {
-            File x = e.xbe(filesDir);
-            b = x == null ? null : TitleArt.load(filesDir, x, e.tid);
-        }
-        cache.put(e.tid, b);
-        return b;
+        return px -> {
+            Bitmap b = ArtCache.decode(TitleArt.cacheFile(filesDir, e.tid), px);
+            if (b == null && e.hasData()) {
+                File x = e.xbe(filesDir);
+                b = x == null ? null : TitleArt.load(filesDir, x, e.tid, px);
+            }
+            return b;
+        };
+    }
+
+    /** e's art read now (tests; the launcher goes through ArtCache), at a card's size; null if none. */
+    static Bitmap art(File filesDir, Entry e) {
+        ArtCache.Loader l = artLoader(filesDir, e);
+        return l == null ? null : l.load(GameCard.ART);
     }
 
     /** The backdrop glows for a focused card: its cached theme's GLOW and GLOW2, else the stock accent. */
@@ -551,6 +551,8 @@ final class LibraryScreen {
         col.setClipChildren(false);
         scroll.addView(col, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                                                          FrameLayout.LayoutParams.WRAP_CONTENT));
+        // Cards far from the viewport do not load their art (GameCard.nearViewport): those scrolled to ask now.
+        scroll.setOnScrollChangeListener((v, x, y, ox, oy) -> GameCard.reveal(col, y, v.getHeight()));
         return scroll;
     }
 

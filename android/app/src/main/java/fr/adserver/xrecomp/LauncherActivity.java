@@ -246,6 +246,9 @@ public class LauncherActivity extends Activity {
     private String artTid;
     private Bitmap art;
     private int artColor = Theme.ACCENT;
+    /** Home's art tile as last built (hero()), and whether it shows the current game's image (art). */
+    private Widgets.ArtTile heroTile;
+    private boolean heroIdentity;
 
     // ---- The game theme (GameTheme, docs/android/app-shell.md « Game theme ») ----
     private File heroFile;
@@ -384,11 +387,8 @@ public class LauncherActivity extends Activity {
     /** The library screen's entries and cards, as built. */
     private List<LibraryScreen.Entry> libEntries = new ArrayList<>();
     private final List<GameCard> libCards = new ArrayList<>();
-    private final java.util.Map<String, Bitmap> libArt = new java.util.HashMap<>();
     /** The library's cards by game key (the grid's and « Recently played »'s): a cover found updates them alone. */
     private final java.util.Map<String, List<GameCard>> libCardsByKey = new java.util.HashMap<>();
-    /** The art tile of the last hero() built (Home's): a cover found for its game repaints it alone. */
-    private Widgets.ArtTile heroTile;
     /** The focused card's title ID on the library ("" for the folder tile). */
     private String focusTid;
     private TextView libCaption;
@@ -416,6 +416,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        ArtCache.bind(getFilesDir());   // art cached by an earlier activity is read again when next drawn
         if (savedInstanceState != null)
             exportKeys = savedInstanceState.getStringArrayList(STATE_EXPORT_KEYS);
         publishShortcuts();
@@ -1325,16 +1326,13 @@ public class LauncherActivity extends Activity {
             artColor = Theme.ACCENT;
         } else if (!key.equals(artTid)) {
             artTid = key;
-            if (tid == null) {
-                art = null;
-            } else if (dir != null) {
-                art = TitleArt.load(getFilesDir(), GameStore.findXbe(new File(dir)), tid);
-            } else {   // a library game whose files are not here: the scan's cached image
-                File f = TitleArt.cacheFile(getFilesDir(), tid);
-                art = f.isFile() ? BitmapFactory.decodeFile(f.getPath()) : null;
-            }
-            if (art == null && tid != null && Console.ofKey(tid) != Console.XBOX)
-                art = CoverArt.load(getFilesDir(), tid);   // a GBA / PS1 / N64 game: its cover or a captured frame
+            // Read by ArtCache off the UI thread: the monogram until it has loaded (identityLoaded); at once if cached,
+            // and read again all the same (artTid is reset when the image may have changed: shown when it has).
+            if (tid != null)
+                ArtCache.invalidate(tid);
+            art = tid == null ? null
+                              : ArtCache.get(tid, identityLoader(dir, tid), ArtCache.px(Theme.ART),
+                                             b -> identityLoaded(key, dir, tid, b));
             Log.i(TAG, "launcher: title image " + (art != null ? art.getWidth() + "x" + art.getHeight() : "none")
                        + " for " + key);
             // A pinned shortcut of this game follows its image and title (the image may have come after the pin).
@@ -1344,6 +1342,44 @@ public class LauncherActivity extends Activity {
         // The art tile's glow: the game theme's (stock: the accent); the monogram keeps the title ID's colour.
         if (key != null)
             artColor = art != null ? Theme.GLOW : TitleArt.monogramColor(key);
+    }
+
+    /**
+     * How ArtCache reads the current game's image: from its XBE (TitleArt) when its files are here, else the scan's
+     * cached image; a GBA / PS1 / N64 game's cover or captured frame (CoverArt) when there is none.
+     */
+    private ArtCache.Loader identityLoader(String dir, String tid) {
+        File files = getFilesDir();
+        return px -> {
+            Bitmap b = dir != null ? TitleArt.load(files, GameStore.findXbe(new File(dir)), tid, px)
+                                   : ArtCache.decode(TitleArt.cacheFile(files, tid), px);
+            if (b == null && Console.ofKey(tid) != Console.XBOX)
+                b = CoverArt.load(files, tid, px);
+            return b;
+        };
+    }
+
+    /** The current game's image has loaded (ArtCache): Home's tile, the bottom screen and a pinned shortcut take it. */
+    private void identityLoaded(String key, String dir, String tid, Bitmap b) {
+        if (b == null || !key.equals(artTid) || isDestroyed())
+            return;
+        art = b;
+        artColor = Theme.GLOW;
+        Log.i(TAG, "launcher: title image " + b.getWidth() + "x" + b.getHeight() + " for " + key);
+        TitleShortcut.refresh(this, tid, gameTitle(dir), b);
+        if (heroIdentity && heroTile != null)
+            heroTile.setArt(b, artColor);
+        if (companion != null && screen != Screen.LIBRARY && state() != State.NONE)
+            companion.art(b);
+    }
+
+    /** The current game's image now, read in place when ArtCache has not loaded it yet (a user's action: an icon). */
+    private Bitmap identityNow() {
+        refreshIdentity();
+        String tid = titleId();
+        if (art == null && tid != null)
+            art = identityLoader(gameDir(), tid).load(ArtCache.px(Theme.ART));
+        return art;
     }
 
     private View focusTarget() {
@@ -2487,7 +2523,21 @@ public class LauncherActivity extends Activity {
      * the game's title (Display) over a column the screen fills (returned). No top bar: the title is the heading.
      */
     private LinearLayout hero(String title, boolean empty) {
-        return hero(title, empty, art);
+        LinearLayout info = hero(title, empty, art);
+        heroIdentity = !empty;   // the current game's image: set in place when it has loaded (identityLoaded)
+        return info;
+    }
+
+    /** hero() with key's art from ArtCache: the monogram until it has loaded, then the image in place. */
+    private LinearLayout hero(String title, String key, ArtCache.Loader loader) {
+        Widgets.ArtTile[] tile = new Widgets.ArtTile[1];
+        Bitmap b = ArtCache.get(key, loader, ArtCache.px(Theme.ART), a -> {
+            if (a != null && tile[0] != null && tile[0] == heroTile)
+                tile[0].setArt(a, artColor);
+        });
+        LinearLayout info = hero(title, false, b);
+        tile[0] = heroTile;
+        return info;
     }
 
     private LinearLayout hero(String title, boolean empty, Bitmap art) {
@@ -2495,6 +2545,7 @@ public class LauncherActivity extends Activity {
         hero.setGravity(Gravity.CENTER_VERTICAL);
         Widgets.ArtTile tile = new Widgets.ArtTile(this);
         heroTile = tile;
+        heroIdentity = false;
         if (empty)
             tile.setEmpty();
         else if (art != null)
@@ -4062,8 +4113,7 @@ public class LauncherActivity extends Activity {
 
     /** Manage › Add to home screen: the home screen shows its own dialog; the note says the request went out. */
     private void onAddShortcut(String tid) {
-        refreshIdentity();   // the title image of this game (or none: the monogram)
-        boolean ok = TitleShortcut.request(this, tid, gameTitle(gameDir()), art);
+        boolean ok = TitleShortcut.request(this, tid, gameTitle(gameDir()), identityNow());
         Log.i(TAG, "launcher: shortcut " + TitleShortcut.id(tid) + (ok ? " requested" : " refused"));
         setNote(getString(ok ? R.string.SHORTCUT_REQUESTED : R.string.SHORTCUT_REFUSED), ok ? NOTE_OK : NOTE_ERROR);
     }
@@ -4107,13 +4157,12 @@ public class LauncherActivity extends Activity {
             setNote(getString(R.string.NOT_ENOUGH_SPACE, size(need), size(free)), NOTE_ERROR);
             return;
         }
-        refreshIdentity();   // the title image of this game (or none: the monogram)
+        Bitmap icon = identityNow();   // the title image of this game (or none: the monogram)
         String dir = gameDir();
         String title = gameTitle(dir);
         String label = TitleApk.label(title == null || title.trim().isEmpty() ? tid : title);
         Library.Record r = rec();
         String knownSha = r != null && tid.equals(r.titleId) ? r.xbeSha256 : "";
-        Bitmap icon = art;
         Log.i(TAG, "launcher: game app " + TitleApk.packageName(tid) + " « " + label + " »: building from "
                    + template + " (" + template.length() + " bytes)");
         runWorker(R.string.TITLE_APP_BUILDING, () -> {
@@ -4378,7 +4427,7 @@ public class LauncherActivity extends Activity {
                 }
                 writeGames();
                 if (tid != null)
-                    libArt.remove(tid);
+                    ArtCache.invalidate(tid);
                 history.clear();
                 focusMemory.remove(Screen.HOME);
                 show(libraryOn() ? (rec() != null ? Screen.HOME : Screen.LIBRARY)
@@ -5440,8 +5489,9 @@ public class LauncherActivity extends Activity {
      */
     private void buildPrepare() {
         String title = prepTitle();
-        LinearLayout info = romEntry != null ? hero(title, false, LibraryScreen.art(getFilesDir(), libArt, romEntry))
-                                              : hero(title, false);
+        LinearLayout info = romEntry != null
+                            ? hero(title, romEntry.tid, LibraryScreen.artLoader(getFilesDir(), romEntry))
+                            : hero(title, false);
         if (companion != null)
             companion.preparing(prepTid(), title);
         prepStatus = (Widgets.Chip)heroLine(info, getString(R.string.PREPARE_STARTING), Theme.OK);
@@ -5850,8 +5900,8 @@ public class LauncherActivity extends Activity {
                         && PackFreshness.judge(null, null, Pack.toolkitSha256OfKey(getFilesDir(), e.tid),
                                                Toolchain.toolkitDigest(this)) == PackFreshness.Verdict.OLDER_TOOLKIT;
         // Its cover (CoverArt) or the frame the shell kept, as on its library card; the monogram without either.
-        Bitmap cover = LibraryScreen.art(getFilesDir(), libArt, e);
-        LinearLayout info = hero(e.title(), false, cover);
+        ArtCache.Loader coverLoader = LibraryScreen.artLoader(getFilesDir(), e);
+        LinearLayout info = hero(e.title(), e.tid, coverLoader);
         String line;
         int color;
         switch (prepares ? p : Prep.OFF) {
@@ -5940,7 +5990,11 @@ public class LauncherActivity extends Activity {
         addHint("B", R.string.LIB_TITLE, this::back);
         favouriteHint(e);   // XBA-206
         if (companion != null) {
-            companion.art(cover);
+            companion.art(ArtCache.get(e.tid, coverLoader, ArtCache.px(Theme.ART), b -> {
+                if (b != null && companion != null && screen == Screen.ROM_HOME && romEntry != null
+                    && e.tid.equals(romEntry.tid))
+                    companion.art(b);
+            }));
             companion.home(e.title(), line, color, true, play.title);
         }
 
@@ -6698,25 +6752,27 @@ public class LauncherActivity extends Activity {
     private void onCoverFound(String key) {
         if (isFinishing() || isDestroyed())
             return;
-        libArt.remove(key);
+        ArtCache.invalidate(key);   // the next draw reads it again (the cached art stays shown meanwhile)
         List<GameCard> cards = libCardsByKey.get(key);
-        if (cards != null && !cards.isEmpty()) {
-            LibraryScreen.Entry e = cardEntry(cards.get(0));
-            Bitmap b = e == null ? null : LibraryScreen.art(getFilesDir(), libArt, e);
+        if (cards != null)
             for (GameCard c : cards)
-                c.setArt(b);
-        }
+                c.invalidate();
         if (key.equals(artTid)) {
             artTid = null;   // Home's image is read again
             if (screen == Screen.HOME && heroTile != null) {
-                refreshIdentity();
-                if (art != null)
+                refreshIdentity();   // set on the tile when it has loaded (identityLoaded), or here if cached
+                if (art != null && heroIdentity)
                     heroTile.setArt(art, artColor);
             }
         } else if (screen == Screen.ROM_HOME && romEntry != null && key.equals(romEntry.tid) && heroTile != null) {
-            Bitmap b = LibraryScreen.art(getFilesDir(), libArt, romEntry);
+            Widgets.ArtTile tile = heroTile;
+            Bitmap b = ArtCache.get(key, LibraryScreen.artLoader(getFilesDir(), romEntry), ArtCache.px(Theme.ART),
+                                    a -> {
+                                        if (a != null && tile == heroTile)
+                                            tile.setArt(a, artColor);
+                                    });
             if (b != null)
-                heroTile.setArt(b, artColor);
+                tile.setArt(b, artColor);
         }
     }
 
@@ -6730,7 +6786,7 @@ public class LauncherActivity extends Activity {
             return;
         }
         for (String k : keys) {
-            libArt.remove(k);
+            ArtCache.invalidate(k);
             if (k.equals(artTid))
                 artTid = null;
         }
@@ -6750,11 +6806,11 @@ public class LauncherActivity extends Activity {
                     Library.Record rr = games.get(tid);
                     if (!indexGames.containsKey(tid) && (rr == null || !rr.hasData())) {
                         GameTheme.clear(this, tid);
-                        libArt.remove(tid);
+                        ArtCache.invalidate(tid);
                     }
                 }
             }
-            libArt.values().removeIf(java.util.Objects::isNull);   // art the scan made shows now
+            ArtCache.forgetMisses();   // art the scan made shows now
             fetchCovers(r.index);
             netAfterScan();   // XBA-321: a game just downloaded goes on (import, Prepare)
             if (libEntries.isEmpty())
@@ -7003,7 +7059,7 @@ public class LauncherActivity extends Activity {
     private GameCard libCard(LibraryScreen.Entry e, int gridIndex) {
         GameCard c = new GameCard(this);
         boolean remote = RemoteLibrary.isRemoteKey(e.tid);   // XBA-319: the « remote content » art on its console's hue
-        c.setGame(LibraryScreen.art(getFilesDir(), libArt, e), remote ? e.console().id : e.tid, e.title(),
+        c.setGame(e.tid, LibraryScreen.artLoader(getFilesDir(), e), remote ? e.console().id : e.tid, e.title(),
                   LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e));
         c.setRemote(remote);
         c.setChipShown(LibraryScreen.chipShown(e));
@@ -7766,9 +7822,19 @@ public class LauncherActivity extends Activity {
         if (backdrop != null)
             backdrop.setGlows(g[0], g[1]);
         setContext(libContext(e), LibraryScreen.chipColor(e));
-        if (companion != null)
-            companion.library(e.title(), LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e),
-                              LibraryScreen.art(getFilesDir(), libArt, e), primaryLabel(e));
+        libCompanion(e);
+    }
+
+    /** The bottom screen: the focused game, its art when ArtCache has it (else shown again when it has loaded). */
+    private void libCompanion(LibraryScreen.Entry e) {
+        if (companion == null)
+            return;
+        Bitmap art = ArtCache.get(e.tid, LibraryScreen.artLoader(getFilesDir(), e), ArtCache.px(Theme.ART), b -> {
+            if (b != null && e.tid.equals(focusTid) && screen == Screen.LIBRARY && !isDestroyed())
+                libCompanion(e);
+        });
+        companion.library(e.title(), LibraryScreen.chipText(this, e), LibraryScreen.chipColor(e), art,
+                          primaryLabel(e));
     }
 
     /** « Ready · Yesterday · 12 h 40 min played »: the focused game's state, and when it was played. */
@@ -9118,7 +9184,7 @@ public class LauncherActivity extends Activity {
                         GameStore.forget(this);
                     if (!indexGames.containsKey(it.tid))
                         GameTheme.clear(this, it.tid);
-                    libArt.remove(it.tid);
+                    ArtCache.invalidate(it.tid);
                     sizeDir = null;
                     hashDir = null;
                     titleIdDir = null;
@@ -10595,7 +10661,7 @@ public class LauncherActivity extends Activity {
         importTid = null;
         titleIdDir = null;   // a new game may sit in the same folder: read its title ID again
         artTid = null;
-        libArt.remove(tid);
+        ArtCache.invalidate(tid);
         Log.i(TAG, "launcher: game set: " + dir + " (" + title + ", " + tid + ")");
         hashDir = r.dataDir;
         hashOk = Boolean.TRUE;

@@ -139,14 +139,16 @@ final class CoverArt {
 
     /** The game's cover: the downloaded one, its pack's title image, else the captured frame; null without any. */
     static Bitmap load(File filesDir, String key) {
+        return load(filesDir, key, 0);
+    }
+
+    /** load(), decoded no smaller than px on its shorter side (ArtCache.decode; 0: whole). Not on the UI thread. */
+    static Bitmap load(File filesDir, String key, int px) {
         for (File f : new File[] { artFile(filesDir, key), packArtFile(filesDir, key), shotFile(filesDir, key) }) {
-            if (f == null)
-                continue;
-            if (f.isFile()) {
-                Bitmap b = BitmapFactory.decodeFile(f.getPath());
-                if (b != null)
-                    return b;
-            }
+            Bitmap b = px > 0 ? ArtCache.decode(f, px)
+                              : f != null && f.isFile() ? BitmapFactory.decodeFile(f.getPath()) : null;
+            if (b != null)
+                return b;
         }
         return null;
     }

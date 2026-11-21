@@ -46,11 +46,16 @@ final class TitleArt {
      * monogram. This is the Xbox game's cover on its library card and its Home.
      */
     static Bitmap load(File filesDir, File xbe, String titleId) {
+        return load(filesDir, xbe, titleId, 0);
+    }
+
+    /** load(), the cached PNG decoded no smaller than side on its shorter side (ArtCache.decode; 0: whole). */
+    static Bitmap load(File filesDir, File xbe, String titleId, int side) {
         if (titleId == null)
             return null;
         File png = cacheFile(filesDir, titleId);
         if (png.isFile()) {
-            Bitmap b = BitmapFactory.decodeFile(png.getAbsolutePath());
+            Bitmap b = side > 0 ? ArtCache.decode(png, side) : BitmapFactory.decodeFile(png.getAbsolutePath());
             if (b != null)
                 return b;
         }
