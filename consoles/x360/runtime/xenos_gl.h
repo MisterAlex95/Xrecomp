@@ -82,8 +82,9 @@ typedef struct xenos_gl_stats {
     uint64_t resolve_flushes;      /* pending resolves written to guest memory afterwards */
     uint64_t resolves_dropped;     /* pending resolves dropped unwritten: the CPU wrote that memory first */
     /* WP-15, the perf line */
-    uint64_t noop_draws;           /* draws made that could not write anything (colour masked, no depth / stencil
-                                    * write, no memory export: Direct3D's dummy draws) */
+    uint64_t noop_draws;           /* WP-9: draws that cannot write anything (colour masked, no depth / stencil
+                                    * write, no memory export: Direct3D's dummy draws), skipped; counted the same
+                                    * with RECOMP_X360_NOOP_DRAWS=keep, which draws them */
     uint64_t rect_draws;           /* rectangle-list draws (Direct3D's clears) */
     uint64_t passes;               /* render passes: draws / clears / blits after the draw framebuffer changed
                                     * (process-wide, as hashed_bytes) */

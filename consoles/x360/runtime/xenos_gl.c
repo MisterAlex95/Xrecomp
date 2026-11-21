@@ -396,6 +396,7 @@ struct xenos_gl {
     unsigned copy_clock;
     uint32_t copy_gen;        /* the last rt_copy.gen given */
     int lazy;                 /* WP-2: RECOMP_X360_RESOLVE=lazy, resolves write guest memory only when needed */
+    int keep_noop;            /* WP-9: RECOMP_X360_NOOP_DRAWS=keep, draws that cannot write go through all the same */
     int rects_gpu;            /* WP-10: rectangle lists' fourth corner made on the GPU (RECOMP_X360_RECTS=cpu: not) */
     int copy_hash_full;       /* WP-12: RECOMP_X360_COPY_HASH=full, every check of a copy's memory hashes all of it */
     int npending;             /* copies with pending set */
@@ -760,6 +761,8 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     const char *resolve_env = getenv("RECOMP_X360_RESOLVE"); /* eager (default) | lazy (WP-2) */
     g->lazy = resolve_env && !strcmp(resolve_env, "lazy");
     fprintf(stderr, "xenos: resolves %s\n", g->lazy ? "lazy (RECOMP_X360_RESOLVE=lazy)" : "eager");
+    const char *noop_env = getenv("RECOMP_X360_NOOP_DRAWS"); /* skip (default) | keep (WP-9) */
+    g->keep_noop = noop_env && !strcmp(noop_env, "keep");
     /* WP-10: a rectangle list's captured vertices are read by the second pass as a uniform block of RECT_CHUNK
      * rectangles, bound at a multiple of its size in the capture buffer */
     const char *rects_env = getenv("RECOMP_X360_RECTS"); /* gpu (default) | cpu (read back, the corner on the CPU) */
@@ -4969,14 +4972,24 @@ static void memexport_end(xenos_gl *g, const xenos_cp *cp)
     g->epoch++; /* memory changed under the cached textures: compare them again */
 }
 
-/* WP-15 (WP-9's test): a draw that cannot change a pixel or memory: eDRAM mode colour + depth, every colour channel of
- * every target masked, depth writes and stencil off, no memory export (Direct3D's dummy draws, ~800 a frame in
- * Adventure Time) */
+/* WP-9: a draw that cannot change the eDRAM or memory: eDRAM mode colour + depth, RB_COLOR_MASK's nibble 0 for every
+ * colour target the pixel shader writes (and target 0, always bound), RB_DEPTHCONTROL with stencil off and not both z
+ * enable and z write, no memory export in either stage. Direct3D issues such dummy draws by the hundred per frame
+ * (Adventure Time: 1 point, runs of 24, ~792 of ~868 draws). Nothing else the GPU does here depends on a draw:
+ * occlusion and visibility queries report fixed results (xenos_cp.c), screen extents are faked. Skipped, the draw does
+ * not bind its targets, which would mark them written and make overlapping surfaces stale (rows cleared) for nothing,
+ * and it does not fetch indices or vertices (pending lazy resolves under them are written when something else reads
+ * that memory). Counted in noop_draws (the perf line's "no-op") either way; RECOMP_X360_NOOP_DRAWS=keep draws them. */
 static int draw_writes_nothing(const xenos_cp *cp, const program *p, const program *rp)
 {
-    uint32_t depth = cp->regs[0x2200]; /* RB_DEPTHCONTROL: stencil enable 0, z enable 1, z write 2 */
-    return (cp->regs[0x2208] & 7) == 4 && !(cp->regs[0x2104] & 0xFFFF) && !(depth & 1) && (depth & 6) != 6 &&
-           !p->memexport && !(rp && rp->memexport);
+    if ((cp->regs[0x2208] & 7) != 4 || p->memexport || (rp && rp->memexport))
+        return 0;
+    uint32_t cm = cp->regs[0x2104], depth = cp->regs[0x2200]; /* RB_DEPTHCONTROL: stencil enable 0, z 1, z write 2 */
+    unsigned targets = ((rp ? rp : p)->outputs | 1u) & 15u;
+    for (int i = 0; i < 4; i++)
+        if ((targets >> i) & 1 && (cm >> (4 * i)) & 15)
+            return 0;
+    return !(depth & 1) && (depth & 6) != 6;
 }
 
 void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
@@ -5017,6 +5030,11 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
     if (!p || (d->prim_type == 8 && !rp)) {
         g->st.no_shader++;
         return;
+    }
+    if (draw_writes_nothing(cp, p, rp)) {
+        g->st.noop_draws++;
+        if (!g->keep_noop)
+            return;
     }
     /* indices: from the DMA buffer or the packet (16 or 32 bits, VGT_DMA_SIZE's swap mode) or 0..n-1 */
     uint32_t n = d->num_indices, *idx = NULL, max_index = n - 1, min_index = 0;
@@ -5153,7 +5171,6 @@ void xenos_gl_draw(xenos_gl *g, const xenos_cp *cp, const xenos_draw *d)
         if (p->loc[a] >= 0)
             g->glDisableVertexAttribArray((GLuint)p->loc[a]);
     g->st.drawn++;
-    g->st.noop_draws += (uint64_t)draw_writes_nothing(cp, p, rp);
     g->st.rect_draws += d->prim_type == 8;
     free(conv);
 }

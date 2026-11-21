@@ -999,6 +999,25 @@ int main(int argc, char **argv)
 
     /* ---- XBA-296: each block below checks its own frames; the totals above stay those of frames 0-30 ---- */
     reg(0x2200, 0), reg(0x2205, 0), reg(0x2208, 4), reg(0x2000, 0), reg(0x2001, 0), reg(0x2102, 0);
+
+    /* WP-9: a draw with RB_COLOR_MASK 0 and depth / stencil off cannot write: counted, not drawn
+     * (RECOMP_X360_NOOP_DRAWS=keep: counted and drawn) */
+    {
+        xenos_gl_stats n0, n1;
+        xenos_gl_get_stats(g, &n0);
+        reg(0x2104, 0);
+        reg(0x4800, 0x4080u | 3u);
+        reg(0x4801, 2u | (64u << 2));
+        type3(PM4_DRAW_INDX_2, &strip_a, 1);
+        reg(0x2104, 0xFFFFu);
+        run(&cp);
+        xenos_gl_get_stats(g, &n1);
+        const char *noop_env = getenv("RECOMP_X360_NOOP_DRAWS");
+        int keep = noop_env && !strcmp(noop_env, "keep");
+        CHECK(n1.noop_draws - n0.noop_draws == 1u && n1.drawn - n0.drawn == (keep ? 1u : 0u),
+              "draw that cannot write: %llu counted, %llu drawn", (unsigned long long)(n1.noop_draws - n0.noop_draws),
+              (unsigned long long)(n1.drawn - n0.drawn));
+    }
     full_viewport();
     for (int i = 0; i < 4; i++)
         reg(0x4400 + (uint32_t)i, fbits(1.0f));
