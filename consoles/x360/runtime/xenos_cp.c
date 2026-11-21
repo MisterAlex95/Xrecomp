@@ -565,6 +565,9 @@ uint32_t xenos_cp_set_wptr(xenos_cp *cp, uint32_t wptr)
         n++;
     }
     cp->rptr = r.pos;
+    /* the packets' stores (memory writes, events, resolves) before the read pointer: a CPU that sees the new read
+     * pointer, possibly on another thread (WP-22), sees what came before it */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
     if (cp->rptr_writeback && cp->write32)
         cp->write32(cp->ctx, cp->rptr_writeback & 0x1FFFFFFFu, cp->rptr);
     return n;

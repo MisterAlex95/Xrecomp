@@ -11,7 +11,18 @@
  * PM4_INTERRUPT packets do the same with r3 = 1, once for each CPU the packet's mask names, as that CPU: the PCR's
  * (and the KTHREAD's) processor byte says it, since Direct3D's handler clears the bit of the CPU it runs on
  * (lbz 0x10C(r13)) from the word the ring then waits on. The vertical blank runs as CPU 2. VdSwap puts the front
- * buffer's fetch constant and the swap token in the ring; the front buffer of each swap is recorded (and traced). */
+ * buffer's fetch constant and the swap token in the ring; the front buffer of each swap is recorded (and traced).
+ *
+ * Two halves (WP-22, docs/runtime/x360-gpu-thread.md). The post half runs on the guest thread and owns everything
+ * the title can observe: the register page, the vertical blank, the interrupt context (raise_irq), the Vd* calls.
+ * The run half is the command processor and the renderer (xenos_cp_set_wptr: packets, draws, resolves, swaps). They
+ * meet only at struct gpu_link: the post half posts the write pointer; the run half answers with word stores into
+ * guest memory (read pointer write-back, MEM_WRITE / REG_TO_MEM / COND_WRITE / EVENT_WRITE_*, scratch write-back,
+ * resolves, memory export), a stalled flag (an unmet WAIT_REG_MEM: post again) and an interrupt-pending word the
+ * post half turns into raise_irq; x360_gpu_drain finishes what was posted (save states, rewind, lazy-resolve
+ * flushes) and gpu_hold / gpu_release bracket a change of the run half's state from the guest side (VdInitialize
+ * RingBuffer, VdEnableRingBufferRPtrWriteBack, a state load). Stage 1: the run half is called right after the post,
+ * on the same thread, so runs are what they were before the split, frame for frame and byte for byte. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,8 +38,24 @@
 #define GPU_MMIO 0x7FC80000u
 #define VBLANK_100NS 166667u
 
+/* The seam between the post half (guest thread) and the run half (the command processor and the renderer). Every word
+ * here is read and written with __atomic builtins: in stage 1 both halves run on one thread and the ordering costs
+ * nothing, in stage 2 the run half moves to the GL thread and this is all they share besides guest memory. Host state
+ * only (not in save states): x360_gpu_drain empties it before a state is taken or loaded. */
+#define LINK_IRQ_CPUS 0x3Fu      /* PM4_INTERRUPT: the CPUs whose source 1 callback is to run */
+#define LINK_IRQ_SRC0 0x100u     /* the run half asked for source 0 (not raised by any packet today) */
+#define LINK_IRQ_SRC1 0x200u     /* the run half asked for source 1 (PM4_INTERRUPT) */
+typedef struct gpu_link {
+    uint64_t post;     /* post side: (posts made << 32) | the write pointer of the last one */
+    uint32_t taken;    /* run side: the number of the last post it ran to (post >> 32 when there is nothing to do) */
+    uint32_t stalled;  /* run side: it stopped at an unmet wait; the post side posts again at its next poll */
+    uint32_t irq;      /* run side sets, post side takes: LINK_IRQ_* */
+} gpu_link;
+
 struct x360_gpu {
+    /* the run half's state: only x360_gpu_run (and code holding the GPU: gpu_hold, x360_gpu_drain) touches it */
     xenos_cp cp;
+    /* the post half's state: guest thread only */
     uint32_t irq_callback, irq_user;
     uint64_t next_vblank;
     uint32_t vblanks, last_wptr;
@@ -36,6 +63,8 @@ struct x360_gpu {
     uint32_t irq_cpus;  /* the CPUs whose source 1 callback is still to run (PM4_INTERRUPT's mask) */
     int ring;
     int irq_thread; /* the interrupt context's slot, -1 before the first interrupt */
+    gpu_link link;  /* the seam */
+    /* the run half's host state (from here down) */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
     /* --dump-shaders without a file system call per load (host state, not in save states): the (stage, CRC) of each
      * microcode already on disk, open-addressed (0 = empty, else stage << 32 | CRC | 1 << 33), and per stage the
@@ -242,8 +271,7 @@ void x360_render_reset(x360_machine *x)
 
 void x360_render_flush(x360_machine *x)
 {
-    if (x->gpu && x->gpu->gl)
-        xenos_gl_flush_resolves(x->gpu->gl, &x->gpu->cp);
+    x360_gpu_drain(x, 1); /* what was posted first, then the pending resolves, on the run half's side */
 }
 
 void x360_render_set_readback(x360_machine *x, int on)
@@ -352,6 +380,9 @@ void x360_gpu_opcode_histogram(x360_machine *x, FILE *out)
     fprintf(out, "\n");
 }
 
+/* the run half's access to guest memory: plain loads and stores, as a bus master's. phys_write (with the renderer's
+ * direct stores into cp.wmem for resolves) is the seam's store path: every guest-visible effect of the run half but
+ * interrupts goes through one of the two. */
 static uint32_t phys_read(void *ctx, uint32_t phys)
 {
     x360_machine *x = ctx;
@@ -364,14 +395,14 @@ static void phys_write(void *ctx, uint32_t phys, uint32_t v)
     x360_w32(x, x360_p2v(X360_VIEW_64K, phys & 0x1FFFFFFFu), v);
 }
 
+/* PM4_INTERRUPT (run half): not raise_irq itself, which makes or restarts a guest thread, but a bit in the seam's
+ * interrupt word; the post half turns it into raise_irq (gpu_take_irq) */
 static void cp_interrupt(void *ctx, uint32_t source, uint32_t cpu)
 {
     x360_machine *x = ctx;
-    if (x->gpu) {
-        x->gpu->irq_pending[source & 1] = 1;
-        if (source & 1)
-            x->gpu->irq_cpus |= 1u << (cpu % 6);
-    }
+    if (x->gpu)
+        __atomic_fetch_or(&x->gpu->link.irq, source & 1 ? LINK_IRQ_SRC1 | 1u << (cpu % 6) : LINK_IRQ_SRC0,
+                          __ATOMIC_RELEASE);
 }
 
 static struct x360_gpu *gpu_of(x360_machine *x)
@@ -449,12 +480,56 @@ static void raise_irq(x360_machine *x, struct x360_gpu *g, uint32_t source)
     x360_w8(x, t->pcr + 0x10C, (uint8_t)cpu);
 }
 
-void x360_gpu_poll(x360_machine *x)
+/* ---- the two halves (WP-22) ---- */
+
+/* the interrupts the run half asked for since the last call, into the post half's queue (as cp_interrupt did before
+ * the split, at the same point of the poll: right after the packets ran) */
+static void gpu_take_irq(struct x360_gpu *g)
+{
+    uint32_t f = __atomic_exchange_n(&g->link.irq, 0, __ATOMIC_ACQUIRE);
+    if (f & LINK_IRQ_SRC0)
+        g->irq_pending[0] = 1;
+    if (f & LINK_IRQ_SRC1) {
+        g->irq_pending[1] = 1;
+        g->irq_cpus |= f & LINK_IRQ_CPUS;
+    }
+}
+
+/* the seam as the run half's state stands (after the guest side changed it under gpu_hold, or loaded it): nothing
+ * posted is left to run, the stalled flag is the command processor's */
+static void link_sync(struct x360_gpu *g)
+{
+    uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
+    __atomic_store_n(&g->link.taken, (uint32_t)(post >> 32), __ATOMIC_RELAXED);
+    __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
+}
+
+/* Run half: the packets up to the write pointer last posted (draws, resolves, swaps through the renderer's hooks).
+ * Reads only the seam's post word and guest memory; answers through guest memory, link.stalled and link.irq.
+ * Returns 1 when there was a post to run. Stage 1: called by x360_gpu_poll right after the post (and by
+ * x360_gpu_drain); a later stage calls it on the GL thread. */
+int x360_gpu_run(x360_machine *x)
 {
     struct x360_gpu *g = x->gpu;
     if (!g)
-        return;
-    uint64_t now = x360_now(x);
+        return 0;
+    uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_ACQUIRE);
+    if ((uint32_t)(post >> 32) == __atomic_load_n(&g->link.taken, __ATOMIC_RELAXED))
+        return 0;
+    uint32_t w = (uint32_t)post;
+    uint64_t t0 = mono_ns(), c0 = thread_cpu_ns();
+    xenos_cp_set_wptr(&g->cp, w);
+    g->cp_ns += mono_ns() - t0;
+    g->cp_cpu_ns += thread_cpu_ns() - c0;
+    __atomic_store_n(&g->link.stalled, (uint32_t)(g->cp.stalled != 0), __ATOMIC_RELAXED);
+    __atomic_store_n(&g->link.taken, (uint32_t)(post >> 32), __ATOMIC_RELEASE); /* drain waits on this one */
+    return 1;
+}
+
+/* Post half, first part: the registers titles poll, and the write pointer posted when the title moved it (or the
+ * run half stalled on a wait: it looks again). Guest thread. */
+static void gpu_post(x360_machine *x, struct x360_gpu *g, uint64_t now)
+{
     /* registers titles poll: the vertical counter, the display interrupt status, the viewport size. The status
      * reads 1 (the vertical blank occurred), as in Xenia: Direct3D's interrupt handler tests that bit before it
      * runs its vertical blank routine, the only display interrupt this runtime raises. */
@@ -463,14 +538,20 @@ void x360_gpu_poll(x360_machine *x)
     x360_w32(x, GPU_MMIO + 4 * 0x1961, 1280u << 16 | 720u);
     if (g->ring) {
         uint32_t w = x360_r32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR);
-        if (w != g->last_wptr || g->cp.stalled) {
+        if (w != g->last_wptr || __atomic_load_n(&g->link.stalled, __ATOMIC_RELAXED)) {
             g->last_wptr = w;
-            uint64_t t0 = mono_ns(), c0 = thread_cpu_ns();
-            xenos_cp_set_wptr(&g->cp, w);
-            g->cp_ns += mono_ns() - t0;
-            g->cp_cpu_ns += thread_cpu_ns() - c0;
+            uint64_t post = __atomic_load_n(&g->link.post, __ATOMIC_RELAXED);
+            /* release: the ring's packets (and what they point at), stored by the guest before it moved the write
+             * pointer, are visible to the run half before the post is */
+            __atomic_store_n(&g->link.post, ((post >> 32) + 1) << 32 | w, __ATOMIC_RELEASE);
         }
     }
+}
+
+/* Post half, second part: the run half's interrupts, then the vertical blank, then raise_irq for what is queued */
+static void gpu_post_irq(x360_machine *x, struct x360_gpu *g, uint64_t now)
+{
+    gpu_take_irq(g);
     if (g->irq_callback && now >= g->next_vblank) {
         g->next_vblank = now + VBLANK_100NS - (now - g->next_vblank) % VBLANK_100NS;
         g->vblanks++;
@@ -483,12 +564,52 @@ void x360_gpu_poll(x360_machine *x)
         }
 }
 
+void x360_gpu_poll(x360_machine *x)
+{
+    struct x360_gpu *g = x->gpu;
+    if (!g)
+        return;
+    uint64_t now = x360_now(x);
+    gpu_post(x, g, now);
+    x360_gpu_run(x); /* stage 1: the run half right here, on the guest thread (a later stage wakes the GL thread) */
+    gpu_post_irq(x, g, now);
+}
+
+/* Everything posted run to its end, and (flush_resolves) the lazy resolves written to guest memory, the interrupts
+ * the run half raised queued on the post side: afterwards guest memory and the GPU state are what a save state takes,
+ * as long as the post side posts nothing new (the caller holds the machine: s_mu, x360_run not running). Stage 1:
+ * the run half is called here; a later stage hands the request to the GL thread and waits for it. */
+void x360_gpu_drain(x360_machine *x, int flush_resolves)
+{
+    struct x360_gpu *g = x->gpu;
+    if (!g)
+        return;
+    x360_gpu_run(x);
+    if (flush_resolves && g->gl)
+        xenos_gl_flush_resolves(g->gl, &g->cp);
+    gpu_take_irq(g);
+}
+
+/* A change of the run half's state from the guest side (a Vd* call, a state load) between gpu_hold and gpu_release:
+ * drained first, so nothing posted runs against the old state; a later stage also takes the run half's mutex here. */
+static void gpu_hold(x360_machine *x, struct x360_gpu *g)
+{
+    (void)g;
+    x360_gpu_drain(x, 0);
+}
+
+static void gpu_release(struct x360_gpu *g)
+{
+    link_sync(g);
+}
+
 /* save states (x360_state.c): the command processor and the interrupt state, field by field */
 void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), void (*u64)(void *, uint64_t *),
                     void (*i32)(void *, int *), uint32_t version, int load)
 {
     struct x360_gpu *g = gpu_of(x);
     xenos_cp *cp = &g->cp;
+    gpu_hold(x, g); /* x360_state_save / _load drained already: nothing to run, only the bracket */
     for (uint32_t k = 0; k < XENOS_REGS; k++)
         u32(s, &cp->regs[k]);
     u32(s, &cp->rb_base);
@@ -541,6 +662,7 @@ void x360_gpu_state(x360_machine *x, void *s, void (*u32)(void *, uint32_t *), v
         g->irq_cpus &= 0x3F;
     } else if (load)
         g->irq_cpus = 0;
+    gpu_release(g); /* a load: the seam follows the loaded command processor (its stalled flag) */
 }
 
 uint64_t x360_gpu_next_event(x360_machine *x)
@@ -553,17 +675,24 @@ uint64_t x360_gpu_next_event(x360_machine *x)
 void x360_gpu_bin_reset(x360_machine *x)
 {
     struct x360_gpu *g = x->gpu;
-    if (g)
+    if (g) {
+        gpu_hold(x, g);
         g->cp.bin_mask = g->cp.bin_select = 0xFFFFFFFFu;
+        gpu_release(g);
+    }
 }
 
 void x360_gpu_bin_state(x360_machine *x, void *s, void (*u64)(void *, uint64_t *))
 {
     struct x360_gpu *g = gpu_of(x);
+    gpu_hold(x, g);
     u64(s, &g->cp.bin_mask);
     u64(s, &g->cp.bin_select);
+    gpu_release(g);
 }
 
+/* packets, draws and swaps are the run half's counters: read as they stand (a later stage: after a drain, or racy for
+ * the stats line only) */
 void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks)
 {
     struct x360_gpu *g = x->gpu;
@@ -579,7 +708,9 @@ void x360_k_VdInitializeRingBuffer(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
     struct x360_gpu *g = gpu_of(x);
+    gpu_hold(x, g);
     xenos_cp_ring_init(&g->cp, A(0), A(1)); /* (physical address, log2 of the size in quadwords) */
+    gpu_release(g);
     g->ring = 1;
     g->last_wptr = 0;
     x360_w32(x, GPU_MMIO + 4 * XENOS_REG_CP_RB_WPTR, 0);
@@ -589,7 +720,10 @@ void x360_k_VdInitializeRingBuffer(x360_machine *x, x360_thread *t, xe_cpu *c)
 void x360_k_VdEnableRingBufferRPtrWriteBack(x360_machine *x, x360_thread *t, xe_cpu *c)
 {
     (void)t;
-    gpu_of(x)->cp.rptr_writeback = A(0);
+    struct x360_gpu *g = gpu_of(x);
+    gpu_hold(x, g);
+    g->cp.rptr_writeback = A(0);
+    gpu_release(g);
     RET(0);
 }
 
