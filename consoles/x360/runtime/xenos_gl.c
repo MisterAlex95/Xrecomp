@@ -4415,6 +4415,46 @@ static inline __attribute__((always_inline)) void direct_rows(const xenos_cp *cp
     }
 }
 
+/* WP-36: RGBA bytes into a 16-bit format whose fields each hold one channel's unorm (3 1_5_5_5, 4 5_6_5, 5 6_5_5,
+ * 10 8_8, 15 4_4_4_4, 24 16): encode_texel of one channel alone (the others 0, which encode to 0 bits) is that
+ * channel's field, so a table per channel built with it and ORed gives the generic way's bits without its floats; the
+ * bytes of up to 8 texels (16 bytes, contiguous in a tiled row) go out in one put_bytes, whose whole dwords are what
+ * the generic way's per-texel read-modify-writes end with. (Warhammer resolves its 1280 x 720 picture to 5_6_5 twice
+ * a frame: ~19 ms per frame in encode_texel and the per-texel read-modify-write before.) */
+static int direct16_format(uint32_t f)
+{
+    return f == 3 || f == 4 || f == 5 || f == 10 || f == 15 || f == 24;
+}
+
+static void direct16_rows(const xenos_cp *cp, const resolve_dest *d, const uint8_t *px, int x0, int y0, int w, int h)
+{
+    uint16_t lut[4][256];
+    for (int c = 0; c < 4; c++)
+        for (int b = 0; b < 256; b++) {
+            float p[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            uint8_t o[16] = {0};
+            p[c] = (float)b / 255.0f; /* pix_float's value of that byte (the generic way's factor 1 leaves it so) */
+            encode_texel(d->fmt, p, o);
+            lut[c][b] = (uint16_t)(o[0] | o[1] << 8);
+        }
+    const int sr = d->swap_rb ? 2 : 0, sb = d->swap_rb ? 0 : 2; /* the source byte of the format's red / blue */
+    for (int y = 0; y < h; y++) {
+        const uint8_t *row = px + (size_t)y * w * 4;
+        for (int x = 0; x < w;) {
+            int gx = x0 + x, run = 8 - (gx & 7);
+            run = run < w - x ? run : w - x;
+            uint8_t t[16];
+            for (int i = 0; i < run; i++) {
+                const uint8_t *sp = row + (size_t)(x + i) * 4;
+                uint32_t v = lut[0][sp[sr]] | lut[1][sp[1]] | lut[2][sp[sb]] | lut[3][sp[3]];
+                t[2 * i] = (uint8_t)v, t[2 * i + 1] = (uint8_t)(v >> 8);
+            }
+            put_bytes(cp, d->base + (uint32_t)tiled2d(gx, y0 + y, d->pitch_aligned, 1), t, 2 * run, d->endian);
+            x += run;
+        }
+    }
+}
+
 /* the direct way, for the pairs it knows (with no exponent bias and a dword-aligned destination); 0 (nothing
  * written) for any other */
 static int resolve_write_direct(const xenos_cp *cp, const resolve_dest *d, const uint8_t *px, int lay, int x0, int y0,
@@ -4432,6 +4472,8 @@ static int resolve_write_direct(const xenos_cp *cp, const resolve_dest *d, const
         kind = DIRECT_HALF4;
     else if (lay == PIX_F32X4 && f == 36)
         kind = DIRECT_F32;
+    else if (lay == PIX_U8X4 && direct16_format(f))
+        return direct16_rows(cp, d, px, x0, y0, w, h), 1;
     else
         return 0;
     /* one copy of the loop per pair, swap mode and red / blue exchange: the per-texel work folds into a few
@@ -5318,17 +5360,26 @@ static const uint8_t *read_stencil(xenos_gl *g, const surface *s, int x0, int y0
     g->glViewport(0, 0, hw, hh);
     use_program(g, g->sprog);
     bind_vao(g, g->vao);
-    for (int bit = 0; bit < 8; bit++) {
+    /* WP-36: four bits a read-back, one per colour channel (the pass of bit 4 * half + c writes channel c alone): 2
+     * read-backs and CPU passes instead of 8 */
+    for (int half = 0; half < 2; half++) {
+        g->glColorMask(1, 1, 1, 1);
         g->glClearColor(0, 0, 0, 0);
         g->glClear(GL_COLOR_BUFFER_BIT);
-        g->glStencilFuncSeparate(GL_FRONT_AND_BACK, 0x0202 /* GL_EQUAL */, 0xFF, 1u << bit);
-        g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+        for (int c = 0; c < 4; c++) {
+            g->glColorMask(c == 0, c == 1, c == 2, c == 3);
+            g->glStencilFuncSeparate(GL_FRONT_AND_BACK, 0x0202 /* GL_EQUAL */, 0xFF, 1u << (4 * half + c));
+            g->glDrawArrays(4 /* GL_TRIANGLES */, 0, 3);
+        }
         g->glReadPixels(0, y0 * sc, hw, h * sc, GL_RGBA, GL_UNSIGNED_BYTE, rows);
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-                if (rows[((size_t)y * sc * hw + (size_t)(x0 + x) * sc) * 4])
-                    out[(size_t)y * w + x] |= (uint8_t)(1u << bit);
+        for (int y = 0; y < h; y++) {
+            const uint8_t *r = rows + ((size_t)y * sc * hw + (size_t)x0 * sc) * 4;
+            uint8_t *o = out + (size_t)y * w;
+            for (int x = 0; x < w; x++, r += (size_t)sc * 4)
+                o[x] |= (uint8_t)(((r[0] != 0) | (r[1] != 0) << 1 | (r[2] != 0) << 2 | (r[3] != 0) << 3) << (4 * half));
+        }
     }
+    g->glColorMask(1, 1, 1, 1);
     g->glDisable(GL_STENCIL_TEST);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
