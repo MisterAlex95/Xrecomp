@@ -103,7 +103,7 @@ struct x360_gpu {
     int deferred; /* x360_gpu_set_deferred: x360_gpu_poll posts only; x360_gpu_run / _drain run (stage 2's hook) */
     gpu_overlap ov;         /* stage 2: the CPU worker and the GL thread's service (x360_gpu_overlap) */
     uint64_t swaps_issued;  /* post side: VdSwap calls (counted from cp.swaps at link_sync), stage 2's back-pressure */
-    uint64_t lag_t; /* post side, stage 2 unpaced: virtual time (+1) since posted work has been waiting for the GL thread */
+    uint64_t lag_t;         /* post side, stage 2 unpaced: virtual time (+1) since posted work waits on the GL thread */
     uint64_t inline_cpu_ns; /* the part of cp_cpu_ns spent on the guest's own thread (stage 1 runs): x360_gpu_cpu_ns */
     /* the run half's host state (from here down) */
     char shader_dir[512]; /* --dump-shaders: each distinct microcode written there once */
