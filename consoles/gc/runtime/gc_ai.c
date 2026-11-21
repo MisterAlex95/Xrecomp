@@ -314,6 +314,40 @@ static inline __attribute__((always_inline)) void produce_span(gc_machine *m, gc
     a->out_done = done, a->overruns = overruns;
 }
 
+/* produce_span(quiet) when the DMA's side is silent too: its history silence and every FIFO frame the span takes
+ * silence (the AI DMA off pushes zero frames). Then every output frame is silence and only the DMA's phase and FIFO
+ * move: (phase + frames * in_rate) / out_rate frames taken (an empty FIFO gives silence), the rest of the sum the new
+ * phase, as frame by frame. true when done, false (nothing done) otherwise: a game's sound (or a GX demo's quiet). */
+static bool produce_silence(gc_audio *a, uint64_t upto)
+{
+    gc_resampler *rd = &a->rs_dma;
+    uint64_t n = upto - a->out_done;
+    if (!hist_silent(rd) || rd->phase >= rd->out_rate || (uint64_t)rd->out_rate + rd->in_rate > UINT32_MAX)
+        return false;
+    uint64_t sum = (uint64_t)rd->phase + n * rd->in_rate, taken = sum / rd->out_rate;
+    unsigned k = taken < a->fn ? (unsigned)taken : a->fn;
+    for (unsigned j = 0, i = a->fh; j < k; j++, i = (i + 1) % GC_AID_FIFO)
+        if (a->fifo[i][0] | a->fifo[i][1])
+            return false;
+    rd->phase = (uint32_t)(sum % rd->out_rate);
+    a->fh = (a->fh + k) % GC_AID_FIFO;
+    a->fn -= k;
+    unsigned rh = a->rh, rn = a->rn;
+    for (uint64_t f = 0; f < n; f++) {
+        if (rn == GC_OUT_RING) {
+            rh = (rh + 1) % GC_OUT_RING;
+            rn--;
+            a->overruns++;
+        }
+        unsigned i = (rh + rn) % GC_OUT_RING;
+        a->ring[i][0] = a->ring[i][1] = 0;
+        rn++;
+    }
+    a->rh = rh, a->rn = rn;
+    a->out_done = upto;
+    return true;
+}
+
 static void produce(gc_machine *m, uint64_t upto)
 {
     gc_audio *a = m->audio;
@@ -328,7 +362,8 @@ static void produce(gc_machine *m, uint64_t upto)
     if (!((a->aicr & AICR_PSTAT) && m->di) && hist_silent(st) && st->phase < st->out_rate &&
         (uint64_t)st->out_rate + st->in_rate <= UINT32_MAX && upto - a->out_done <= UINT32_MAX) {
         st->phase = (uint32_t)(((uint64_t)st->phase + (upto - a->out_done) * st->in_rate) % st->out_rate);
-        produce_span(m, a, upto, true);
+        if (!produce_silence(a, upto))
+            produce_span(m, a, upto, true);
     } else {
         produce_span(m, a, upto, false);
     }
