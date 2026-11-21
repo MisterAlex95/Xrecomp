@@ -2045,7 +2045,9 @@ for the folder again).
   through the Storage Access Framework, its document URI (`<tree>/document/<id>`), which `ShellActivity` opens and
   hands over as `fd:N` (detached; the runtime reads it from offset 0; unreachable: `fd:-1`). `shell_main.c` sees a
   game of another console (`xba_pack_rom_console`, which reads `fd:N` too), turns off the Xbox disc mount for that
-  process (`RECOMP_DISC_IMAGE=0`: the mount would close the descriptor) and calls `xba_pack_load_rom`; without a pack
+  process (`RECOMP_DISC_IMAGE=0`, before `xbox_path_init`: the mount would close the descriptor, and an Xbox 360 ISO
+  would be mounted as an Xbox disc), starts with `recomp_app_start_rom` (the directories only, logged
+  `xboxrecomp: <file>: a gba game, for its own runtime`) and calls `xba_pack_load_rom`; without a pack
   that is `PACK_NONE gba <KEY> (not prepared, the interpreter runs it)` and `gba_runtime_start(rom, NULL, key)`.
   With a pack: `PACK_LOADED gba <KEY> (<N> functions)`, or `PACK_STALE gba <KEY> (<why>), running interpreted` when
   it is not this ROM's, this shell's or does not load (the game always starts). At exit the addresses the interpreter
@@ -3926,6 +3928,9 @@ int recomp_title_main(const recomp_storage *store);   /* store->game_dir, ->save
 
 1. `SDL_main` calls `recomp_app_start()` (`src/platform/recomp_app.c`): logcat, `recomp.cfg`, the Android defaults
    below, storage and `xbox_path_init`, fast cores, the fault handler. A title gets all of them by being linked in.
+   A game of another console (`RECOMP_GAME_DIR` that `xba_pack_rom_console` recognises, identified once) goes
+   through `recomp_app_start_rom` instead: the same steps, the directories only (no `default.xbe`), after
+   `RECOMP_DISC_IMAGE=0`.
 2. `SDL_Init`, the fault handler checked again, `xboxrecomp ready (build …, SDL …, title)`.
 3. When `default.xbe` is found and a title is linked, `xbox_HostWindowMain(title_boot)`: the window on the main
    thread, `recomp_title_main(&store)` on a 64 MB guest thread, the lifecycle watch; quitting is the

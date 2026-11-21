@@ -48,8 +48,10 @@ void recomp_app_set_defaults(int android)
                " in recomp.cfg turn them off)\n", set);
 }
 
-int recomp_app_start(const char *external, const char *internal,
-                     recomp_storage *store)
+/* rom: the game is another console's (recomp_app_start_rom), whose file is
+ * no Xbox disc: the directories only, no default.xbe to look for. */
+static int app_start(const char *external, const char *internal,
+                     recomp_storage *store, int rom)
 {
     int have_game = -1;
 
@@ -79,13 +81,19 @@ int recomp_app_start(const char *external, const char *internal,
      * and before any title code opens a file. */
     memset(store, 0, sizeof *store);
     if (external && internal)
-        have_game = recomp_storage_resolve(external, internal, store);
+        have_game = rom ? recomp_storage_resolve_entry(external, internal, NULL, store)
+                        : recomp_storage_resolve(external, internal, store);
     if (have_game >= 0) {
         xbox_path_init(store->game_dir, store->save_dir);
         /* A disc image the kernel could not mount (kernel_disc.c said why): no
          * game, as for a folder without default.xbe. */
         if (have_game > 0 && xbox_disc_spec_is_image(store->game_dir) && !xbox_disc_mounted()) {
-            fprintf(stderr, "xboxrecomp: %s: the disc image cannot be read\n", store->game_dir);
+            const char *off = getenv("RECOMP_DISC_IMAGE");
+            if (off && strcmp(off, "0") == 0)
+                fprintf(stderr, "xboxrecomp: %s: disc images are off (RECOMP_DISC_IMAGE=0): extract it, "
+                                "or remove the line from recomp.cfg\n", store->game_dir);
+            else
+                fprintf(stderr, "xboxrecomp: %s: the disc image cannot be read\n", store->game_dir);
             store->xbe[0] = '\0';
             have_game = 0;
         }
@@ -102,4 +110,16 @@ int recomp_app_start(const char *external, const char *internal,
         fprintf(stderr, "xboxrecomp: could not install the MMIO fault handler\n");
 
     return have_game;
+}
+
+int recomp_app_start(const char *external, const char *internal,
+                     recomp_storage *store)
+{
+    return app_start(external, internal, store, 0);
+}
+
+int recomp_app_start_rom(const char *external, const char *internal,
+                         recomp_storage *store)
+{
+    return app_start(external, internal, store, 1);
 }

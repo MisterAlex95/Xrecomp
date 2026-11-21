@@ -39,9 +39,25 @@ extern "C" {
  *
  * store is filled (all "" when storage could not be resolved). Returns what
  * recomp_storage_resolve returned: 1 when default.xbe was found, 0 when it
- * was not, -1 when there was no usable storage (or no paths were given). */
+ * was not, -1 when there was no usable storage (or no paths were given).
+ * A disc image the kernel did not mount is 0 too, with one stderr line:
+ * "disc images are off" when RECOMP_DISC_IMAGE=0 refused it, "the disc image
+ * cannot be read" otherwise. */
 int recomp_app_start(const char *external, const char *internal,
                      recomp_storage *store);
+
+/* The same start-up for a game of another console (a GBA, PS1, N64 or
+ * GameCube ROM, an Xbox 360 disc: recomp_pack.h), which its own runtime
+ * plays. Step 4 resolves the directories only
+ * (recomp_storage_resolve_entry with no entry): no default.xbe looked for,
+ * no "disc image" in the storage line, nothing created over the game's file.
+ * xbox_path_init still gets them (save_dir as for an Xbox game): the caller
+ * sets RECOMP_DISC_IMAGE=0 first, or a disc image the kernel can read (an
+ * Xbox 360 ISO, XBA-270) would be mounted as D:\. store->xbe stays "".
+ * Returns 0, or -1 when there was no usable storage (or no paths were
+ * given). */
+int recomp_app_start_rom(const char *external, const char *internal,
+                         recomp_storage *store);
 
 /* The host's defaults, for variables neither the environment nor recomp.cfg
  * set. On Android (android != 0):
