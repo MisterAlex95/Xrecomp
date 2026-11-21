@@ -235,6 +235,11 @@ int main(void)
             resolve_write_direct(&cp, &d, px, PIX_U8X4, 0, 0, 1920, 1080);
         double t2 = now_ms();
         printf("1920 x 1080 8_8_8_8 resolve write: generic %.2f ms, direct %.2f ms\n", t1 - t0, (t2 - t1) / 10);
+        resolve_dest d16 = {0x100000u, 1920, 4, 1, 0, 0}; /* 5_6_5, 8-in-16 */
+        double t3 = now_ms();
+        for (int i = 0; i < 10; i++)
+            resolve_write_direct(&cp, &d16, px, PIX_U8X4, 0, 0, 1920, 1080);
+        printf("1920 x 1080 5_6_5 resolve write: direct %.2f ms\n", (now_ms() - t3) / 10);
     }
     free(px);
     free(ref);

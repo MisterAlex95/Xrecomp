@@ -4702,18 +4702,38 @@ static void direct16_rows(const xenos_cp *cp, const resolve_dest *d, const uint8
             lut[c][b] = (uint16_t)(o[0] | o[1] << 8);
         }
     const int sr = d->swap_rb ? 2 : 0, sb = d->swap_rb ? 0 : 2; /* the source byte of the format's red / blue */
+    const uint32_t base = d->base, endian = d->endian;
+    uint8_t *const wmem = cp->wmem;
+    uint32_t in_tile[32]; /* the addresses by tile row, as direct_rows (tiled2d_split) */
+    for (int i = 0; i < 32; i++)
+        in_tile[i] = (uint32_t)tiled2d(i, 0, 32, 1);
     for (int y = 0; y < h; y++) {
         const uint8_t *row = px + (size_t)y * w * 4;
+        uint32_t tile = 0;
         for (int x = 0; x < w;) {
             int gx = x0 + x, run = 8 - (gx & 7);
             run = run < w - x ? run : w - x;
+            if (x == 0 || (gx & 31) == 0)
+                tile = (uint32_t)tiled2d(gx & ~31, y0 + y, d->pitch_aligned, 1);
+            uint32_t a = base + (tile ^ in_tile[gx & 31]), pa = a & 0x1FFFFFFFu;
+            if (run == 8 && wmem && !(a & 3) && pa <= 0x20000000u - 16) { /* 4 whole dwords: put_bytes' stores */
+                const uint8_t *sp = row + (size_t)x * 4;
+                for (int k = 0; k < 4; k++, sp += 8) {
+                    uint32_t lo = lut[0][sp[sr]] | lut[1][sp[1]] | lut[2][sp[sb]] | lut[3][sp[3]];
+                    uint32_t hi = lut[0][sp[4 + sr]] | lut[1][sp[5]] | lut[2][sp[4 + sb]] | lut[3][sp[7]];
+                    uint32_t word = gpu_swap(lo | hi << 16, endian);
+                    memcpy(wmem + pa + 4 * (uint32_t)k, &word, 4);
+                }
+                x += run;
+                continue;
+            }
             uint8_t t[16];
             for (int i = 0; i < run; i++) {
                 const uint8_t *sp = row + (size_t)(x + i) * 4;
                 uint32_t v = lut[0][sp[sr]] | lut[1][sp[1]] | lut[2][sp[sb]] | lut[3][sp[3]];
                 t[2 * i] = (uint8_t)v, t[2 * i + 1] = (uint8_t)(v >> 8);
             }
-            put_bytes(cp, d->base + (uint32_t)tiled2d(gx, y0 + y, d->pitch_aligned, 1), t, 2 * run, d->endian);
+            put_bytes(cp, a, t, 2 * run, endian);
             x += run;
         }
     }
