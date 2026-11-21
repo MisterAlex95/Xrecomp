@@ -22,6 +22,9 @@ struct RootView: View {
         } message: {
             Text(model.notice ?? "")
         }
+        .sheet(item: $model.report) { draft in
+            ReportSheet(draft: draft).environmentObject(model)
+        }
     }
 
     private var splitView: some View {

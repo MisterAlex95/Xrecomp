@@ -130,6 +130,13 @@ struct FailedView: View {
                         } label: { Label("Copy log", systemImage: "doc.on.doc") }
                         .buttonStyle(PillButtonStyle())
                     }
+                    if model.reportsAvailable {
+                        Button { model.actions?.draftReport(.prepare(game.id)) } label: {
+                            Label("Send report", systemImage: "paperplane")
+                        }
+                        .buttonStyle(PillButtonStyle())
+                        .help("Send this failure and its log to the XRecomp project (you see it first)")
+                    }
                     Spacer()
                 }
             }

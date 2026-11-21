@@ -105,6 +105,28 @@ public class CrashReportTest {
         assertEquals("", CrashReport.scrub(null));
     }
 
+    /** XBA-342: desktop home folders, the same vectors as macos/Sources/xrecomp-check/ReportChecks.swift. */
+    @Test
+    public void scrubsHomeFolders() {
+        assertEquals("# RECOMP_SAVE_DIR=<app:xboxrecomp>/titles/58410001/save",
+                     CrashReport.scrub("# RECOMP_SAVE_DIR=/Users/you/Library/Application Support/xboxrecomp/titles/58410001/save"));
+        assertEquals("<app:xboxrecomp>/settings.json",
+                     CrashReport.scrub("~/Library/Application Support/xboxrecomp/settings.json"));
+        assertEquals("open <path>/Halo (USA).iso failed",
+                     CrashReport.scrub("open /Users/you/Games/Xbox/Halo (USA).iso failed"));
+        assertEquals("<path>/x.py:12: error", CrashReport.scrub("/Users/you/src/Xrecomp/tools/prepare/x.py:12: error"));
+        assertEquals("HOME=<path>", CrashReport.scrub("HOME=/Users/you"));
+        assertEquals("cd <path>/ ok", CrashReport.scrub("cd /Users/you/ ok"));
+        assertEquals("<path>/disc.iso", CrashReport.scrub("/home/you/roms/disc.iso"));
+        assertEquals("<path>/x.iso", CrashReport.scrub("C:\\Users\\John Smith\\Documents\\x.iso"));
+        assertEquals("log <path>/run.log", CrashReport.scrub("log c:/users/you/AppData/Local/xrecomp/run.log"));
+        assertEquals("cwd <path>", CrashReport.scrub("cwd C:\\Users\\you"));
+        for (String in : new String[] {"/Users/you/a", "/home/you/a b/c", "C:\\Users\\you\\x"})
+            assertFalse(CrashReport.scrub(in), CrashReport.scrub(in).contains("you"));
+        // Not a home folder: left alone.
+        assertEquals("/usr/lib/libSystem.B.dylib", CrashReport.scrub("/usr/lib/libSystem.B.dylib"));
+    }
+
     @Test
     public void trimsTheLogKeepingHeadAndTail() {
         byte[] small = "short".getBytes(StandardCharsets.UTF_8);

@@ -139,6 +139,24 @@ struct LsfgInfo: Equatable {
     var vulkan: String?
 }
 
+/// What a « Send report » is about (XBA-342).
+enum ReportSubject: Equatable {
+    /// A title's failed Prepare (its PrepareState.failed).
+    case prepare(String)
+    /// A title's last run.
+    case game(String)
+    /// The newest run of any title (About › Send a report about the last game).
+    case lastGame
+}
+
+/// The report the confirm sheet shows: built, not sent.
+struct ReportDraft: Identifiable {
+    let id = UUID()
+    let report: CrashReport
+    /// The server it goes to (« rustrak.adserver.fr »).
+    let server: String
+}
+
 /// What the views ask for. AppStore does it for real; PreviewStore (--demo) pretends.
 @MainActor
 protocol LauncherActions: AnyObject {
@@ -176,6 +194,10 @@ protocol LauncherActions: AnyObject {
     func refreshLsfg()
     /// « Choose Lossless.dll… »: builds lsfg_translate when needed and fills the cache from the player's DLL.
     func importLossless(_ url: URL)
+    /// « Send report » (XBA-342): builds the report and shows it (model.report); nothing leaves yet.
+    func draftReport(_ subject: ReportSubject)
+    /// The sheet's Send: posts it off the main thread, then a notice says how it went.
+    func sendReport(_ report: CrashReport)
 }
 
 /// The launcher's state, observed by every view.
@@ -198,6 +220,10 @@ final class LauncherModel: ObservableObject {
     @Published var scannedOnce = false
     /// Frame generation's shader cache.
     @Published var lsfg = LsfgInfo()
+    /// The build has a report DSN: the « Send report » buttons show (XBA-342).
+    @Published var reportsAvailable = false
+    /// The report the confirm sheet shows (nil: no sheet).
+    @Published var report: ReportDraft?
     weak var actions: LauncherActions?
     let demo: Bool
     /// Single-game mode (a game app, Info.plist `XBASingleTitle`): the title ID, upper case. The window then shows

@@ -8,6 +8,7 @@ registerGameChecks()
 registerTitleAppChecks()
 registerSettingsParityChecks()
 registerConsoleChecks()
+registerReportChecks()
 let code = H.run(filter: CommandLine.arguments.dropFirst().first)
 for d in tempDirs { try? FileManager.default.removeItem(at: d) }
 exit(code)

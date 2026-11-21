@@ -20,6 +20,7 @@ final class PreviewStore: LauncherActions {
         model.actions = self
         model.games = PreviewStore.mockGames()
         model.scannedOnce = true
+        model.reportsAvailable = true
         model.setup = SetupInfo(
             toolkit: "/Users/you/xboxrecomp-android", toolkitSource: "infoPlist",
             toolkitCommit: "504a47a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7",
@@ -253,6 +254,34 @@ final class PreviewStore: LauncherActions {
         model.lsfg.vulkan = "/opt/homebrew/lib/libvulkan.1.dylib"
     }
     func importLossless(_ url: URL) { model.notice = "Demo mode: \(url.lastPathComponent) would be translated." }
+    /// A made-up report from the mock log: no file read, nothing sent.
+    func draftReport(_ subject: ReportSubject) {
+        let host = CrashReport.Host(device: "Mac14,2", os: "macOS 15.1", arch: "arm64", version: "dev",
+                                    environment: "debug")
+        let id: String?
+        switch subject {
+        case .prepare(let i), .game(let i): id = i
+        case .lastGame: id = model.games.first?.id
+        }
+        guard let g = id.flatMap({ model.game($0) }) else { return }
+        var r: CrashReport
+        if case .failed(let code, let message, let tail, _)? = g.prepare {
+            r = .prepare(host: host, key: g.titleId, title: g.name, code: code, message: message, log: nil)
+            r.logName = "prepare.log"
+            r.log = Data(tail.joined(separator: "\n").utf8)
+        } else {
+            r = .game(host: host, key: g.titleId, title: g.name, log: nil)
+            r.logName = "run-20261121-101500.log"
+            r.log = Data((PreviewStore.mockLog + ["# ended: signal 11 after 754 s"]).joined(separator: "\n").utf8)
+            r.type = "Game: signal 11 (SIGSEGV)"
+            r.value = "after 754 s"
+        }
+        model.report = ReportDraft(report: r, server: "rustrak.adserver.fr")
+    }
+    func sendReport(_ report: CrashReport) {
+        model.report = nil
+        model.notice = "Demo mode: nothing sent."
+    }
     func licences() -> [(String, String)] {
         [("LICENSE", "MIT License\n\nCopyright (c) the xboxrecomp contributors\n\nPermission is hereby granted, free of charge, …"),
          ("NOTICE", "Third-party notices for the toolkit."), ("LICENSES/zlib.txt", "zlib License …")]
