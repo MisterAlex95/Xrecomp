@@ -847,10 +847,13 @@ final class AppStore: LauncherActions {
         switch subject {
         case .prepare(let id):
             guard let g = model.game(id), case .failed(let code, let message, _, let log)? = g.prepare else { return }
-            report = .prepare(host: host, key: g.titleId, title: g.name, code: code, message: message, log: log)
+            // The key as AppPaths names the title's folder (Xbox IDs upper case), the same on every path here.
+            report = .prepare(host: host, key: g.titleId.map { paths.title($0).titleId }, title: g.name, code: code,
+                              message: message, log: log)
         case .game(let id):
             guard let g = model.game(id), let tid = g.titleId else { return }
-            report = .game(host: host, key: tid, title: g.name, log: RunLog(dir: paths.title(tid).logs).latest)
+            let t = paths.title(tid)
+            report = .game(host: host, key: t.titleId, title: g.name, log: RunLog(dir: t.logs).latest)
         case .lastGame:
             if let g = model.runningGame {
                 return model.notice = "\(g.name) is running: quit it first, then send the report."
@@ -858,7 +861,7 @@ final class AppStore: LauncherActions {
             guard let last = CrashReport.lastRun(paths: paths) else {
                 return model.notice = "No game has run yet: there is no report to send."
             }
-            let name = model.games.first { $0.titleId == last.titleId }?.name
+            let name = model.games.first { g in g.titleId.map { paths.title($0).titleId } == last.titleId }?.name
             report = .game(host: host, key: last.titleId, title: name, log: last.log)
         }
         model.report = ReportDraft(report: report, server: dsn.host)

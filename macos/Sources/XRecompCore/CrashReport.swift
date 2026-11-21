@@ -325,7 +325,7 @@ public struct CrashReport: Sendable {
         return ns.substring(with: m.range(at: 1))
     }
 
-    /// The newest run log of any title: (its title ID, the log); nil when no game ran yet.
+    /// The newest run log of any title: (its title ID as AppPaths.title names it, the log); nil when no game ran yet.
     public static func lastRun(paths: AppPaths) -> (titleId: String, log: URL)? {
         let fm = FileManager.default
         let ids = (try? fm.contentsOfDirectory(atPath: paths.titles.path)) ?? []
@@ -333,7 +333,7 @@ public struct CrashReport: Sendable {
         for id in ids where !id.hasPrefix(".") {
             guard let log = RunLog(dir: paths.title(id).logs).latest else { continue }
             let when = ((try? fm.attributesOfItem(atPath: log.path))?[.modificationDate] as? Date) ?? .distantPast
-            if best == nil || when > best!.2 { best = (id, log, when) }
+            if best == nil || when > best!.2 { best = (paths.title(id).titleId, log, when) }
         }
         return best.map { ($0.0, $0.1) }
     }
