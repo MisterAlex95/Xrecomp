@@ -121,8 +121,6 @@ A smaller shape than 5.1's: the frame loop keeps its thread, its GL context and 
 - Back-pressure: `VdSwap` counts swaps issued (`swaps_issued`, re-based on `cp.swaps` by `link_sync`); after a post,
   while more than 2 are not run, the worker waits for the GL thread, unless it is stalled on a wait or has nothing
   posted left (no deadlock on a wait that needs the guest).
-- Every guest thread blocked: the scheduler waits for the GL thread's posted work (`x360_gpu_wait_busy`) before letting
-  the clock jump to the next deadline (the GPU's work takes no virtual time when the guest waits for it, as in stage 1).
 - Not overlapped (the job runs inline): the run half belongs to another thread, the GPU is deferred, host threads
   (`x->host`), or the worker cannot be made. The worker joins the host's thread bookkeeping
   (`x360_gpu_set_worker_hook`: ADPF session, fast cores, priority) and is joined by `x360_gpu_free`.
@@ -140,9 +138,10 @@ back-pressure, drains and `gpu_hold` from the worker; ThreadSanitizer-clean with
 posted from the worker, drawn on the GL thread), the x360 ctest set, and a retail stretch: `RECOMP_X360_GPU_LOCKSTEP=1`
 gives stage 1's frames and states byte for byte; the default gives frames that differ only in animated elements
 (trees, units, banners: the guest sees the GPU later in virtual time, section 8), and two such runs are identical
-to each other here. Wall time on that stretch (GPU-bound on llvmpipe: about 270 ms of GPU and 50 ms of guest per
-swap): 60 swaps in 19.8-20.0 s before, 17.8-19.0 s after; the guest's spin-wait on the slower GPU costs virtual time
-(58-59 swaps per virtual second instead of 60). Not measured on a phone yet.
+to each other here. Wall time on that stretch is GPU-bound on llvmpipe (about 270 ms of GPU and 50 ms of guest per
+swap): 60 swaps in 17.8-20.0 s before, 16.8-19.0 s after (4 runs each), a gain within this shared host's noise; the
+guest's spin-wait on the slower GPU costs virtual time (58-59 swaps per virtual second instead of 60: it spins, it does
+not block, so the scheduler cannot wait for the GPU instead). Not measured on a phone yet.
 
 Left from 5.1 / later stages: the GPU runs only while a job runs (it idles while the frame loop does audio, present
 and pacing, so overlap is within a frame); no partial hold for rewind (section 6); present on swap (section 7).

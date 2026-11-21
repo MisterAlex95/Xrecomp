@@ -665,8 +665,6 @@ int x360_run(x360_machine *x, uint64_t insns)
             }
         }
         if (picked < 0) {
-            if (x360_gpu_wait_busy(x)) /* WP-22 stage 2: the GPU's work first, then look again */
-                continue;
             uint64_t d = next_deadline(x);
             if (!d) {
                 x360_fail(x, "every thread is blocked with no timeout (deadlock)");

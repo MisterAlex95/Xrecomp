@@ -688,35 +688,14 @@ static void overlap_posted(struct x360_gpu *g)
     gpu_overlap *o = &g->ov;
     pthread_mutex_lock(&o->mu);
     pthread_cond_signal(&o->work);
-    while ((o->lockstep || (g->swaps_issued - __atomic_load_n(&g->link.swaps, __ATOMIC_RELAXED) > GPU_QUEUE_SWAPS &&
+    /* signed: after a load (link_sync re-bases swaps_issued on cp.swaps) swaps posted before it can run past it */
+    while ((o->lockstep || ((int64_t)(g->swaps_issued - __atomic_load_n(&g->link.swaps, __ATOMIC_RELAXED)) >
+                                GPU_QUEUE_SWAPS &&
                             !__atomic_load_n(&g->link.stalled, __ATOMIC_RELAXED))) &&
            (o->running || (uint32_t)(__atomic_load_n(&g->link.post, __ATOMIC_RELAXED) >> 32) !=
                               __atomic_load_n(&g->link.taken, __ATOMIC_ACQUIRE)))
         pthread_cond_wait(&o->done, &o->mu);
     pthread_mutex_unlock(&o->mu);
-}
-
-/* Stage 2, from the scheduler when every guest thread is blocked: while the GL thread has posted work (running or
- * not taken yet), wait for it instead of letting the clock jump to the next deadline. As in stage 1, the GPU's work
- * then takes no virtual time when the guest waits for it (a fence, an interrupt): without this a title blocked on the
- * GPU lost frames of virtual time (58 swaps per virtual second instead of 60 on a GPU-bound stretch). Returns 1 when
- * it waited (the scheduler polls again), 0 when there was nothing to wait for. */
-int x360_gpu_wait_busy(x360_machine *x)
-{
-    struct x360_gpu *g = x->gpu;
-    if (!g || !overlap_remote(g))
-        return 0;
-    gpu_overlap *o = &g->ov;
-    int waited = 0;
-    pthread_mutex_lock(&o->mu);
-    while (o->running ||
-           (!o->held && (uint32_t)(__atomic_load_n(&g->link.post, __ATOMIC_RELAXED) >> 32) !=
-                            __atomic_load_n(&g->link.taken, __ATOMIC_ACQUIRE))) {
-        pthread_cond_wait(&o->done, &o->mu);
-        waited = 1;
-    }
-    pthread_mutex_unlock(&o->mu);
-    return waited;
 }
 
 /* Post half, first part: the registers titles poll, and the write pointer posted when the title moved it (or the

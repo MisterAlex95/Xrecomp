@@ -465,8 +465,6 @@ int x360_gpu_run(x360_machine *x);
 void x360_gpu_drain(x360_machine *x, int flush_resolves);
 /* on: x360_gpu_poll posts without running (x360_gpu_run / _drain do): stage 2's hook, and tests of the seam */
 void x360_gpu_set_deferred(x360_machine *x, int on);
-/* stage 2: every guest thread blocked: wait for the GL thread's posted work (1) rather than skip virtual time */
-int x360_gpu_wait_busy(x360_machine *x);
 uint64_t x360_gpu_next_event(x360_machine *x);
 uint64_t x360_gpu_cpu_ns(x360_machine *x);
 void x360_gpu_stats(x360_machine *x, uint64_t *packets, uint64_t *draws, uint64_t *swaps, uint32_t *vblanks);
