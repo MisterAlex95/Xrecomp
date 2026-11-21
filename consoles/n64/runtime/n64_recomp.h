@@ -110,6 +110,7 @@ typedef struct n64_recomp_stats {
     uint64_t interrupts;   /* interrupts taken */
     uint64_t blocks;       /* runs of predecoded blocks the dispatcher handed to the interpreter for code no entry
                             * covers (one block, or chained blocks in a page no entry's code is in; of interp_ram) */
+    uint64_t handed;       /* hand-offs: runs of the interpreter for instructions lifted code left to it (fallbacks) */
 } n64_recomp_stats;
 void n64_recomp_get_stats(n64_machine *m, n64_recomp_stats *out);
 

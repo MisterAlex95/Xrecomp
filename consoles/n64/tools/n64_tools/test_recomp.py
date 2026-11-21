@@ -105,7 +105,10 @@ def test_libdragon_elf_in_rom():
     (0x46221080, "fop", "fop"),
     (i_type(0x35, 1, 2, 8), "ldc1", "fmem"),
     (i_type(0x2F, 1, 0x19, 0), "cache", "cache"),
-    (0x42000018, "cop0", "interp"),
+    (0x42000018, "cop0", "interp"),  # ERET
+    (0x40024800, "cop0", "mfc0"),  # MFC0 v0, Count: lifted (XBA-295)
+    (0x40224800, "cop0", "mfc0"),  # DMFC0
+    (0x40826000, "cop0", "interp"),  # MTC0
     (i_type(0x30, 1, 2, 0), "ll", "interp"),
     (0x7C000000, "reserved", "interp"),
 ])
@@ -276,7 +279,8 @@ def test_lift_shapes():
     assert "RC_LOAD(r11, r9 + 0x0000000000000010ULL, 4, RC_S32" in c  # r9 = LUI 0xA440 (VI): through the core
     assert "RC_COP1(0x46221080u" in c
     assert "RC_SEG(0x80000400u" in c and "RC_MID_TABLE(0x80000400u, mid_)" in c  # blocks
-    assert "RC_INTERP(0x80000494u)" in c  # MFC0 goes to the interpreter
+    assert "RC_MFC0(r2, 9, RC_S32, RC_INTERP(0x80000494u););" in c  # MFC0 Count through the core (XBA-295)
+    assert "RC_INTERP(0x80000498u)" in c  # TLBWI goes to the interpreter
     assert "if (!tk) { goto L_" in c  # branch-likely skips its slot
     assert "RC_EXIT64(jt);" in c
 

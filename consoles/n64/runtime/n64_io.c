@@ -155,6 +155,7 @@ void n64_ai_reset(n64_machine *m)
     m->ai_out_phase = 0;
     m->ai_cur[0] = m->ai_cur[1] = 0;
     memset(m->ai_hist, 0, sizeof m->ai_hist);
+    m->ai_quiet = 0;
     m->ai_nsrc = 0;
     m->ai_kernel_hz = 0;
     m->audio_rd = m->audio_wr = 0;
@@ -209,6 +210,10 @@ static void ai_src_push(n64_machine *m, uint64_t at)
     m->ai_hist[0][i] = m->ai_cur[0];
     m->ai_hist[1][i] = m->ai_cur[1];
     m->ai_nsrc++;
+    if (m->ai_cur[0] | m->ai_cur[1])
+        m->ai_quiet = 0;
+    else if (m->ai_quiet < AI_TAPS)
+        m->ai_quiet++;
 }
 
 /* An output sample at frac (0..1) of the way from the newest DAC sample to the next, AI_TAPS / 2 samples late. */
@@ -220,24 +225,29 @@ static void push_out(n64_machine *m, double frac)
     int ph = (int)fp;
     if (ph >= AI_PHASES)
         ph = AI_PHASES - 1;
-    float w = (float)(fp - ph);
-    const float *k0 = m->ai_kernel + ph * AI_TAPS, *k1 = k0 + AI_TAPS;
-    /* The taps first (independent: they vectorise), then the two sums in tap order, the history ring walked as its
-     * two runs instead of masking every index: the same operations in the same order as one loop (XBA-191). */
-    float coef[AI_TAPS];
-    for (int k = 0; k < AI_TAPS; k++)
-        coef[k] = k0[k] + (k1[k] - k0[k]) * w;
-    uint32_t base = (m->ai_nsrc - AI_TAPS) & (AI_HIST - 1); /* the oldest sample the taps read */
-    int run = AI_HIST - (int)base < AI_TAPS ? AI_HIST - (int)base : AI_TAPS;
-    const float *h0 = m->ai_hist[0], *h1 = m->ai_hist[1];
     float acc[2] = {0, 0};
-    for (int k = 0; k < run; k++) {
-        acc[0] += coef[k] * h0[base + (uint32_t)k];
-        acc[1] += coef[k] * h1[base + (uint32_t)k];
-    }
-    for (int k = run; k < AI_TAPS; k++) {
-        acc[0] += coef[k] * h0[k - run];
-        acc[1] += coef[k] * h1[k - run];
+    /* Silence: the last AI_TAPS samples the DAC took (all the taps read) were 0, so every product is +0 or -0 (the
+     * taps are finite: built here or checked by n64_state_load) and +0 plus either is +0: both sums are +0 whatever
+     * the taps, and are skipped. A DAC that is idle or holds 0 (a boot, a silent stretch) costs no filtering. */
+    if (m->ai_quiet < AI_TAPS) {
+        float w = (float)(fp - ph);
+        const float *k0 = m->ai_kernel + ph * AI_TAPS, *k1 = k0 + AI_TAPS;
+        /* The taps first (independent: they vectorise), then the two sums in tap order, the history ring walked as
+         * its two runs instead of masking every index: the same operations in the same order as one loop (XBA-191). */
+        float coef[AI_TAPS];
+        for (int k = 0; k < AI_TAPS; k++)
+            coef[k] = k0[k] + (k1[k] - k0[k]) * w;
+        uint32_t base = (m->ai_nsrc - AI_TAPS) & (AI_HIST - 1); /* the oldest sample the taps read */
+        int run = AI_HIST - (int)base < AI_TAPS ? AI_HIST - (int)base : AI_TAPS;
+        const float *h0 = m->ai_hist[0], *h1 = m->ai_hist[1];
+        for (int k = 0; k < run; k++) {
+            acc[0] += coef[k] * h0[base + (uint32_t)k];
+            acc[1] += coef[k] * h1[base + (uint32_t)k];
+        }
+        for (int k = run; k < AI_TAPS; k++) {
+            acc[0] += coef[k] * h0[k - run];
+            acc[1] += coef[k] * h1[k - run];
+        }
     }
     if (m->audio_wr - m->audio_rd >= N64_AUDIO_RING)
         m->audio_rd++; /* full: drop the oldest */

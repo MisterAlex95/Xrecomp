@@ -340,6 +340,9 @@ struct n64_machine {
         uint32_t lo, hi;
         uint64_t gen;
     } pf;
+    /* The DAC samples in a row that were 0 (both channels), up to AI_TAPS: at AI_TAPS the resampler's taps read
+     * silence and push_out skips its sums (n64_io.c). Host only, derived: 0 (filter) after a reset or a state load. */
+    uint32_t ai_quiet;
 };
 #define N64_MACHINE_STATE_BYTES offsetof(n64_machine, blocks)
 
