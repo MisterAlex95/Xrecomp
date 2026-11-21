@@ -309,7 +309,9 @@ typedef struct surface {
 typedef struct rt_copy {
     uint32_t base, bytes;  /* physical destination, extent */
     uint64_t hash;         /* of those bytes after the resolve */
+    uint64_t sparse;       /* WP-12: sparse_hash of the same bytes, what the check once per epoch compares */
     uint32_t checked;      /* the epoch the hash was last confirmed in */
+    uint32_t checks;       /* sparse checks since the last full one (COPY_FULL_EVERY) */
     GLuint tex;            /* the destination's pitch x height at the internal resolution, top row first */
     int w, h;
     GLenum ifmt;
@@ -378,6 +380,7 @@ struct xenos_gl {
     unsigned copy_clock;
     uint32_t copy_gen;        /* the last rt_copy.gen given */
     int lazy;                 /* WP-2: RECOMP_X360_RESOLVE=lazy, resolves write guest memory only when needed */
+    int copy_hash_full;       /* WP-12: RECOMP_X360_COPY_HASH=full, every check of a copy's memory hashes all of it */
     int npending;             /* copies with pending set */
     int in_resolve;           /* resolve() is timing itself (resolve_ns) */
     unsigned swaps;           /* xenos_gl_swap calls (the age of a pending copy) */
@@ -391,6 +394,11 @@ struct xenos_gl {
     int nprogs, cap_progs;
     program **prog_hash;      /* buckets of progs by (vs crc, ps crc, kind), prog_buckets of them (a power of two) */
     unsigned prog_buckets;
+    /* WP-12: each stage's microcode CRC (get_program), kept while the command processor loads nothing into that stage
+     * (xenos_shader.loads and words unchanged, the same xenos_cp; a state load forgets them: do_reset) */
+    const xenos_cp *crc_cp;
+    uint32_t crc_loads[2], crc_words[2], crc_val[2];
+    int crc_ok[2];
     uint32_t missing[64];
     int nmissing;
     xenos_gl_stats st;
@@ -647,6 +655,10 @@ static int setup(xenos_gl *g, char *why, size_t why_n)
     const char *resolve_env = getenv("RECOMP_X360_RESOLVE"); /* eager (default) | lazy (WP-2) */
     g->lazy = resolve_env && !strcmp(resolve_env, "lazy");
     fprintf(stderr, "xenos: resolves %s\n", g->lazy ? "lazy (RECOMP_X360_RESOLVE=lazy)" : "eager");
+    const char *hash_env = getenv("RECOMP_X360_COPY_HASH"); /* sparse (default) | full (WP-12) */
+    g->copy_hash_full = hash_env && !strcmp(hash_env, "full");
+    if (g->copy_hash_full)
+        fprintf(stderr, "xenos: resolve copies hashed whole at every check (RECOMP_X360_COPY_HASH=full)\n");
     while (g->scale > 1 && (g->width * g->scale > g->max_tex || g->height * g->scale > g->max_tex))
         g->scale--;
     g->glGenFramebuffers(1, &g->fbo);
@@ -886,6 +898,7 @@ static void do_reset(xenos_gl *g)
     g->nresolved = 0;
     g->epoch++;
     g->ubo_valid[0] = g->ubo_valid[1] = 0;
+    g->crc_ok[0] = g->crc_ok[1] = 0; /* the state's microcode, with its own load counts */
 }
 
 void xenos_gl_set_frames_dir(xenos_gl *g, const char *dir, unsigned max_frames)
@@ -1104,13 +1117,25 @@ static program *add_program(xenos_gl *g, uint32_t vc, uint32_t pc, int kind)
 
 /* kind 0: the title's two shaders; 1: its vertex shader with transform feedback; 2: the pass-through vertex shader
  * with its pixel shader (rectangle lists) */
+static uint32_t stage_crc(xenos_gl *g, const xenos_cp *cp, int k)
+{
+    const xenos_shader *sh = &cp->shader[k];
+    if (g->crc_cp != cp)
+        g->crc_cp = cp, g->crc_ok[0] = g->crc_ok[1] = 0;
+    if (!g->crc_ok[k] || g->crc_loads[k] != sh->loads || g->crc_words[k] != sh->words) {
+        g->crc_val[k] = crc32_words(sh->code, sh->words);
+        g->crc_loads[k] = sh->loads, g->crc_words[k] = sh->words, g->crc_ok[k] = 1;
+    }
+    return g->crc_val[k];
+}
+
 static program *get_program(xenos_gl *g, const xenos_cp *cp, int kind)
 {
     const xenos_shader *vs = &cp->shader[0], *ps = &cp->shader[1];
     if (!vs->words || !ps->words)
         return NULL;
-    uint32_t vc = kind == 2 ? 0 : crc32_words(vs->code, vs->words);
-    uint32_t pc = kind == 1 ? 0 : crc32_words(ps->code, ps->words);
+    uint32_t vc = kind == 2 ? 0 : stage_crc(g, cp, 0);
+    uint32_t pc = kind == 1 ? 0 : stage_crc(g, cp, 1);
     if (g->prog_buckets)
         for (program *q = g->prog_hash[prog_bucket(vc, pc, kind, g->prog_buckets)]; q; q = q->next)
             if (q->vs_crc == vc && q->ps_crc == pc && q->kind == kind)
@@ -2709,6 +2734,54 @@ static uint64_t memory_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
     return h;
 }
 
+/* WP-12: what the check of a copy's memory once per epoch hashes when the copy is large (COPY_SPARSE_MIN and up: the
+ * full-screen buffers, 8 MB at 1080p, ~26 MB of hashing per frame before): one 64-byte line of each 4 KB page, at an
+ * offset that changes from page to page (1/64 of the bytes). A write the CPU makes over a resolve's destination is nearly
+ * always a whole buffer (a texture loaded or decoded there, the memory handed to something else): it changes a line of
+ * every page it covers. One that misses every sampled line (less than a page, or the same bytes there) is caught by the
+ * full hash every COPY_FULL_EVERY checks instead of the next one: until then the picture is sampled for that memory,
+ * and a lazy resolve pending there that is written in between (WP-2) goes over the CPU's bytes. Smaller copies are
+ * hashed whole every time, as before (cheap); RECOMP_X360_COPY_HASH=full hashes every copy whole every time. Nothing in
+ * the runtime tracks guest writes (the recompiled code stores straight into the mapped physical memory): a hash is
+ * the only way to know. */
+#define COPY_FULL_EVERY 16
+#define COPY_SPARSE_MIN (256u << 10)
+static uint64_t sparse_hash(const xenos_cp *cp, uint32_t base, uint32_t bytes)
+{
+    base &= 0x1FFFFFFFu;
+    if (bytes > 0x20000000u - base)
+        bytes = 0x20000000u - base;
+    uint32_t end = base + bytes;
+    uint64_t h = 0x243F6A8885A308D3ull ^ bytes;
+    for (uint32_t page = base & ~0xFFFu; page < end; page += 0x1000) {
+        uint32_t lo = page < base ? base : page, hi = end - page > 0x1000 ? page + 0x1000 : end;
+        uint32_t at = page + ((((page >> 12) * 0x9E3779B1u) >> 26) << 6);
+        if (at + 64 > hi)
+            at = hi - lo >= 64 ? hi - 64 : lo;
+        if (at < lo)
+            at = lo;
+        uint32_t n = hi - at < 64 ? hi - at : 64;
+        if (cp->mem) {
+            h = span_hash(cp->mem + at, n, h);
+        } else {
+            for (uint32_t i = 0; i + 4 <= n; i += 4)
+                h = (h ^ (cp->read32 ? cp->read32(cp->ctx, at + i) : 0)) * 1099511628211ull;
+            h ^= h >> 29;
+        }
+    }
+    return h;
+}
+
+/* a copy's memory as it is now becomes what its checks compare with (after a resolve or a flush wrote it, or when it is
+ * made): hashed whole, and sparsely */
+static void copy_rehash(xenos_gl *g, const xenos_cp *cp, rt_copy *rc)
+{
+    rc->hash = memory_hash(cp, rc->base, rc->bytes);
+    rc->sparse = sparse_hash(cp, rc->base, rc->bytes);
+    rc->checks = 0;
+    rc->checked = g->epoch;
+}
+
 /* a copy goes: its picture, its pending write if any (the CPU wrote that memory since: its bytes win, as they would
  * have over the resolve), and with `retake` the textures taken from it are checked again at their next use */
 static void drop_copy(xenos_gl *g, rt_copy *c, int retake)
@@ -2738,7 +2811,12 @@ static rt_copy *copy_at(xenos_gl *g, const xenos_cp *cp, uint32_t base)
         if (!c->tex || c->base != base)
             continue;
         if (c->checked != g->epoch) {
-            if (memory_hash(cp, c->base, c->bytes) != c->hash) { /* the CPU (or a texture upload) wrote it */
+            /* a large copy sparsely, and whole every COPY_FULL_EVERY checks (WP-12) */
+            int full = g->copy_hash_full || c->bytes < COPY_SPARSE_MIN || ++c->checks >= COPY_FULL_EVERY;
+            if (full)
+                c->checks = 0;
+            if (full ? memory_hash(cp, c->base, c->bytes) != c->hash
+                     : sparse_hash(cp, c->base, c->bytes) != c->sparse) { /* the CPU (or a texture upload) wrote it */
                 drop_copy(g, c, 0);
                 return NULL;
             }
@@ -3487,8 +3565,7 @@ static void flush_copy(xenos_gl *g, const xenos_cp *cp, rt_copy *rc)
     rc->pending = 0;
     g->npending--;
     g->epoch++; /* memory changed under the cached textures: compare them again */
-    rc->hash = memory_hash(cp, rc->base, rc->bytes);
-    rc->checked = g->epoch;
+    copy_rehash(g, cp, rc);
     uint64_t t2 = mono_ns();
     g->st.resolve_flushes++;
     g->st.resolve_read_ns += t1 - t0;
@@ -3584,10 +3661,8 @@ static int resolve_lazy(xenos_gl *g, const xenos_cp *cp, const surface *s, uint3
             flush_copy(g, cp, rc);
     }
     blit_tex(g, s->tex, rc->tex, x0, y0, x1 - x0, y1 - y0, x0, y0);
-    if (fresh) {
-        rc->hash = memory_hash(cp, rc->base, rc->bytes); /* of the memory as it is: a CPU write still shows */
-        rc->checked = g->epoch;
-    }
+    if (fresh)
+        copy_rehash(g, cp, rc); /* of the memory as it is: a CPU write still shows */
     if (!rc->pending) {
         rc->pending = 1;
         g->npending++;
@@ -4246,8 +4321,7 @@ static void resolve_copy(xenos_gl *g, const xenos_cp *cp)
                 int cw = x1 < rc->w ? x1 - x0 : rc->w - x0, ch = y1 < rc->h ? y1 - y0 : rc->h - y0;
                 if (cw > 0 && ch > 0)
                     blit_tex(g, s->tex, rc->tex, x0, y0, cw, ch, x0, y0);
-                rc->hash = memory_hash(cp, rc->base, rc->bytes);
-                rc->checked = g->epoch;
+                copy_rehash(g, cp, rc);
                 rc->used = ++g->copy_clock;
                 rc->gen = ++g->copy_gen;
                 rc->frame = g->swaps;
