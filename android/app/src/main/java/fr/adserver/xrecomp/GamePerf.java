@@ -26,12 +26,12 @@ import java.util.regex.Pattern;
 /**
  * A game run's performance as one Sentry transaction « game » (op game.run), docs/android/app-shell.md « Game
  * performance ». The game's frame loop keeps a small JSON summary (host_perf_line.h « The run summary »: numbers and
- * fixed words, built from the counters of the perf line) at XBA_PERF_SUMMARY, files/logs/game-perf.json. Two ways
+ * fixed words, built from the counters of the perf line) at XBA_PERF_SUMMARY, files/perf/game-&lt;pid&gt;.json. Two ways
  * out:
  * - A run that ended (AutoReports.collect, the launcher's resume): only with « Send reports automatically » on and
  *   Telemetry's gate open, only for the newest end, not for a crash or « not responding » (crash reports exist), and
- *   only when the summary's pid is the ended process's. Sent at once on a network the option allows; never queued
- *   (what cannot leave is dropped). The file is deleted either way (not another process's: a game running now).
+ *   one summary per game process (files/perf/game-&lt;pid&gt;.json, its key beside it). Sent at once on a network the
+ *   option allows; never queued (what cannot leave is dropped). The process's files go either way.
  * - The Benchmark (the in-game menu): its own window, sent only when the player taps Send (CrashReport.sendOnce).
  *
  * What it carries: tags console, game_key (the library key, as the crash reports), device, android, abi, toolkit (the
@@ -48,23 +48,76 @@ final class GamePerf {
 
     private GamePerf() {}
 
-    /** The summary's file, in the package's files (the game's process writes it, the launcher's reads it). */
-    static File file(Context c) {
-        return new File(new File(c.getFilesDir(), "logs"), "game-perf.json");
+    /** Summaries older than this go at a game's start (a run whose end was never counted). */
+    static final long KEEP_MS = 7L * 24 * 3600_000L;
+
+    private static File dir(Context c) {
+        return new File(c.getFilesDir(), "perf");
     }
 
-    /** The game's process starts: an older summary goes, XBA_PERF_SUMMARY tells the frame loop where to write. */
+    /**
+     * A game process's summary, in the package's files (the game's process writes it, the launcher's reads it): one
+     * per pid, files/perf/game-&lt;pid&gt;.json, so a game started before the launcher looked at the last one's end
+     * (Back to launcher, then another game) does not take its place. Its library key is beside it (.key), written at
+     * the start: GameStore's session has moved on by the time the launcher sends.
+     */
+    static File file(Context c, int pid) {
+        return new File(dir(c), "game-" + pid + ".json");
+    }
+
+    static File keyFile(Context c, int pid) {
+        return new File(dir(c), "game-" + pid + ".key");
+    }
+
+    /**
+     * The game's process starts: XBA_PERF_SUMMARY tells the frame loop where to write, the game's key goes beside it,
+     * summaries older than KEEP_MS go.
+     */
     static void beginRun(Context c) {
-        File f = file(c);
-        f.delete();
-        File d = f.getParentFile();
-        if (d != null && !(d.mkdirs() || d.isDirectory()))
+        File d = dir(c);
+        if (!(d.mkdirs() || d.isDirectory()))
             return;
+        File[] old = d.listFiles();
+        long now = System.currentTimeMillis();
+        if (old != null)
+            for (File x : old)
+                if (now - x.lastModified() > KEEP_MS)
+                    x.delete();
+        int pid = android.os.Process.myPid();
+        File f = file(c, pid);
+        f.delete();
+        try {
+            String key = GameStore.sessionTid(c);
+            Files.write(keyFile(c, pid).toPath(), (key == null ? "" : key).getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            Log.w(TAG, "perf: cannot note the game's key", e);
+        }
         try {
             Os.setenv("XBA_PERF_SUMMARY", f.getPath(), true);
         } catch (ErrnoException e) {
             Log.w(TAG, "perf: cannot set XBA_PERF_SUMMARY", e);
         }
+    }
+
+    /** The key noted at the game's start, else GameStore's session. */
+    private static String keyOf(Context c, int pid) {
+        File k = keyFile(c, pid);
+        try {
+            if (k.isFile()) {
+                String s = new String(Files.readAllBytes(k.toPath()), StandardCharsets.UTF_8).trim();
+                if (!s.isEmpty())
+                    return s;
+            }
+        } catch (IOException e) {
+            // GameStore's then
+        }
+        return GameStore.sessionTid(c);
+    }
+
+    /** The files of an ended process go (the option off, or once used). */
+    static void discard(Context c, int pid) {
+        file(c, pid).delete();
+        keyFile(c, pid).delete();
     }
 
     // ---- The summary ----------------------------------------------------------------------------------------------
@@ -252,21 +305,20 @@ final class GamePerf {
     static Network network = SYSTEM_NETWORK;
 
     /**
-     * The newest run ended (AutoReports.collect, the option on): its summary leaves when it is this process's and the
-     * run did not crash. The file is deleted unless it is another process's. True when a send was started.
+     * A run ended (AutoReports.collect, the option on): its process's summary leaves when the run did not crash. The
+     * process's files go in every case. True when a send was started.
      */
     static boolean runEnded(Context c, int pid, String status, String reason, long startMs, long endMs) {
-        File f = file(c);
-        Summary s = read(f);
+        Summary s = read(file(c, pid));
+        String key = keyOf(c, pid);
+        discard(c, pid);
         if (s != null && s.pid != pid)
-            return false;   // another process's (a game running now): it stays
-        f.delete();
+            return false;
         if (s == null || s.bench || AutoReports.CRASHED.equals(status)
             || "not responding".equals(reason) || s.seconds <= 0)
             return false;
         if (!AutoReports.enabled(c) || !Telemetry.allowed(c) || !network.ok(c))
             return false;   // never queued
-        String key = GameStore.sessionTid(c);
         byte[] body = envelope(s, tags(c, s, key, status, null), startMs, endMs, CrashReport.release(c),
                                CrashReport.environment(c));
         work.execute(() -> {
@@ -287,7 +339,7 @@ final class GamePerf {
 
     /** The Benchmark's summary file (the game's process). */
     static File benchFile(Context c) {
-        return new File(new File(c.getFilesDir(), "logs"), "bench-perf.json");
+        return new File(dir(c), "bench.json");
     }
 
     /**

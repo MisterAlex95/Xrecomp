@@ -286,7 +286,7 @@
     <string name="AUTO_REPORTS_RESET_DONE">Un nouvel identifiant d’installation aléatoire est utilisé désormais.</string>
     <string name="AUTO_REPORTS_ON">Les rapports partent d’eux-mêmes, en Wi-Fi.</string>
     <string name="AUTO_REPORTS_OFF">Rien ne part sans que vous choisissiez Envoyer. L’identifiant d’installation et les rapports en attente sont effacés.</string>
-    <string name="AUTO_REPORTS_WHAT">Désactivé (par défaut), rien ne part sans Envoyer. Activé, un plantage ou une préparation en échec envoie son rapport seul, en Wi-Fi, comme Envoyer : sans dossiers, adresses, liens ni données de jeu. Chaque partie envoie aussi deux identifiants aléatoires (partie, installation), sa fin, sa durée, la version de l’app, ses images par seconde et temps d’image (avec la clé du jeu et le modèle de l’appareil). Rien d’autre : aucun compte, aucun identifiant d’appareil.</string>
+    <string name="AUTO_REPORTS_WHAT">Désactivé (par défaut), rien ne part sans Envoyer. Activé, un plantage ou une préparation en échec envoie son rapport seul, en Wi-Fi, comme Envoyer : sans dossiers, adresses, liens ni données de jeu. Chaque partie envoie aussi deux identifiants aléatoires (partie, installation), sa fin, sa durée, ses images par seconde et la version de l’app. Rien d’autre : aucun compte, aucun identifiant d’appareil.</string>
     <string name="CHIP_NEEDS_PREPARE">À préparer</string>
     <string name="CHIP_PREPARING">Préparation</string>
     <string name="CHIP_PREPARE_FAILED">Préparation en échec</string>

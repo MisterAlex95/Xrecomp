@@ -64,7 +64,8 @@ public class GamePerfTest {
         CrashReport.transport = CrashReport.HTTP;
         GamePerf.network = GamePerf.SYSTEM_NETWORK;
         Telemetry.setAuto(c, false);
-        GamePerf.file(c).delete();
+        for (int pid : new int[] { 4242, 4343, 99 })
+            GamePerf.discard(c, pid);
         File[] f = Telemetry.dir(c).listFiles();
         if (f != null)
             for (File x : f)
@@ -72,9 +73,16 @@ public class GamePerfTest {
     }
 
     private void summary(String json) throws Exception {
-        File f = GamePerf.file(c);
+        summary(4242, json, null);
+    }
+
+    /** A game process's summary as its frame loop leaves it, and the key its start noted (null: none). */
+    private void summary(int pid, String json, String key) throws Exception {
+        File f = GamePerf.file(c, pid);
         f.getParentFile().mkdirs();
-        Files.write(f.toPath(), json.getBytes(StandardCharsets.UTF_8));
+        Files.write(f.toPath(), json.replace("\"pid\":4242", "\"pid\":" + pid).getBytes(StandardCharsets.UTF_8));
+        if (key != null)
+            Files.write(GamePerf.keyFile(c, pid).toPath(), key.getBytes(StandardCharsets.UTF_8));
     }
 
     private static JSONObject tx(byte[] body) throws Exception {
@@ -158,7 +166,7 @@ public class GamePerfTest {
         summary(X360);
         assertFalse(GamePerf.runEnded(c, 4242, AutoReports.EXITED, "exited", 1000, 2000));
         assertTrue(posted.isEmpty());
-        assertFalse(GamePerf.file(c).exists());
+        assertFalse(GamePerf.file(c, 4242).exists());
     }
 
     @Test
@@ -168,7 +176,7 @@ public class GamePerfTest {
         assertTrue(GamePerf.runEnded(c, 4242, AutoReports.EXITED, "exited", 1000, 2000));
         assertEquals(1, posted.size());
         assertEquals("game", tx(posted.get(0)).getString("transaction"));
-        assertFalse(GamePerf.file(c).exists());
+        assertFalse(GamePerf.file(c, 4242).exists());
         assertFalse(GamePerf.runEnded(c, 4242, AutoReports.EXITED, "exited", 1000, 2000));   // gone
         assertEquals(1, posted.size());
     }
@@ -177,10 +185,10 @@ public class GamePerfTest {
     public void aCrashOrAnotherProcessSendsNothing() throws Exception {
         Telemetry.setAuto(c, true);
         summary(X360);
-        assertFalse(GamePerf.runEnded(c, 99, AutoReports.EXITED, "exited", 1000, 2000));
-        assertTrue("another process's summary stays", GamePerf.file(c).exists());
+        assertFalse(GamePerf.runEnded(c, 99, AutoReports.EXITED, "exited", 1000, 2000));   // no summary
+        assertTrue("another process's summary stays", GamePerf.file(c, 4242).exists());
         assertFalse(GamePerf.runEnded(c, 4242, AutoReports.CRASHED, "native crash", 1000, 2000));
-        assertFalse(GamePerf.file(c).exists());
+        assertFalse(GamePerf.file(c, 4242).exists());
         summary(X360);
         assertFalse(GamePerf.runEnded(c, 4242, AutoReports.ABNORMAL, "not responding", 1000, 2000));
         assertTrue(posted.isEmpty());
@@ -193,7 +201,7 @@ public class GamePerfTest {
         netOk = false;   // a metered network without « Also on mobile data », or none
         assertFalse(GamePerf.runEnded(c, 4242, AutoReports.EXITED, "exited", 1000, 2000));
         assertTrue(posted.isEmpty());
-        assertFalse(GamePerf.file(c).exists());
+        assertFalse(GamePerf.file(c, 4242).exists());
         netOk = true;
         CrashReport.transport = (url, h, body) -> {
             throw new java.io.IOException("offline");
@@ -221,6 +229,60 @@ public class GamePerfTest {
             assertEquals("exited", tx(posted.get(0)).getJSONObject("tags").getString("end"));
         } finally {
             AutoReports.exits = AutoReports.SYSTEM_EXITS;
+        }
+    }
+
+    /**
+     * Back to launcher, then another game: the first game's process ends after the second started. Each run sends
+     * its own summary with its own key, whatever GameStore's session says by then.
+     */
+    @Test
+    public void twoGamesEachSendTheirOwnSummary() throws Exception {
+        List<AutoReports.Exit> exits = new ArrayList<>();
+        AutoReports.exits = ctx -> new ArrayList<>(exits);
+        try {
+            AutoReports.collect(c, false);
+            Telemetry.setAuto(c, true);
+            long t = System.currentTimeMillis();
+            GameStore.sessionStart(c, t + 1000, "n64-FIRSTGAME");
+            summary(4242, X360.replace("\"x360\"", "\"n64\""), "n64-FIRSTGAME");
+            AutoReports.launcherEnded(c, 4242, t + 1000);   // the launcher ends it to start the second game
+            GameStore.sessionStart(c, t + 5000, "gba-SECONDGAME");
+            summary(4343, X360.replace("\"x360\"", "\"gba\""), "gba-SECONDGAME");
+            exits.add(new AutoReports.Exit(4242, t + 4000, "killed by a signal", 9));
+            AutoReports.collect(c, true);   // the second game still runs
+            assertEquals(1, posted.size());
+            JSONObject tg = tx(posted.get(0)).getJSONObject("tags");
+            assertEquals("n64-FIRSTGAME", tg.getString("game_key"));
+            assertEquals("n64", tg.getString("console"));
+            assertEquals("exited", tg.getString("end"));
+            assertTrue("the running game's summary stays", GamePerf.file(c, 4343).exists());
+            exits.add(0, new AutoReports.Exit(4343, t + 9000, "exited", 0));
+            AutoReports.collect(c, false);
+            assertEquals(2, posted.size());
+            assertEquals("gba-SECONDGAME", tx(posted.get(1)).getJSONObject("tags").getString("game_key"));
+        } finally {
+            AutoReports.exits = AutoReports.SYSTEM_EXITS;
+        }
+    }
+
+    @Test
+    public void theToolkitTagIsThePacksDigest() throws Exception {
+        File con = new File(Pack.packDir(c.getFilesDir(), "n64-ABCD"), "pack.json");
+        File xbox = new File(Pack.packDir(c.getFilesDir(), "4D530004"), "pack.json");
+        try {
+            con.getParentFile().mkdirs();
+            xbox.getParentFile().mkdirs();
+            Files.write(con.toPath(), "{\"toolkit_sha256\":\"ABCDEF0123456789abcdef\"}".getBytes(StandardCharsets.UTF_8));
+            Files.write(xbox.toPath(), "{\"toolkit_sha256\":\"0011223344556677889900\"}".getBytes(StandardCharsets.UTF_8));
+            assertEquals("abcdef012345", GamePerf.toolkit(c, "n64-ABCD"));
+            assertEquals("001122334455", GamePerf.toolkit(c, "4D530004"));
+            assertNull(GamePerf.toolkit(c, "gba-NONE"));
+            GamePerf.Summary s = GamePerf.parse(X360);
+            assertEquals("abcdef012345", GamePerf.tags(c, s, "n64-ABCD", AutoReports.EXITED, null).get("toolkit"));
+        } finally {
+            con.delete();
+            xbox.delete();
         }
     }
 

@@ -3314,18 +3314,19 @@ How a game ran on the device, as numbers in Rustrak, without adb. Two ways out, 
 
 | | When | Consent |
 |---|---|---|
-| A game run | The launcher sees the run's end (`AutoReports.collect`, on resume): quit from the menu, the title leaving by itself, the launcher ending a held game, or the system killing it in the background (`end=abnormal`). Not a crash or « not responding » (the crash report covers those). Only the newest end. | « Send reports automatically » on, Telemetry's gate open, a network the option allows (unmetered, or any with « Also on mobile data »). Off: nothing is built or sent. |
+| A game run | The launcher sees the run's end (`AutoReports.collect`, on resume): quit from the menu, the title leaving by itself, the launcher ending a held game, or the system killing it in the background (`end=abnormal`). Not a crash or « not responding » (the crash report covers those). | « Send reports automatically » on, Telemetry's gate open, a network the option allows (unmetered, or any with « Also on mobile data »). Off: nothing is built or sent. |
 | **Benchmark** | In-game menu › **Benchmark** (under Report a problem; hidden in a game's own app, which cannot send) | The result page's **Send the result** only: one post (`CrashReport.sendOnce`), whatever the option says. Back: nothing leaves. |
 
 Both are **never queued**: offline, refused or a metered network without the option, the item is dropped.
 
 *Where the figures come from.* The game's frame loop (every console, through `host_perf_line`: the same counters as
 the perf line) keeps a small JSON summary at `XBA_PERF_SUMMARY` (`ShellActivity` sets it to
-`files/logs/game-perf.json` and deletes the old one at each start). It is refreshed every 10 s while frames run, when
-the game is held (menu, background: a held game ended later by the launcher keeps its figures) and at the run's line,
-through a temporary file and a rename. Numbers and fixed words only (`host_perf_kv`: keys `[a-z0-9_]`, words
-`[a-z0-9_-]`, 23 characters); the app checks them again. The summary carries the game process's pid: the launcher
-sends it only when it matches the ended process (a summary of the game running now stays).
+`files/perf/game-<pid>.json`, one per game process, with the library key noted beside it at the start: a game started
+before the launcher saw the last one end, Back to launcher then another game, takes nothing from it; files older than
+7 days go). It is refreshed every 10 s while frames run, when the game is held (menu, background: a held game ended
+later by the launcher keeps its figures) and at the run's line, through a temporary file and a rename. Numbers and
+fixed words only (`host_perf_kv`: keys `[a-z0-9_]`, words `[a-z0-9_-]`, 23 characters); the app checks them again.
+Each ended run (`AutoReports.collect`) takes its own process's file, which then goes (option off: deleted unsent).
 
 *fps median and 5th percentile*: from 1 s samples (the newest 2 h, `HOST_PERF_SAMPLE_NS`) of guest frames per second
 (`fps_speed_*`) and pictures shown per second (`fps_shown_*`). The p5 is the sample at or under which 5 % of the
@@ -3359,7 +3360,7 @@ file name, pid or install id.
 
 The Benchmark's own window (`HOST_PERF_WIN_BENCH`, and its own samples; the run's figures go on) starts at the
 game's next frame (`MenuNative.nativeBenchMark`); each second the menu asks the frame loop for that window's summary
-(`nativeBenchTake`, `files/logs/bench-perf.json`) until it has 60 s played (held time counts none; given up after
+(`nativeBenchTake`, `files/perf/bench.json`) until it has 60 s played (held time counts none; given up after
 15 min on the wall clock). Then the menu opens on the result: « 59.8 fps (5 %: 57.0) · p99 17.1 ms » (shown fps
 median, 5th percentile, frame time p99), what Send gives, **Send the result**, Back. Input is not blocked: the
 player is asked to leave the controls alone (the library check's pad script is not used here).

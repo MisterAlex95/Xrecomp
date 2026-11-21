@@ -181,10 +181,16 @@ final class AutoReports {
             Log.i(TAG, "reports: a game's run ended " + run.status + " (" + e.reason + ")");
             if (worst == null || run.failed() || !worst.failed())
                 worst = run;
+            try {   // its performance (GamePerf: the option on, not for a crash); never in the way of the rest
+                if (on)
+                    GamePerf.runEnded(c, e.pid, run.status, e.reason, start, e.time);
+                else
+                    GamePerf.discard(c, e.pid);
+            } catch (RuntimeException ex) {
+                Log.w(TAG, "reports: game performance not sent: " + ex);
+            }
             if (!on)
                 continue;
-            if (e == all.get(0))   // the newest end: its performance (GamePerf, not for a crash)
-                GamePerf.runEnded(c, e.pid, run.status, e.reason, start, e.time);
             write(new File(dir(c, "runs"), e.time + ".run"),
                   UUID.randomUUID().toString().replace("-", "") + "\t" + start + "\t" + e.time + "\t" + run.status);
             if (run.failed() && e == all.get(0)) {   // the log of the newest end only (LogProvider.dumpLastGame)
