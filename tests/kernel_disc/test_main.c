@@ -486,6 +486,32 @@ int main(int argc, char **argv)
             threads();
     }
 
+    /* An image whose path is longer than Windows' MAX_PATH (a long name in a deep Android folder): a file under it
+     * opens whole. Host paths were cut at 260 bytes, so D:\media\sub\leaf.txt became "<image>/media/sub" or less,
+     * a folder, and the open answered STATUS_ACCESS_DENIED. */
+    {
+        char dir[1400], link[1700], target[1200];
+        HANDLE h;
+        uint8_t buf[8];
+        XBOX_IO_STATUS_BLOCK ios = { 0 };
+        snprintf(dir, sizeof dir, "%s/%0200d", g_save, 0);
+        CHECK(mkdir(dir, 0755) == 0);
+        snprintf(link, sizeof link, "%s/Game With A Long Name (Europe) (En,Fr,Es,It) (Limited Edition) %080d.iso",
+                 dir, 0);
+        snprintf(target, sizeof target, "%s/game.iso", g_fx);
+        CHECK(strlen(link) > 300 && symlink(target, link) == 0);
+        xbox_path_init(link, g_save);
+        CHECK(xbox_disc_mounted());
+        CHECK(open_ro("D:\\media\\sub\\leaf.txt", XBOX_FILE_NON_DIRECTORY_FILE, &h) == 0);
+        if (h) {
+            CHECK(xbox_NtReadFile(h, NULL, NULL, NULL, &ios, buf, sizeof buf, NULL) == 0 && ios.Information == 3);
+            xbox_NtClose(h);
+        }
+        CHECK(open_ro("D:\\media\\nope_with_a_name.bin", 0, &h) == STATUS_OBJECT_NAME_NOT_FOUND);
+        unlink(link);
+        rmdir(dir);
+    }
+
     /* The boot's XBE load before xbox_path_init: an image met on the way is mounted. */
     xbox_disc_unmount();
     {
