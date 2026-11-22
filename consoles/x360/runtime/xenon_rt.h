@@ -136,13 +136,22 @@ typedef struct xe_rc_part {
  * address maps to mem + ea (pages the guest has not allocated fault in the host: x360_mem.c reports them). The one
  * exception is the 0xE0000000 view of physical memory on a host whose pages are larger than 4 KB: the view starts
  * 0x1000 into physical memory, which such a host cannot map, so its addresses sit view4k_skew higher (x360_mem.c). */
+/* XE_GIDX: a guest address as an index the compiler knows nothing of (an empty asm, no instruction), so that it never
+ * proves two accesses through two views of one physical byte apart (the lifted accesses below say more) */
+#if defined(__GNUC__)
+#define XE_GIDX(i) __asm__("" : "+r"(i))
+#else
+#define XE_GIDX(i) ((void)0)
+#endif
 static inline uint8_t *xe_ptr(xe_machine *m, uint32_t ea, uint32_t n)
 {
+    uint64_t i = ea;
     (void)n;
+    XE_GIDX(i);
 #if XE_VIEW4K_DYNAMIC
-    return m->mem + ea + (ea >= 0xE0000000u ? m->view4k_skew : 0u);
+    return m->mem + i + (i >= 0xE0000000u ? m->view4k_skew : 0u);
 #else
-    return m->mem + ea;
+    return m->mem + i;
 #endif
 }
 #else
@@ -227,6 +236,93 @@ static inline void xe_zero(xe_machine *m, uint32_t ea, uint32_t line)
     if (p)
         memset(p, 0, line);
 }
+
+/* ---- the lifted code's GPR loads and stores (RC_LBZ .. RC_ST64, below) ----
+ * In the runtime, xe_ptr never fails (mem + ea), so these leave out xe_lwz's NULL test: the compiler cannot prove
+ * mem != NULL, and kept a test and a branch around every access. The base (and the 4 KB view's skew) come from
+ * locals RC_PROLOGUE reads once per call (mb_, sk_): read through m_ at each access, they were loaded again after
+ * every guest store, which may write any memory (m_ too). The index goes through an empty asm (XE_GIDX), so the
+ * compiler knows nothing of its value: with one known base, two constant guest addresses would be two provably
+ * different host addresses, while the physical views (0xA0000000, 0xC0000000, 0xE0000000) put the same byte at
+ * several of them; it could then move a store past a load of the same byte through another view, or forward a
+ * store over it. Opaque indices keep every access in order against every other, as the base read at each access
+ * did. The asm is not volatile and touches no memory: no instruction, nothing else held back (two accesses of the
+ * same index value may share it: they are the same address). Zero-extended to 64 bits before the asm, so x86-64 does
+ * not extend it again after. ldr + rev (aarch64) / mov + bswap (x86-64) per access, the address [base, index].
+ * With clang, RC_PROLOGUE also says that guest memory is a separate allocation from the context and the machine
+ * (__builtin_assume_separate_storage): guest stores then no longer make it read guest registers, FPRs and m_'s
+ * fields again from memory. xe_ptr (the VMX accesses, the interpreter, the runtime) takes an opaque index too. */
+#if defined(XE_RUNTIME) && defined(__GNUC__)
+#define XE_GA_HOT static inline __attribute__((always_inline))
+#if XE_VIEW4K_DYNAMIC
+XE_GA_HOT uint8_t *xe_gp(uint8_t *mb, uint32_t sk, uint32_t ea)
+{
+    uint64_t i = ea;
+    XE_GIDX(i);
+    return mb + i + (i >= 0xE0000000u ? sk : 0u);
+}
+#else
+XE_GA_HOT uint8_t *xe_gp(uint8_t *mb, uint32_t sk, uint32_t ea)
+{
+    uint64_t i = ea;
+    (void)sk;
+    XE_GIDX(i);
+    return mb + i;
+}
+#endif
+
+XE_GA_HOT uint32_t xe_glbz(uint8_t *mb, uint32_t sk, uint32_t ea)
+{
+    return *xe_gp(mb, sk, ea);
+}
+
+XE_GA_HOT uint32_t xe_glhz(uint8_t *mb, uint32_t sk, uint32_t ea)
+{
+    uint16_t v;
+    memcpy(&v, xe_gp(mb, sk, ea), 2);
+    return __builtin_bswap16(v);
+}
+
+XE_GA_HOT uint32_t xe_glwz(uint8_t *mb, uint32_t sk, uint32_t ea)
+{
+    uint32_t v;
+    memcpy(&v, xe_gp(mb, sk, ea), 4);
+    return __builtin_bswap32(v);
+}
+
+XE_GA_HOT uint64_t xe_gld(uint8_t *mb, uint32_t sk, uint32_t ea)
+{
+    uint64_t v;
+    memcpy(&v, xe_gp(mb, sk, ea), 8);
+    return __builtin_bswap64(v);
+}
+
+XE_GA_HOT void xe_gstb(uint8_t *mb, uint32_t sk, uint32_t ea, uint32_t v)
+{
+    *xe_gp(mb, sk, ea) = (uint8_t)v;
+}
+
+XE_GA_HOT void xe_gsth(uint8_t *mb, uint32_t sk, uint32_t ea, uint32_t v)
+{
+    uint16_t x = __builtin_bswap16((uint16_t)v);
+    memcpy(xe_gp(mb, sk, ea), &x, 2);
+}
+
+XE_GA_HOT void xe_gstw(uint8_t *mb, uint32_t sk, uint32_t ea, uint32_t v)
+{
+    uint32_t x = __builtin_bswap32(v);
+    memcpy(xe_gp(mb, sk, ea), &x, 4);
+}
+
+XE_GA_HOT void xe_gstd(uint8_t *mb, uint32_t sk, uint32_t ea, uint64_t v)
+{
+    uint64_t x = __builtin_bswap64(v);
+    memcpy(xe_gp(mb, sk, ea), &x, 8);
+}
+#define XE_GA_LOCALS 1
+#else
+#define XE_GA_LOCALS 0
+#endif
 
 /* ---- reservations (XBA-283) ----
  * lwarx / ldarx note the address and the value read; stwcx. / stdcx. store only when the reservation is still held
@@ -420,9 +516,30 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
  * hands the host thread back to the scheduler at a resume point when it runs out (cooperative threads). While the
  * thread has MSR[EE] clear (mtmsrd: a short section with interrupts off, which the kernel never reschedules) it keeps
  * running, up to XE_EE_GRACE blocks past its slice. */
+#if XE_GA_LOCALS
+/* Guest memory (the 4 GB reservation mb_ points into) holds neither the context nor the machine (host heap or
+ * stack): clang may keep guest registers and m_'s fields in host registers across guest stores. */
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_assume_separate_storage)
+#define XE_GA_SEPARATE()                                                                                               \
+    __builtin_assume_separate_storage(mb_, c);                                                                         \
+    __builtin_assume_separate_storage(mb_, m_)
+#endif
+#endif
+#ifndef XE_GA_SEPARATE
+#define XE_GA_SEPARATE() ((void)0)
+#endif
+#define RC_PROLOGUE                                                                                                    \
+    xe_cpu *c = m_->cur;                                                                                               \
+    uint8_t *const mb_ = m_->mem;                                                                                      \
+    const uint32_t sk_ = XE_VIEW4K_DYNAMIC ? m_->view4k_skew : 0u;                                                     \
+    XE_GA_SEPARATE();                                                                                                  \
+    (void)c, (void)mb_, (void)sk_
+#else
 #define RC_PROLOGUE                                                                                                    \
     xe_cpu *c = m_->cur;                                                                                               \
     (void)c
+#endif
 #define XE_EE_GRACE 65536 /* blocks a thread with MSR[EE] clear may run past its slice before it is preempted anyway */
 #define RC_BLOCK(pc_, n)                                                                                               \
     do {                                                                                                               \
@@ -542,6 +659,16 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 #define R(n) c->gpr[n]
 #define F0(n) c->fpr[n]
 #define V(n) c->vr[n]
+#if XE_GA_LOCALS
+#define RC_LBZ(ea) xe_glbz(mb_, sk_, (ea))
+#define RC_LHZ(ea) xe_glhz(mb_, sk_, (ea))
+#define RC_LWZ(ea) xe_glwz(mb_, sk_, (ea))
+#define RC_LD64(ea) xe_gld(mb_, sk_, (ea))
+#define RC_STB(ea, v) xe_gstb(mb_, sk_, (ea), (v))
+#define RC_STH(ea, v) xe_gsth(mb_, sk_, (ea), (v))
+#define RC_STW(ea, v) xe_gstw(mb_, sk_, (ea), (v))
+#define RC_ST64(ea, v) xe_gstd(mb_, sk_, (ea), (v))
+#else
 #define RC_LBZ(ea) xe_lbz(m_, (ea))
 #define RC_LHZ(ea) xe_lhz(m_, (ea))
 #define RC_LWZ(ea) xe_lwz(m_, (ea))
@@ -550,6 +677,7 @@ XV_HOT void xv_stve(xe_machine *m, uint32_t ea, xe_v128 v, uint32_t size)
 #define RC_STH(ea, v) xe_sth(m_, (ea), (v))
 #define RC_STW(ea, v) xe_stw(m_, (ea), (v))
 #define RC_ST64(ea, v) xe_std(m_, (ea), (v))
+#endif
 /* sync / lwsync / eieio: a host fence only when another host thread shares guest memory (xe_machine.rc_fence) */
 #define RC_SYNC()                                                                                                     \
     do {                                                                                                               \
