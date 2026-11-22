@@ -153,6 +153,28 @@ public class LauncherPrepareTest {
     }
 
     @Test
+    public void queuedBehindAnotherTitleStillWaits() throws Exception {
+        withToolchain();
+        status(PrepareProtocol.RUNNING, PrepareProtocol.STEP_INSTALL, 0, 0, -1, "", "");
+        LauncherActivity a = launch(null);
+        assertEquals(LauncherActivity.Screen.PREPARE, a.screenForTest());
+        // The service put it behind another title's Prepare: still waiting, not « Stopped » with Retry.
+        ActivityManager.RunningAppProcessInfo p = new ActivityManager.RunningAppProcessInfo();
+        p.processName = app.getPackageName() + ":prepare";
+        p.pid = 4242;
+        shadowOf(app.getSystemService(ActivityManager.class)).setProcesses(java.util.Collections.singletonList(p));
+        status(PrepareProtocol.QUEUED, PrepareProtocol.STEP_INSTALL, 0, 0, -1, "", "");
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(600));
+        assertEquals(LauncherActivity.Screen.PREPARE, a.screenForTest());
+        assertEquals(app.getString(R.string.CHIP_QUEUED), a.prepStatusForTest());
+        shot(a, "2c-queued");
+        // Its process gone while it waited: interrupted, as prep() says.
+        shadowOf(app.getSystemService(ActivityManager.class)).setProcesses(java.util.Collections.emptyList());
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(600));
+        assertEquals(app.getString(R.string.PREPARE_CANCELLED_HEAD), a.prepStatusForTest());
+    }
+
+    @Test
     public void installPhase() throws Exception {
         withToolchain();
         status(PrepareProtocol.RUNNING, PrepareProtocol.STEP_INSTALL, 0, 63, -1, "sysroot", "");
