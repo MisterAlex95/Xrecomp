@@ -1466,6 +1466,35 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   its machine; this runtime runs older packs as before (with the fence). The headers change, so « Prepare again »
   brings the gain.
 
+- **GPR loads and stores at their floor (CPU night 3).** Lifted code's `lwz` / `stw` / `ld` / `std` / byte and
+  half-word accesses (`RC_LWZ` .. `RC_ST64`, `consoles/x360/runtime/xenon_rt.h`) went through `xe_lwz` and friends,
+  whose NULL test the runtime never needs (`xe_ptr` is `mem + ea`) but the compiler could not drop: a test, a branch
+  and a zero path around every access, and `m_->mem` read again after every guest store (a store may write any
+  memory). In packs they now go through `always_inline` helpers without the test, the base and the 4 KB view's skew
+  in locals that `RC_PROLOGUE` reads once per call. A base the compiler knows is not enough on its own: two constant
+  guest addresses would then be provably different host addresses, while the physical views (`0xA0000000`,
+  `0xC0000000`, `0xE0000000`) put one byte at several of them, and both clang and gcc then forward a load over a
+  store made through another view, or drop a store as dead. The index therefore goes through an empty asm (not
+  volatile, no memory operand: no instruction, nothing else held back), which hides its value and keeps every access
+  in order against every other, as the base read at each access did (`xe_ptr`, which the vector accesses, the
+  interpreter and the runtime use, takes it too). With clang, `RC_PROLOGUE` also says that guest memory is a separate
+  allocation from the context and the machine (`__builtin_assume_separate_storage`: both live on the host heap or
+  stack), so a guest store no longer makes the code read every guest register, FPR and `m_` field again; GCC has no
+  such builtin and builds without it. ctest `x360_mirror_o1` / `_o2` (and `run_hello_arm64.sh`) maps one page at two
+  views and reads and writes through both in lifted vocabulary (GPR and vector accesses): green with gcc and NDK clang
+  (x86-64, aarch64) at -O0..-O2, both view modes; without the opaque index it fails at -O1 and -O2 on all of them.
+  On the device's compiler (NDK clang -O1, aarch64, Prepare's flags), a 32-bit load after a store is `ldr` (the
+  register, now often already in a host register), `add`, `ldr`, `rev`, `str` instead of 8 instructions with the base
+  load, `cbz` and a taken `b`; a store is 5 instead of 7; with the dynamic view (16 KB pages) a load is 9 instead of
+  13 with three branches. Warhammer's three biggest lifted files: 6.3-6.5 % fewer instructions with the static view,
+  13.0-13.7 % with the dynamic one, and compile 4.5 % (static) and 16.6 % (dynamic) faster (NDK clang, 3 runs each,
+  alternating). Headless x86-64, 20 billion instructions from two chapter states, 3 alternating runs each (host
+  samples in the pack, the pack built by NDK clang for x86-64 Linux with Prepare's flags): -5.9 % and -9.6 %; built
+  by gcc -O1 (no separate-storage hint): -3 to -4 %. Stats, logs and save states byte for byte after 20 billion
+  instructions from boot and from the two states, with gcc- and clang-built packs. The interpreter, the runtime and
+  the tests' harness keep `xe_lwz`. The headers change, so « Prepare again » brings the gain; no feature bit (the
+  pack reads nothing new from the machine).
+
 Tests: `tools/prepare/test_x360_prepare.py` (with `$X360_RUN`, the pack is also run by x360_run), the app's
 `X360KeyTest` and `ConsoleTest`; ctest `x360_interp` / `x360_interp_c` (XBA-283: the interpreter and the one-round
 loop on the test titles) and `x360_missed`.
