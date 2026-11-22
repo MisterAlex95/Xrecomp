@@ -86,11 +86,19 @@ __attribute__((noinline)) static void t_widths(xe_machine *m_)
 __attribute__((noinline)) static void t_vmx(xe_machine *m_)
 {
     RC_PROLOGUE;
-    V(1) = xv_load(m_, VIEW_A + 32);
-    xv_store(m_, VIEW_C + 32, V(2));
-    V(3) = xv_load(m_, VIEW_A + 32);
+    xe_v128 s = V(2), t = V(5);
+    xe_v128 a = xv_load(m_, VIEW_A + 32);
+    xv_store(m_, VIEW_C + 32, s);
+    xe_v128 b = xv_load(m_, VIEW_A + 32);
     RC_STW(VIEW_C + 48, 0x5A5A5A5Au);
-    V(4) = xv_load(m_, VIEW_A + 48);
+    xe_v128 d = xv_load(m_, VIEW_A + 48);
+    xv_store(m_, VIEW_A + 64, s);
+    xe_v128 e = xv_load(m_, VIEW_C + 64);
+    xv_store(m_, VIEW_A + 64, t);
+    V(1) = a;
+    V(3) = b;
+    V(4) = d;
+    V(6) = e;
 }
 
 int main(void)
@@ -150,10 +158,13 @@ int main(void)
         mem[VIEW_A + 48 + i] = 0;
     }
     c->vr[2] = xv_splat32(0xC3C3C3C3u);
+    c->vr[5] = xv_splat32(0x3C3C3C3Cu);
     t_vmx(&m);
     check("vmx first load", xv_to_bytes_word(c->vr[1]), 0x00010203u);
     check("vmx load after the other view's store", xv_to_bytes_word(c->vr[3]), 0xC3C3C3C3u);
     check("vmx load after a GPR store", xv_to_bytes_word(c->vr[4]), 0x5A5A5A5Au);
+    check("vmx load between two stores", xv_to_bytes_word(c->vr[6]), 0xC3C3C3C3u);
+    check("vmx final", xe_glwz(mem, 0, VIEW_C + 64), 0x3C3C3C3Cu);
 
     if (fails)
         return 1;

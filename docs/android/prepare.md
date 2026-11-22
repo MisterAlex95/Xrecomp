@@ -1491,7 +1491,9 @@ interpreter (XBA-283) only runs the code a pack does not hold.
   alternating). Headless x86-64, 20 billion instructions from two chapter states, 3 alternating runs each (host
   samples in the pack, the pack built by NDK clang for x86-64 Linux with Prepare's flags): -5.9 % and -9.6 %; built
   by gcc -O1 (no separate-storage hint): -3 to -4 %. Stats, logs and save states byte for byte after 20 billion
-  instructions from boot and from the two states, with gcc- and clang-built packs. The interpreter, the runtime and
+  instructions from boot and from the two states, with gcc- and clang-built packs, the dynamic view on 16 KB pages
+  (`X360_HOST_PAGE=16384`) included; an aarch64 pack built by NDK clang, run under qemu-aarch64 for 20 billion
+  instructions from boot: the same stats and save state as before, and as x86-64. The interpreter, the runtime and
   the tests' harness keep `xe_lwz`. The headers change, so « Prepare again » brings the gain; no feature bit (the
   pack reads nothing new from the machine).
 
