@@ -1175,24 +1175,33 @@ static BOOL translate_hops(const char* xbox_path, xbox_host_char* host_path_buf,
 translate:
     {
         char remainder_posix[MAX_PATH];
+        int len;
         snprintf(remainder_posix, sizeof(remainder_posix), "%s", remainder);
 
         /* Xbox paths use backslashes -> POSIX slashes. */
         for (char* p = remainder_posix; *p; p++)
             if (*p == '\\') *p = '/';
 
-        if (sub_dir) {
-            snprintf(host_path_buf, buf_size, "%s%s/%s",
-                     base_dir, sub_dir, remainder_posix);
+        /* A host path that does not fit is refused, never cut: a cut one
+         * names a parent folder or another file (a long disc image name
+         * turned "<image>/base/textures/saveimage.xbx" into the textures
+         * folder, and the title said its disc was dirty). */
+        len = sub_dir ? snprintf(host_path_buf, buf_size, "%s%s/%s", base_dir, sub_dir, remainder_posix)
+                      : snprintf(host_path_buf, buf_size, "%s/%s", base_dir, remainder_posix);
+        if (len < 0 || (DWORD)len >= buf_size || strlen(remainder) >= sizeof(remainder_posix)) {
+            xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "Host path too long (%d bytes, %u at most): %s",
+                     len, (unsigned)buf_size - 1, xbox_path);
+            host_path_buf[0] = '\0';
+            return FALSE;
+        }
 
+        if (sub_dir) {
             /* Ensure the save directory tree exists. */
             char dir_path[MAX_PATH];
             snprintf(dir_path, sizeof(dir_path), "%s%s", base_dir, sub_dir);
             mkdir_p(dir_path);
             if (utility)
                 utility_note(dir_path);
-        } else {
-            snprintf(host_path_buf, buf_size, "%s/%s", base_dir, remainder_posix);
         }
 
         {

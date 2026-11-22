@@ -212,10 +212,12 @@ final class AutoReports {
     /**
      * A failed Prepare the launcher shows (its screen rebuilds on every poll: seen once per title and status time).
      * True when it is news; with the option on (and the failure after it was turned on) its report goes to outbox/.
+     * Only a failed status: the Preparing screen also stops for one queued behind another title, which has no code,
+     * no message and no log yet, and was sent as « PrepareFailed: ? ».
      */
     static synchronized boolean prepareFailed(Context c, String tid, String title, PrepareProtocol.Status s,
                                               File log) {
-        if (tid == null || s == null)
+        if (tid == null || s == null || !PrepareProtocol.FAILED.equals(s.state))
             return false;
         String id = tid + "@" + s.updatedAt;
         List<String> seen = new ArrayList<>(Arrays.asList(String.valueOf(read(f(c, "prepare-seen"))).split("\n")));

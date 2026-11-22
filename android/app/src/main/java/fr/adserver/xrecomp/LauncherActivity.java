@@ -5562,7 +5562,7 @@ public class LauncherActivity extends Activity {
                                             getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
                                             true, this::startPrepare);
             pill(buttons, Icon.COPY, getString(R.string.SHARE_LOG), false, this::shareLog);
-            if (!cancelled && CrashReport.available(this)) {
+            if (PrepareProtocol.FAILED.equals(s.state) && CrashReport.available(this)) {   // not a queued one
                 pill(buttons, null, getString(R.string.REPORT_BUTTON), false, this::reportPrepare);
                 autoReportPrepare();
             }

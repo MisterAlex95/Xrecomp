@@ -280,8 +280,12 @@ typedef struct _SIZE  { LONG cx, cy; }                   SIZE,  *PSIZE,  *LPSIZE
 #ifndef NULL
 #define NULL ((void *)0)
 #endif
+/* The size of the runtime's host path buffers. Not Windows' 260: a disc image
+ * with a long name in a deep Android folder made "<image>/base/textures/x.xbx"
+ * longer than that, snprintf cut it to "<image>/base/textures", and the title
+ * opened the folder (STATUS_ACCESS_DENIED) instead of the file. PATH_MAX. */
 #ifndef MAX_PATH
-#define MAX_PATH 260
+#define MAX_PATH 4096
 #endif
 #ifndef INVALID_HANDLE_VALUE
 #define INVALID_HANDLE_VALUE ((HANDLE)(LONG_PTR)-1)

@@ -333,6 +333,19 @@ public class AutoReportsTest {
     }
 
     @Test
+    public void aQueuedOrDonePrepareIsNotAFailure() {
+        Telemetry.setAuto(c, true);
+        for (String state : new String[] { PrepareProtocol.QUEUED, PrepareProtocol.DONE, PrepareProtocol.RUNNING,
+                                           PrepareProtocol.CANCELLED }) {
+            PrepareProtocol.Status s = new PrepareProtocol.Status();
+            s.state = state;
+            s.updatedAt = now() + 1000;
+            assertFalse(state, AutoReports.prepareFailed(c, "4D530004", "Halo", s, null));
+        }
+        assertEquals(0, AutoReports.pending(c));
+    }
+
+    @Test
     public void theJobWaitsForWifiUnlessMobileDataIsAllowed() {
         Telemetry.setAuto(c, true);
         long t = now() + 1000;
