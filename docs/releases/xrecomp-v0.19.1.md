@@ -2,6 +2,27 @@
 
 <!-- Highlights: what changed, what works, known problems. Written by hand, kept across updates. -->
 
+Fixes from the first problem reports sent from the app, plus the performance work since 0.19.0.
+
+- **Long disc image paths** (Android, macOS, Linux): host paths were capped at 260 bytes and cut without a word. An
+  ISO with a long name in a deep folder made `<image>/base/textures/saveimage.xbx` the `textures` folder, so files
+  under the disc did not open; DOOM 3 lost most of `base/` and showed « dirty disc » after its first save. Paths now
+  go up to 4096 bytes, and one that still does not fit fails with a warning instead of naming another file.
+- **A Prepare queued behind another title** shows its place in the queue on the Preparing screen. It showed
+  « Stopped » with Retry, and its automatic report went out as « PrepareFailed: ? ». Only a failed Prepare is
+  reported now.
+- **Benchmark** in the game menu: 60 s from the newest save state (or from boot); its result is sent only on Send.
+  Game runs can send a performance summary (opt-in, as the crash reports).
+- **Prepare** compiles the lifter's finished files while it still runs, and the object cache keeps its keys across
+  an app update.
+- **Performance**: GameCube loads, stores and the GX pipe in line (gxtex −15 % x86 / −12 % arm64); N64 RSP threaded
+  dispatch, wait loops skipped, SSE2 vector unit; Xbox 360 guest loads and stores without the NULL test, VMX
+  helpers on NEON / SSE2, depth and stencil resolves packed on the GPU.
+- **Network library** takes `.torrent` files up to 64 MB and says why one is refused.
+
+Known: the disc path and queue fixes are not checked on a device yet. Before this release, shortening the image's
+name or folder works around the path one.
+
 ## Changes
 
 <!-- release:changes start (generated from the commits; rewritten on every push to main) -->
