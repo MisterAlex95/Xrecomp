@@ -771,6 +771,11 @@ public class LauncherActivity extends Activity {
         return homePrep;
     }
 
+    /** Tests: the Preparing screen's status line. */
+    String prepStatusForTest() {
+        return prepStatus == null ? null : prepStatus.label();
+    }
+
     /** Tests: a runWorker task has not finished. */
     boolean workerBusyForTest() {
         return workerBusy;
@@ -4496,6 +4501,14 @@ public class LauncherActivity extends Activity {
                && (System.currentTimeMillis() - s.updatedAt < PREPARE_FRESH_MS || prepareProcessAlive());
     }
 
+    /**
+     * The Preparing screen's « still going »: running, or queued behind another title's Prepare while the :prepare
+     * process is there. A queued title showed « Stopped » with Retry (and was reported as a failed Prepare).
+     */
+    private boolean prepGoing(PrepareProtocol.Status s) {
+        return s == null || statusAlive(s) || (s.queued() && prepareProcessAlive());
+    }
+
     private Prep prep() {
         if (state() != State.READY || !Toolchain.available(this))
             return Prep.OFF;
@@ -5546,7 +5559,7 @@ public class LauncherActivity extends Activity {
         info.addView(prepMsg, ml);
 
         PrepareProtocol.Status s = readPrepStatus();
-        boolean running = s == null || statusAlive(s);
+        boolean running = prepGoing(s);
         if (running) {
             prepMsg.setVisibility(View.GONE);
             yAction = this::leavePrepare;
@@ -5556,7 +5569,8 @@ public class LauncherActivity extends Activity {
         } else {
             progress.setVisibility(View.GONE);
             prepCaption.setVisibility(View.GONE);
-            boolean cancelled = PrepareProtocol.CANCELLED.equals(s.state) || PrepareProtocol.RUNNING.equals(s.state);
+            boolean cancelled = PrepareProtocol.CANCELLED.equals(s.state) || PrepareProtocol.RUNNING.equals(s.state)
+                                || s.queued();   // its process died while it waited: Resume
             LinearLayout buttons = heroButtons(info);
             Widgets.PillButton retry = pill(buttons, Icon.RESET,
                                             getString(cancelled ? R.string.PREPARE_RESUME : R.string.PREPARE_RETRY),
@@ -5590,7 +5604,7 @@ public class LauncherActivity extends Activity {
         prepShown = s;
         if (prepStatus == null)
             return;
-        boolean running = s == null || statusAlive(s);
+        boolean running = prepGoing(s);
         boolean failed = s != null && !running && PrepareProtocol.FAILED.equals(s.state);
         boolean stopped = s != null && !running && !failed;
         if (failed) {
@@ -5607,8 +5621,13 @@ public class LauncherActivity extends Activity {
             prepMsg.setText(why);
         } else if (stopped) {
             prepStatus.set(getString(R.string.PREPARE_CANCELLED_HEAD), Theme.WARN);
-            prepMsg.setText(getString(PrepareProtocol.RUNNING.equals(s.state) ? R.string.PREPARE_INTERRUPTED
-                                                                              : R.string.PREPARE_CANCELLED_TEXT));
+            prepMsg.setText(getString(PrepareProtocol.RUNNING.equals(s.state) || s.queued()
+                                      ? R.string.PREPARE_INTERRUPTED : R.string.PREPARE_CANCELLED_TEXT));
+        } else if (s != null && s.queued()) {   // waiting behind another title: its place, no bar yet
+            prepStatus.set(queuedLabel(prepTid()), Theme.ACCENT);
+            prepMeter.set(0, Theme.ACCENT);
+            prepPct.setText("");
+            prepEta.setText("");
         } else {
             String step = s == null ? getString(R.string.PREPARE_STARTING) : PrepareService.stepName(this, s.id);
             prepStatus.set(s != null && s.step > 0 ? getString(R.string.PREPARE_STATUS, s.step, s.n, step)
@@ -5943,8 +5962,8 @@ public class LauncherActivity extends Activity {
             directPoll();
         } else if (screen == Screen.PREPARE) {
             PrepareProtocol.Status s = readPrepStatus();
-            boolean wasRunning = prepShown == null || statusAlive(prepShown);
-            boolean isRunning = s == null || statusAlive(s);
+            boolean wasRunning = prepGoing(prepShown);
+            boolean isRunning = prepGoing(s);
             if (s != null && PrepareProtocol.DONE.equals(s.state)) {
                 onPrepareDone();
                 return;
